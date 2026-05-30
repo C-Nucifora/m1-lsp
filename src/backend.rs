@@ -4,7 +4,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use crate::analysis::{analyze, LintProvider, NoLint};
+use crate::analysis::{analyze, LintProvider, NoLint, NoTypes, TypeProvider};
 use crate::document::Document;
 use crate::format::{format_edits, Formatter, NoFormat};
 use crate::line_index::PositionEncoding;
@@ -14,6 +14,7 @@ pub struct Backend {
     docs: DashMap<Url, Document>,
     encoding: std::sync::RwLock<PositionEncoding>,
     lint: Box<dyn LintProvider>,
+    types: Box<dyn TypeProvider>,
     formatter: Box<dyn Formatter>,
 }
 
@@ -24,6 +25,7 @@ impl Backend {
             docs: DashMap::new(),
             encoding: std::sync::RwLock::new(PositionEncoding::Utf16),
             lint: Box::new(NoLint),
+            types: Box::new(NoTypes),
             formatter: Box::new(NoFormat),
         }
     }
@@ -39,6 +41,7 @@ impl Backend {
             docs: DashMap::new(),
             encoding: std::sync::RwLock::new(PositionEncoding::Utf16),
             lint,
+            types: Box::new(NoTypes),
             formatter,
         }
     }
@@ -49,7 +52,14 @@ impl Backend {
 
     async fn publish(&self, uri: Url) {
         if let Some(doc) = self.docs.get(&uri) {
-            let diags = analyze(&doc.text, &doc.line_index, self.enc(), self.lint.as_ref());
+            let diags = analyze(
+                &uri,
+                &doc.text,
+                &doc.line_index,
+                self.enc(),
+                self.lint.as_ref(),
+                self.types.as_ref(),
+            );
             let version = Some(doc.version);
             drop(doc);
             self.client.publish_diagnostics(uri, diags, version).await;
