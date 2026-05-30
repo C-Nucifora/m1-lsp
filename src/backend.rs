@@ -316,7 +316,9 @@ impl LanguageServer for Backend {
             return;
         }
         // Reload from the known .m1prj path if any, else rediscover from a changed file's dir.
-        let reloaded = self.store.with_project(|p| p.map(|lp| lp.m1prj_path.clone()));
+        let reloaded = self
+            .store
+            .with_project(|p| p.map(|lp| lp.m1prj_path.clone()));
         let result = match reloaded {
             Some(path) => self.store.load_from(&path),
             None => {
