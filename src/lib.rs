@@ -6,3 +6,4 @@ pub mod convert;
 pub mod document;
 pub mod format;
 pub mod line_index;
+pub mod lint_backend;

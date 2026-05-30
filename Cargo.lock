@@ -368,11 +368,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "m1-lint"
+version = "0.1.0"
+dependencies = [
+ "m1-core",
+]
+
+[[package]]
 name = "m1-lsp"
 version = "0.1.0"
 dependencies = [
  "dashmap",
  "m1-core",
+ "m1-lint",
  "serde_json",
  "tokio",
  "tower-lsp",
