@@ -9,7 +9,39 @@ Two independent layers. You can use either or both.
 2. Load `m1.lua` from your config: `require("m1")` (after putting `m1.lua` on
    your `runtimepath`), or paste its contents into `init.lua`.
 3. Open a `.m1scr` file. Diagnostics appear as you type; format with
-   `:lua vim.lsp.buf.format()` or your usual mapping.
+   `:lua vim.lsp.buf.format()` or your usual mapping. Diagnostics come from
+   three sources: `m1-core` (syntax), `m1-lint` (style rules), and
+   `m1-typecheck` (type rules `T001`-`T011`). When a project is loaded, the
+   type-aware float-equality rule `T002` supersedes the `m1-lint` `L006`
+   heuristic (no double-reporting).
+
+### v2 features (symbol model)
+
+Powered by `m1-typecheck`'s project symbol model. The `m1.lua` snippet wires
+buffer-local keymaps on `LspAttach`:
+
+- **Hover** — `K`: shows a symbol's kind / value type / unit, or a local's
+  inferred (Hungarian) type, or "built-in / opaque".
+- **Goto-definition** — `gd`: jumps to a function's/method's defining `.m1scr`
+  file (the only symbols that carry a backing file). Channels/parameters/etc.
+  are declared in `Project.m1prj` with no source span, so they have no jump
+  target.
+- **Document symbols** — `gO`: a flat outline of the file's locals and
+  top-level assignment targets.
+- **Completion** — project symbols (both their absolute path and the
+  group-relative tail for the current file's group) plus in-scope locals. Use
+  the Nvim 0.11+ built-in completion (enabled by the snippet) or
+  `<C-x><C-o>` via `omnifunc`.
+
+**`root_dir` matters now.** The project model (and therefore `T001`, hover,
+goto, and project completions) only loads when the server's `root_dir` is at or
+above the directory containing `Project.m1prj`. The step-2 `root_dir` rule
+already does this. With no project found, the server runs in project-less mode:
+local-only hover/completion and the non-`T001` type rules still work.
+
+**Auto-reload.** Editing `Project.m1prj` or any `*.m1cfg` triggers a
+server-side reload via watched files; the project model and all diagnostics
+refresh without restarting the editor.
 
 ## 2. Syntax highlighting / indent / fold (tree-sitter-m1)
 

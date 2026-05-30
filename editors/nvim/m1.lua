@@ -38,3 +38,29 @@ vim.api.nvim_create_autocmd("FileType", {
 --   pattern = "*.m1scr",
 --   callback = function() vim.lsp.buf.format({ async = false }) end,
 -- })
+
+-- 5. Buffer-local keymaps + completion when m1-lsp attaches.
+--
+-- The server loads the project model (channels/parameters/functions/...) from
+-- the `Project.m1prj` at/above `root_dir`, so hover/goto/completion and the T001
+-- "unresolved reference" diagnostic only light up when `root_dir` points at or
+-- above the directory containing `Project.m1prj` (step 2 already does this).
+-- Editing `Project.m1prj` or any `*.m1cfg` triggers a server-side reload via
+-- watched files, so the project model and T001/hover/goto refresh without
+-- restarting the editor.
+vim.api.nvim_create_autocmd("LspAttach", {
+  callback = function(args)
+    local client = vim.lsp.get_client_by_id(args.data.client_id)
+    if not client or client.name ~= "m1-lsp" then
+      return
+    end
+    local opts = { buffer = args.buf, silent = true }
+    vim.keymap.set("n", "K", vim.lsp.buf.hover, opts)
+    vim.keymap.set("n", "gd", vim.lsp.buf.definition, opts)
+    vim.keymap.set("n", "gO", vim.lsp.buf.document_symbol, opts)
+    -- Completion (Nvim 0.11+ built-in; otherwise use <C-x><C-o> via omnifunc).
+    if vim.lsp.completion and vim.lsp.completion.enable then
+      vim.lsp.completion.enable(true, client.id, args.buf, { autotrigger = false })
+    end
+  end,
+})

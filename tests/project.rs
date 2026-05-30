@@ -15,5 +15,7 @@ fn type_diagnostics_published_via_analyze() {
     let li = LineIndex::new(src);
     let uri = Url::parse("file:///x.m1scr").unwrap();
     let diags = analyze(&uri, src, &li, PositionEncoding::Utf16, &NoLint, &types);
-    assert!(diags.iter().any(|d| d.source.as_deref() == Some("m1-typecheck")));
+    assert!(diags
+        .iter()
+        .any(|d| d.source.as_deref() == Some("m1-typecheck")));
 }

@@ -127,17 +127,39 @@ mod tests {
     fn l006_suppressed_when_project_loaded() {
         let src = "x = 1.0 == y;\n";
         let li = LineIndex::new(src);
-        let diags = analyze(&uri(), src, &li, PositionEncoding::Utf16, &L006Only, &ProjLoaded);
-        assert!(!diags.iter().any(|d| is_l006(d)), "L006 must be dropped");
-        assert!(diags.iter().any(|d| d.message == "use eq"), "L004 must survive");
-        assert!(diags.iter().any(|d| d.source.as_deref() == Some("m1-typecheck")));
+        let diags = analyze(
+            &uri(),
+            src,
+            &li,
+            PositionEncoding::Utf16,
+            &L006Only,
+            &ProjLoaded,
+        );
+        assert!(!diags.iter().any(is_l006), "L006 must be dropped");
+        assert!(
+            diags.iter().any(|d| d.message == "use eq"),
+            "L004 must survive"
+        );
+        assert!(diags
+            .iter()
+            .any(|d| d.source.as_deref() == Some("m1-typecheck")));
     }
 
     #[test]
     fn l006_kept_when_no_project() {
         let src = "x = 1.0 == y;\n";
         let li = LineIndex::new(src);
-        let diags = analyze(&uri(), src, &li, PositionEncoding::Utf16, &L006Only, &NoTypes);
-        assert!(diags.iter().any(|d| is_l006(d)), "L006 must survive without a project");
+        let diags = analyze(
+            &uri(),
+            src,
+            &li,
+            PositionEncoding::Utf16,
+            &L006Only,
+            &NoTypes,
+        );
+        assert!(
+            diags.iter().any(is_l006),
+            "L006 must survive without a project"
+        );
     }
 }
