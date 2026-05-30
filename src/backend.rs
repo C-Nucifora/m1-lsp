@@ -1,20 +1,26 @@
 //! The LSP backend: document lifecycle, diagnostics publishing, formatting.
+use std::sync::Arc;
+
 use dashmap::DashMap;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use crate::analysis::{analyze, LintProvider, NoLint};
+use crate::analysis::{analyze, LintProvider, NoLint, NoTypes, TypeProvider};
 use crate::document::Document;
+use crate::features::{completion, document_symbols, goto, hover};
 use crate::format::{format_edits, Formatter, NoFormat};
 use crate::line_index::PositionEncoding;
+use crate::project_store::ProjectStore;
 
 pub struct Backend {
     client: Client,
     docs: DashMap<Url, Document>,
     encoding: std::sync::RwLock<PositionEncoding>,
     lint: Box<dyn LintProvider>,
+    types: Box<dyn TypeProvider>,
     formatter: Box<dyn Formatter>,
+    store: Arc<ProjectStore>,
 }
 
 impl Backend {
@@ -24,11 +30,14 @@ impl Backend {
             docs: DashMap::new(),
             encoding: std::sync::RwLock::new(PositionEncoding::Utf16),
             lint: Box::new(NoLint),
+            types: Box::new(NoTypes),
             formatter: Box::new(NoFormat),
+            store: Arc::new(ProjectStore::new()),
         }
     }
 
-    /// Constructor used in Tasks 7-8 / tests to inject real backends.
+    /// v1 constructor (lint + formatter); defaults the type provider to NoTypes
+    /// and a fresh project store. Kept for back-compat.
     pub fn with_backends(
         client: Client,
         lint: Box<dyn LintProvider>,
@@ -39,7 +48,30 @@ impl Backend {
             docs: DashMap::new(),
             encoding: std::sync::RwLock::new(PositionEncoding::Utf16),
             lint,
+            types: Box::new(NoTypes),
             formatter,
+            store: Arc::new(ProjectStore::new()),
+        }
+    }
+
+    /// v2 constructor: inject lint, type provider, formatter, and a shared
+    /// project store (the same `Arc` the type provider holds, so reloads are
+    /// visible to both diagnostics and the read features).
+    pub fn with_backends_v2(
+        client: Client,
+        lint: Box<dyn LintProvider>,
+        types: Box<dyn TypeProvider>,
+        formatter: Box<dyn Formatter>,
+        store: Arc<ProjectStore>,
+    ) -> Self {
+        Self {
+            client,
+            docs: DashMap::new(),
+            encoding: std::sync::RwLock::new(PositionEncoding::Utf16),
+            lint,
+            types,
+            formatter,
+            store,
         }
     }
 
@@ -49,7 +81,14 @@ impl Backend {
 
     async fn publish(&self, uri: Url) {
         if let Some(doc) = self.docs.get(&uri) {
-            let diags = analyze(&doc.text, &doc.line_index, self.enc(), self.lint.as_ref());
+            let diags = analyze(
+                &uri,
+                &doc.text,
+                &doc.line_index,
+                self.enc(),
+                self.lint.as_ref(),
+                self.types.as_ref(),
+            );
             let version = Some(doc.version);
             drop(doc);
             self.client.publish_diagnostics(uri, diags, version).await;
@@ -75,6 +114,33 @@ impl LanguageServer for Backend {
             .unwrap_or((PositionEncoding::Utf16, PositionEncodingKind::UTF16));
         *self.encoding.write().unwrap() = chosen.0;
 
+        // Discover the project from root_uri (fall back to first workspace folder).
+        let root = params
+            .root_uri
+            .as_ref()
+            .and_then(|u| u.to_file_path().ok())
+            .or_else(|| {
+                params
+                    .workspace_folders
+                    .as_ref()
+                    .and_then(|fs| fs.first())
+                    .and_then(|f| f.uri.to_file_path().ok())
+            });
+        if let Some(root) = root {
+            match self.store.discover_and_load(&root) {
+                Ok(true) => { /* loaded */ }
+                Ok(false) => { /* project-less mode */ }
+                Err(e) => {
+                    self.client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!("m1-lsp: project load failed: {e}"),
+                        )
+                        .await;
+                }
+            }
+        }
+
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
                 name: "m1-lsp".into(),
@@ -86,14 +152,37 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                completion_provider: Some(CompletionOptions::default()),
                 ..Default::default()
             },
         })
     }
 
     async fn initialized(&self, _: InitializedParams) {
+        let watchers = vec![
+            FileSystemWatcher {
+                glob_pattern: GlobPattern::String("**/*.m1prj".into()),
+                kind: None,
+            },
+            FileSystemWatcher {
+                glob_pattern: GlobPattern::String("**/*.m1cfg".into()),
+                kind: None,
+            },
+        ];
+        let reg = Registration {
+            id: "m1-lsp-watch-project".into(),
+            method: "workspace/didChangeWatchedFiles".into(),
+            register_options: Some(
+                serde_json::to_value(DidChangeWatchedFilesRegistrationOptions { watchers })
+                    .unwrap(),
+            ),
+        };
+        let _ = self.client.register_capability(vec![reg]).await;
         self.client
-            .log_message(MessageType::INFO, "m1-lsp ready")
+            .log_message(MessageType::INFO, "m1-lsp ready (v2)")
             .await;
     }
 
@@ -132,6 +221,129 @@ impl LanguageServer for Backend {
             .docs
             .get(&uri)
             .and_then(|doc| format_edits(&doc, self.enc(), self.formatter.as_ref())))
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let tdp = params.text_document_position_params;
+        let uri = tdp.text_document.uri;
+        let Some(doc) = self.docs.get(&uri) else {
+            return Ok(None);
+        };
+        let byte = doc.line_index.offset(tdp.position, &doc.text, self.enc());
+        let cst = m1_core::parse(&doc.text);
+        let file_name = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let li = &doc.line_index;
+        let enc = self.enc();
+        Ok(self.store.with_project(|p| {
+            hover::hover(
+                cst.root(),
+                byte,
+                p.map(|lp| &lp.project),
+                file_name.as_deref(),
+                li,
+                enc,
+            )
+        }))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let tdp = params.text_document_position_params;
+        let uri = tdp.text_document.uri;
+        let Some(doc) = self.docs.get(&uri) else {
+            return Ok(None);
+        };
+        let byte = doc.line_index.offset(tdp.position, &doc.text, self.enc());
+        let cst = m1_core::parse(&doc.text);
+        let file_name = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        Ok(self.store.with_project(|p| {
+            p.and_then(|lp| goto::goto(cst.root(), byte, lp, file_name.as_deref()))
+                .map(GotoDefinitionResponse::Scalar)
+        }))
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri;
+        let Some(doc) = self.docs.get(&uri) else {
+            return Ok(None);
+        };
+        let cst = m1_core::parse(&doc.text);
+        let syms = document_symbols::document_symbols(cst.root(), &doc.line_index, self.enc());
+        Ok(Some(DocumentSymbolResponse::Nested(syms)))
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let uri = params.text_document_position.text_document.uri;
+        let Some(doc) = self.docs.get(&uri) else {
+            return Ok(None);
+        };
+        let cst = m1_core::parse(&doc.text);
+        let file_name = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let items = self
+            .store
+            .with_project(|p| completion::completions(cst.root(), p, file_name.as_deref()));
+        Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        let touches_project = params.changes.iter().any(|c| {
+            c.uri
+                .to_file_path()
+                .map(|p| {
+                    self.store.is_watched(&p)
+                        || matches!(
+                            p.extension().and_then(|x| x.to_str()),
+                            Some("m1prj") | Some("m1cfg")
+                        )
+                })
+                .unwrap_or(false)
+        });
+        if !touches_project {
+            return;
+        }
+        // Reload from the known .m1prj path if any, else rediscover from a changed file's dir.
+        let reloaded = self
+            .store
+            .with_project(|p| p.map(|lp| lp.m1prj_path.clone()));
+        let result = match reloaded {
+            Some(path) => self.store.load_from(&path),
+            None => {
+                // A new project appeared; rediscover from the first changed file's directory.
+                let dir = params
+                    .changes
+                    .first()
+                    .and_then(|c| c.uri.to_file_path().ok())
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                match dir {
+                    Some(d) => self.store.discover_and_load(&d),
+                    None => Ok(false),
+                }
+            }
+        };
+        if let Err(e) = result {
+            self.client
+                .log_message(MessageType::WARNING, format!("m1-lsp: reload failed: {e}"))
+                .await;
+        }
+        // Re-publish for all open docs so T001 refreshes.
+        let uris: Vec<Url> = self.docs.iter().map(|e| e.key().clone()).collect();
+        for uri in uris {
+            self.publish(uri).await;
+        }
     }
 
     async fn shutdown(&self) -> Result<()> {
