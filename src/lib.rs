@@ -9,3 +9,4 @@ pub mod format;
 pub mod line_index;
 pub mod lint_backend;
 pub mod project_store;
+pub mod type_backend;
