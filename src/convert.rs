@@ -19,11 +19,7 @@ pub fn code_str(c: Code) -> &'static str {
     }
 }
 
-pub fn range(
-    byte_range: &std::ops::Range<usize>,
-    li: &LineIndex,
-    enc: PositionEncoding,
-) -> Range {
+pub fn range(byte_range: &std::ops::Range<usize>, li: &LineIndex, enc: PositionEncoding) -> Range {
     Range::new(
         li.position(byte_range.start, enc),
         li.position(byte_range.end, enc),
