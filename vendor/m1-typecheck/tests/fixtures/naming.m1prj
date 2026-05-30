@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<MoTeCM1BuildSession>
+ <Project Name="Naming" TargetHardware="ecu120">
+  <SelectedModuleSets><File Name="MoTeC Comms"/></SelectedModuleSets>
+  <DataTypes>
+   <Type Name="GoodState" Storage="enum" Default="Off">
+    <Enum Name="Off" ContainerOrder="0"/>
+   </Type>
+   <Type Name="bad state" Storage="enum" Default="Off">
+    <Enum Name="Off" ContainerOrder="0"/>
+   </Type>
+  </DataTypes>
+  <ComponentStream>
+   <List>
+    <Component Classname="BuiltIn.GroupCompound" Name="Root.Inputs"/>
+    <Component Classname="BuiltIn.Channel" Name="Root.Inputs.brakePressure"><Props/></Component>
+    <Component Classname="BuiltIn.Channel" Name="Root.Inputs.BrakePressure"><Props/></Component>
+    <Component Classname="BuiltIn.Parameter" Name="Root.Inputs.BrakeBias"><Props/></Component>
+    <Component Classname="BuiltIn.Parameter" Name="Root.Inputs.brakeBias"><Props/></Component>
+    <Component Classname="BuiltIn.Constant" Name="Root.Inputs.TRACKWIDTH"><Props Value="1"/></Component>
+    <Component Classname="BuiltIn.Constant" Name="Root.Inputs.trackWidth"><Props Value="1"/></Component>
+    <Component Classname="BuiltIn.FuncUser" Filename="x.m1scr" Name="Root.Inputs.checkLimit"/>
+    <Component Classname="BuiltIn.FuncUser" Filename="y.m1scr" Name="Root.Inputs.CheckLimit"/>
+   </List>
+  </ComponentStream>
+ </Project>
+</MoTeCM1BuildSession>

@@ -1,0 +1,4 @@
+if(x){y=1;}
+Func(a,b);
+Obj.Method (x);
+if (y == 0) { z = 1; }

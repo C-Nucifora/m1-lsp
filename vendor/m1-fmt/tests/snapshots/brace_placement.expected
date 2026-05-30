@@ -1,0 +1,16 @@
+if (x == 1) {
+    y = 2;
+} else {
+    z = 3;
+}
+when (state) {
+    is (0) {
+        a = 1;
+    }
+    is (1) {
+        b = 2;
+    }
+}
+expand (SEG = 1 to 6) {
+    v = SEG;
+}

@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<Configuration>
+ <Group Name="">
+  <Parameter Name="Root.Foo.Gain.Value"><Cell Type="f32" Unit="ratio"><![CDATA[1.5]]></Cell></Parameter>
+ </Group>
+</Configuration>

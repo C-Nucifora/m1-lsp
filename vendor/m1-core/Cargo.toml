@@ -1,0 +1,13 @@
+[workspace]
+members = ["xtask"]
+
+[package]
+name = "m1-core"
+version = "0.2.0"
+edition = "2021"
+description = "Shared CST helpers, symbol model, and diagnostics for the MoTeC M1 script language"
+publish = false
+
+[dependencies]
+tree-sitter = "0.25"
+tree-sitter-m1 = { path = "../tree-sitter-m1" }
