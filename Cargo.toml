@@ -20,7 +20,9 @@ dashmap = "5"
 m1-core = { path = "../m1-core" }
 m1-lint = { path = "../m1-lint" }
 m1-fmt = { path = "../m1-fmt" }
+m1-typecheck = { path = "../m1-typecheck" }
 
 [dev-dependencies]
 serde_json = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros"] }
