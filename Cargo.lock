@@ -561,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "m1-lint"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "m1-core",
  "toml",
