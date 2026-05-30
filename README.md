@@ -8,6 +8,35 @@ syntax and lint diagnostics live, and formats documents through `m1-fmt`.
 The primary target editor is **Neovim**, but the server speaks plain LSP over
 stdio and works with any LSP client (VS Code, Helix, Emacs `eglot`, etc.).
 
+## Workspace layout
+
+`m1-lsp` sits at the **top** of the M1 toolchain, which lives in **six separate
+repositories** coupled through Cargo **path** dependencies. They are not published
+to crates.io, so this crate does **not** build from a standalone clone — check out
+the whole set as siblings under one parent directory:
+
+```
+<parent>/
+├── tree-sitter-m1/   # grammar (root)
+├── m1-core/          # parse / CST / diagnostics
+├── m1-lint/          # linter
+├── m1-fmt/           # formatter
+├── m1-typecheck/     # type checker
+└── m1-lsp/           # this crate
+```
+
+**`m1-lsp` depends on all four upstream crates** —
+`m1-core`, `m1-lint`, `m1-fmt`, and `m1-typecheck` (each `{ path = "../<crate>" }`),
+plus `tree-sitter-m1` transitively — so the entire set must be checked out
+alongside it. A clean build of `m1-lsp` against its real siblings is the
+toolchain's end-to-end integration check.
+
+Because the repos are independent on GitHub, this coupling is **not visible
+there**: each repo's CI and PRs see only itself, and there is no cross-repo PR
+link. Build/merge ordering across the stack is a manual, local-workspace concern.
+The `m1-example` example project (used by the corpus smoke test) is an optional further
+sibling.
+
 ## Features (v1)
 
 - **Diagnostics** (`textDocument/publishDiagnostics`): the union of
