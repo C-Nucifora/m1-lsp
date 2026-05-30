@@ -1,0 +1,19 @@
+[package]
+name = "m1-typecheck"
+version = "0.2.0"
+edition = "2021"
+description = "Symbol model and type checker for the MoTeC M1 script language"
+publish = false
+
+[[bin]]
+name = "m1-typecheck"
+path = "src/main.rs"
+
+[lib]
+name = "m1_typecheck"
+path = "src/lib.rs"
+
+[dependencies]
+m1-core = { path = "../m1-core" }
+roxmltree = "0.20"
+clap = { version = "4", features = ["derive"] }

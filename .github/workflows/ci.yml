@@ -16,10 +16,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout m1-core
-        run: git clone --depth 1 https://x-access-token:${{ secrets.PAT }}@github.com/C-Nucifora/m1-core.git ../m1-core
-      - name: Checkout tree-sitter-m1
-        run: git clone --depth 1 https://x-access-token:${{ secrets.PAT }}@github.com/C-Nucifora/tree-sitter-m1.git ../tree-sitter-m1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --verbose
@@ -29,10 +25,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout m1-core
-        run: git clone --depth 1 https://x-access-token:${{ secrets.PAT }}@github.com/C-Nucifora/m1-core.git ../m1-core
-      - name: Checkout tree-sitter-m1
-        run: git clone --depth 1 https://x-access-token:${{ secrets.PAT }}@github.com/C-Nucifora/tree-sitter-m1.git ../tree-sitter-m1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
@@ -42,10 +34,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout m1-core
-        run: git clone --depth 1 https://x-access-token:${{ secrets.PAT }}@github.com/C-Nucifora/m1-core.git ../m1-core
-      - name: Checkout tree-sitter-m1
-        run: git clone --depth 1 https://x-access-token:${{ secrets.PAT }}@github.com/C-Nucifora/tree-sitter-m1.git ../tree-sitter-m1
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --all -- --check
 
@@ -54,10 +42,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout m1-core
-        run: git clone --depth 1 https://x-access-token:${{ secrets.PAT }}@github.com/C-Nucifora/m1-core.git ../m1-core
-      - name: Checkout tree-sitter-m1
-        run: git clone --depth 1 https://x-access-token:${{ secrets.PAT }}@github.com/C-Nucifora/tree-sitter-m1.git ../tree-sitter-m1
       - uses: rustsec/audit-check@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,3 @@
+if (First Long Condition Here && Second Long Condition Here && Third Long Condition Name) {
+    Body Statement Here = 1;
+}

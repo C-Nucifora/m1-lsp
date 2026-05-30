@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<MoTeCM1BuildSession>
+ <Project Name="Enums" TargetHardware="ecu120">
+  <SelectedModuleSets>
+   <File Name="MoTeC Comms"/>
+  </SelectedModuleSets>
+  <DataTypes>
+   <Type Name="Drive State" Storage="enum" Default="Idle">
+    <Enum Name="Idle" ContainerOrder="0"/>
+    <Enum Name="Latching Fault" ContainerOrder="-1"/>
+    <Enum Name="Ready To Drive" ContainerOrder="3"/>
+   </Type>
+   <Type Name="Switch State" Storage="enum" Default="Off">
+    <Enum Name="Off" ContainerOrder="0"/>
+    <Enum Name="On" ContainerOrder="1"/>
+   </Type>
+   <Type Name="Other State" Storage="enum" Default="Off">
+    <Enum Name="Off" ContainerOrder="0"/>
+    <Enum Name="Active" ContainerOrder="1"/>
+   </Type>
+  </DataTypes>
+  <ComponentStream>
+   <List>
+    <Component Classname="BuiltIn.GroupCompound" Name="Root.Foo"/>
+    <Component Classname="BuiltIn.Channel" Name="Root.Foo.driveMode"><Props Security="Tune"/></Component>
+    <Component Classname="BuiltIn.Parameter" Name="Root.Foo.SwitchMode.Value"><Props/></Component>
+    <Component Classname="BuiltIn.Channel" Name="Root.Foo.gain"><Props Security="Tune"/></Component>
+    <Component Classname="BuiltIn.FuncUser" Filename="Foo Update.m1scr" Name="Root.Foo.Update"/>
+   </List>
+  </ComponentStream>
+ </Project>
+</MoTeCM1BuildSession>

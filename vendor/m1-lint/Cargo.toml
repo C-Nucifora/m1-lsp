@@ -1,0 +1,24 @@
+[package]
+name = "m1-lint"
+version = "0.2.0"
+edition = "2021"
+description = "Linter for the MoTeC M1 script language"
+license = "MIT"
+
+[[bin]]
+name = "m1-lint"
+path = "src/main.rs"
+
+[lib]
+name = "m1_lint"
+path = "src/lib.rs"
+
+[dependencies]
+m1-core = { path = "../m1-core" }
+toml = "0.8"
+
+[dev-dependencies]
+# none in v1
+
+[profile.release]
+opt-level = 3
