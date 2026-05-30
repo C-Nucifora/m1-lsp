@@ -4,6 +4,7 @@ pub mod analysis;
 pub mod backend;
 pub mod convert;
 pub mod document;
+pub mod fmt_backend;
 pub mod format;
 pub mod line_index;
 pub mod lint_backend;
