@@ -54,15 +54,21 @@ async fn initialize_advertises_capabilities() {
     let caps = &resp["result"]["capabilities"];
     assert_eq!(caps["documentFormattingProvider"], json!(true));
     assert_eq!(caps["textDocumentSync"], json!(1)); // FULL == 1
+    assert_eq!(caps["hoverProvider"], json!(true));
+    assert_eq!(caps["definitionProvider"], json!(true));
+    assert_eq!(caps["documentSymbolProvider"], json!(true));
+    assert!(caps.get("completionProvider").is_some());
 }
 
 // Direct-call tests of the pure analysis path (no transport needed).
 #[test]
 fn analyze_reports_syntax_error() {
-    use m1_lsp::analysis::{analyze, NoLint};
+    use m1_lsp::analysis::{analyze, NoLint, NoTypes};
     use m1_lsp::line_index::{LineIndex, PositionEncoding};
+    use tower_lsp::lsp_types::Url;
     let src = "local <Integer> = 1;\n";
     let li = LineIndex::new(src);
-    let diags = analyze(src, &li, PositionEncoding::Utf16, &NoLint);
+    let uri = Url::parse("file:///x.m1scr").unwrap();
+    let diags = analyze(&uri, src, &li, PositionEncoding::Utf16, &NoLint, &NoTypes);
     assert!(!diags.is_empty());
 }
