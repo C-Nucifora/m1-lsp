@@ -9,14 +9,38 @@ use std::path::{Path, PathBuf};
 /// `eq` which becomes `Eq`. Adding a new operator to the grammar without an
 /// entry here makes the generator panic — intentional, so the map stays complete.
 const SYMBOL_MAP: &[(&str, &str)] = &[
-    ("!", "Bang"), ("!=", "BangEq"), ("%", "Percent"), ("&", "Amp"),
-    ("&&", "AmpAmp"), ("(", "LParen"), (")", "RParen"), ("*", "Star"),
-    ("*=", "StarEq"), ("+", "Plus"), ("+=", "PlusEq"), (",", "Comma"),
-    ("-", "Minus"), ("-=", "MinusEq"), (".", "Dot"), ("/", "Slash"),
-    ("/=", "SlashEq"), (":", "Colon"), (";", "Semicolon"), ("<", "Lt"),
-    ("<<", "LtLt"), ("<=", "LtEq"), ("=", "Assign"), ("==", "EqEq"),
-    (">", "Gt"), (">=", "GtEq"), (">>", "GtGt"), ("?", "Question"),
-    ("^", "Caret"), ("{", "LBrace"), ("|", "Pipe"), ("||", "PipePipe"),
+    ("!", "Bang"),
+    ("!=", "BangEq"),
+    ("%", "Percent"),
+    ("&", "Amp"),
+    ("&&", "AmpAmp"),
+    ("(", "LParen"),
+    (")", "RParen"),
+    ("*", "Star"),
+    ("*=", "StarEq"),
+    ("+", "Plus"),
+    ("+=", "PlusEq"),
+    (",", "Comma"),
+    ("-", "Minus"),
+    ("-=", "MinusEq"),
+    (".", "Dot"),
+    ("/", "Slash"),
+    ("/=", "SlashEq"),
+    (":", "Colon"),
+    (";", "Semicolon"),
+    ("<", "Lt"),
+    ("<<", "LtLt"),
+    ("<=", "LtEq"),
+    ("=", "Assign"),
+    ("==", "EqEq"),
+    (">", "Gt"),
+    (">=", "GtEq"),
+    (">>", "GtGt"),
+    ("?", "Question"),
+    ("^", "Caret"),
+    ("{", "LBrace"),
+    ("|", "Pipe"),
+    ("||", "PipePipe"),
     ("}", "RBrace"),
 ];
 
@@ -50,7 +74,10 @@ fn variant_name(ty: &str) -> String {
             .map(|(_, name)| name.to_string())
             .unwrap_or_else(|| panic!("no SYMBOL_MAP entry for token {ty:?}; add one in xtask"))
     };
-    assert!(!name.is_empty(), "empty variant name generated for node type {ty:?}");
+    assert!(
+        !name.is_empty(),
+        "empty variant name generated for node type {ty:?}"
+    );
     name
 }
 
@@ -78,7 +105,9 @@ pub fn generate_kind_rs(node_types_json: &str) -> String {
         assert!(
             pair[0].0 != pair[1].0,
             "two node types map to variant {:?}: {:?} and {:?}",
-            pair[0].0, pair[0].1, pair[1].1
+            pair[0].0,
+            pair[0].1,
+            pair[1].1
         );
     }
 
@@ -139,7 +168,9 @@ pub fn generate_field_rs(node_types_json: &str) -> String {
         assert!(
             pair[0].0 != pair[1].0,
             "two field names map to variant {:?}: {:?} and {:?}",
-            pair[0].0, pair[0].1, pair[1].1
+            pair[0].0,
+            pair[0].1,
+            pair[1].1
         );
     }
 

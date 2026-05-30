@@ -69,9 +69,15 @@ fn main() {
                 Err(e) => cfg_fail(e),
             },
         };
-        if let Some(n) = max_line { cfg.max_line_length = n; }
-        if let Some(n) = max_depth { cfg.max_nesting_depth = n; }
-        if let Some(n) = max_complexity { cfg.max_complexity = n; }
+        if let Some(n) = max_line {
+            cfg.max_line_length = n;
+        }
+        if let Some(n) = max_depth {
+            cfg.max_nesting_depth = n;
+        }
+        if let Some(n) = max_complexity {
+            cfg.max_complexity = n;
+        }
         if let Err(e) = cfg.apply_filters(select.clone(), ignore.clone()) {
             cfg_fail(e);
         }
@@ -86,13 +92,22 @@ fn main() {
 
         match runner.run_file(path) {
             Ok(result) => {
-                if !result.syntax_errors.is_empty() { any_error = true; }
-                if result.diagnostics.iter().any(|d| d.inner.severity == m1_core::Severity::Error) {
+                if !result.syntax_errors.is_empty() {
+                    any_error = true;
+                }
+                if result
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.inner.severity == m1_core::Severity::Error)
+                {
                     any_error = true;
                 }
                 match format {
                     Format::Human => {
-                        eprint!("{}", report::render_human(&path.display().to_string(), &result));
+                        eprint!(
+                            "{}",
+                            report::render_human(&path.display().to_string(), &result)
+                        );
                     }
                     Format::Json => json_files.push((path.display().to_string(), result)),
                 }
@@ -117,13 +132,20 @@ fn cfg_fail(e: m1_lint::config::ConfigError) -> ! {
     fail(&e.to_string())
 }
 fn req<'a>(v: Option<&'a String>, flag: &str) -> &'a str {
-    v.map(String::as_str).unwrap_or_else(|| fail(&format!("{flag} requires a value")))
+    v.map(String::as_str)
+        .unwrap_or_else(|| fail(&format!("{flag} requires a value")))
 }
 fn parse_num<T: std::str::FromStr>(v: Option<&String>, flag: &str) -> T {
-    req(v, flag).parse().unwrap_or_else(|_| fail(&format!("{flag} expects a number")))
+    req(v, flag)
+        .parse()
+        .unwrap_or_else(|_| fail(&format!("{flag} expects a number")))
 }
 fn split_codes(v: Option<&String>, flag: &str) -> Vec<String> {
-    req(v, flag).split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    req(v, flag)
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 fn read_config(p: &std::path::Path) -> Config {
     let text = match std::fs::read_to_string(p) {

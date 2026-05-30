@@ -55,7 +55,10 @@ impl Rule for NestingTooDeep {
                 node.range(),
                 node.byte_range(),
                 Severity::Warning,
-                format!("nesting depth {} exceeds maximum of {}", depth, self.max_depth),
+                format!(
+                    "nesting depth {} exceeds maximum of {}",
+                    depth, self.max_depth
+                ),
             ));
         }
     }

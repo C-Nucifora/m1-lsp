@@ -100,16 +100,14 @@ impl Config {
         if let Some(sel) = select {
             let mut set = BTreeSet::new();
             for s in sel {
-                let code = LintCode::from_code_str(&s)
-                    .ok_or(ConfigError::UnknownCode(s))?;
+                let code = LintCode::from_code_str(&s).ok_or(ConfigError::UnknownCode(s))?;
                 set.insert(code);
             }
             self.enabled = set;
         }
         if let Some(ign) = ignore {
             for s in ign {
-                let code = LintCode::from_code_str(&s)
-                    .ok_or(ConfigError::UnknownCode(s))?;
+                let code = LintCode::from_code_str(&s).ok_or(ConfigError::UnknownCode(s))?;
                 self.enabled.remove(&code);
             }
         }
@@ -118,8 +116,9 @@ impl Config {
 }
 
 fn parse_raw(s: &str) -> Result<RawConfig, ConfigError> {
-    let value: toml::Value =
-        s.parse().map_err(|e: toml::de::Error| ConfigError::Toml(e.to_string()))?;
+    let value: toml::Value = s
+        .parse()
+        .map_err(|e: toml::de::Error| ConfigError::Toml(e.to_string()))?;
     let table = value
         .as_table()
         .ok_or_else(|| ConfigError::Toml("top level must be a table".into()))?;
@@ -152,7 +151,9 @@ fn string_array(v: &toml::Value) -> Result<Vec<String>, ConfigError> {
 
 /// Helper for callers (CLI/tests) needing the config's directory base.
 pub fn dir_of(path: &Path) -> PathBuf {
-    path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
+    path.parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[cfg(test)]

@@ -77,7 +77,10 @@ impl Rule for OperatorSpacing {
     }
 
     fn fix_node(&self, node: &m1_core::Node, source: &str, edits: &mut Vec<crate::fix::Edit>) {
-        if !matches!(node.kind(), Kind::BinaryExpression | Kind::AssignmentStatement) {
+        if !matches!(
+            node.kind(),
+            Kind::BinaryExpression | Kind::AssignmentStatement
+        ) {
             return;
         }
         let bytes = source.as_bytes();
@@ -87,10 +90,16 @@ impl Rule for OperatorSpacing {
             }
             let br = child.byte_range();
             if !has_space_before(bytes, br.start) {
-                edits.push(crate::fix::Edit { byte_range: br.start..br.start, replacement: " ".into() });
+                edits.push(crate::fix::Edit {
+                    byte_range: br.start..br.start,
+                    replacement: " ".into(),
+                });
             }
             if !has_space_after(bytes, br.end) {
-                edits.push(crate::fix::Edit { byte_range: br.end..br.end, replacement: " ".into() });
+                edits.push(crate::fix::Edit {
+                    byte_range: br.end..br.end,
+                    replacement: " ".into(),
+                });
             }
         }
     }

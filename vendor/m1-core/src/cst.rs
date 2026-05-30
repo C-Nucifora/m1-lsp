@@ -406,7 +406,10 @@ mod tests {
         let mut reference = Vec::new();
         rec(root, &mut reference);
 
-        let via_iter: Vec<_> = root.descendants().map(|n| (n.kind(), n.byte_range())).collect();
+        let via_iter: Vec<_> = root
+            .descendants()
+            .map(|n| (n.kind(), n.byte_range()))
+            .collect();
         assert_eq!(via_iter, reference);
 
         // Root is yielded first.

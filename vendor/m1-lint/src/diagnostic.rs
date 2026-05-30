@@ -52,7 +52,9 @@ impl LintCode {
     /// Every lint code, in numeric order.
     pub fn all_codes() -> &'static [LintCode] {
         use LintCode::*;
-        &[L001, L002, L003, L004, L005, L006, L007, L008, L009, L010, L011]
+        &[
+            L001, L002, L003, L004, L005, L006, L007, L008, L009, L010, L011,
+        ]
     }
 
     /// Parse a code string such as `"L004"`.

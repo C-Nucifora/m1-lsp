@@ -16,8 +16,8 @@ fn needs_space(text: &str) -> bool {
         return false;
     }
     match bytes.get(2) {
-        None => false,                 // bare `//`
-        Some(b'/') => false,           // `///`, separators like `////`
+        None => false,       // bare `//`
+        Some(b'/') => false, // `///`, separators like `////`
         Some(b' ') | Some(b'\t') => false,
         Some(_) => true,
     }
@@ -50,7 +50,10 @@ impl Rule for CommentStyle {
         }
         // Insert one space just after the `//`.
         let at = node.byte_range().start + 2;
-        edits.push(crate::fix::Edit { byte_range: at..at, replacement: " ".into() });
+        edits.push(crate::fix::Edit {
+            byte_range: at..at,
+            replacement: " ".into(),
+        });
     }
 }
 

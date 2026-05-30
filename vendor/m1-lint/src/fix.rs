@@ -134,9 +134,9 @@ fn tokens_equivalent(before: &Cst, after: &Cst) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).all(|(x, y)| {
-        (x.0 == y.0 && x.1 == y.1) || sanctioned(&x.1, &y.1)
-    })
+    a.iter()
+        .zip(b.iter())
+        .all(|(x, y)| (x.0 == y.0 && x.1 == y.1) || sanctioned(&x.1, &y.1))
 }
 
 #[cfg(test)]
@@ -146,8 +146,14 @@ mod tests {
     #[test]
     fn apply_edits_right_to_left() {
         let edits = vec![
-            Edit { byte_range: 0..1, replacement: "X".into() },
-            Edit { byte_range: 4..5, replacement: "Y".into() },
+            Edit {
+                byte_range: 0..1,
+                replacement: "X".into(),
+            },
+            Edit {
+                byte_range: 4..5,
+                replacement: "Y".into(),
+            },
         ];
         assert_eq!(apply_edits("abcde", edits), "Xbcde".replacen("e", "Y", 1));
     }
@@ -155,8 +161,14 @@ mod tests {
     #[test]
     fn overlapping_edit_dropped() {
         let edits = vec![
-            Edit { byte_range: 0..3, replacement: "XY".into() },
-            Edit { byte_range: 2..4, replacement: "ZZ".into() },
+            Edit {
+                byte_range: 0..3,
+                replacement: "XY".into(),
+            },
+            Edit {
+                byte_range: 2..4,
+                replacement: "ZZ".into(),
+            },
         ];
         // Second overlaps the first; only the first applies.
         assert_eq!(apply_edits("abcd", edits), "XYd");

@@ -43,7 +43,10 @@ impl Rule for MissingFinalNewline {
     fn fix_file(&self, source: &str, _lines: &[&str], edits: &mut Vec<crate::fix::Edit>) {
         if !source.is_empty() && !source.ends_with('\n') {
             let len = source.len();
-            edits.push(crate::fix::Edit { byte_range: len..len, replacement: "\n".into() });
+            edits.push(crate::fix::Edit {
+                byte_range: len..len,
+                replacement: "\n".into(),
+            });
         }
     }
 }

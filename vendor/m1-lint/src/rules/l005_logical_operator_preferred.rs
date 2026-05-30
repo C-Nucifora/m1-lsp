@@ -78,7 +78,10 @@ impl Rule for LogicalOperatorPreferred {
                     if next == Some(b'!') {
                         continue;
                     }
-                    edits.push(crate::fix::Edit { byte_range: br, replacement: replacement.into() });
+                    edits.push(crate::fix::Edit {
+                        byte_range: br,
+                        replacement: replacement.into(),
+                    });
                 }
             }
         }

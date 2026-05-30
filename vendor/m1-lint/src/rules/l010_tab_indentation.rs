@@ -23,8 +23,14 @@ impl Rule for TabIndentation {
             let indent_len = line.len() - line.trim_start().len();
             let indent = &line[..indent_len];
             if indent.contains('\t') {
-                let start = m1_core::Position { line: line_idx as u32, column: 0 };
-                let end = m1_core::Position { line: line_idx as u32, column: indent_len as u32 };
+                let start = m1_core::Position {
+                    line: line_idx as u32,
+                    column: 0,
+                };
+                let end = m1_core::Position {
+                    line: line_idx as u32,
+                    column: indent_len as u32,
+                };
                 diags.push(LintDiagnostic::new(
                     LintCode::L010,
                     Range { start, end },

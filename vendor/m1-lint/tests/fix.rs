@@ -15,11 +15,30 @@ fn run_fix(stem: &str) {
     assert_eq!(fixed, expected, "fix mismatch for {stem}");
 
     // Idempotency: fixing the output yields no further change.
-    assert_eq!(runner.fix_source(&expected).unwrap(), None, "not idempotent: {stem}");
+    assert_eq!(
+        runner.fix_source(&expected).unwrap(),
+        None,
+        "not idempotent: {stem}"
+    );
 }
 
-#[test] fn fix_eq_op() { run_fix("eq_op"); }
-#[test] fn fix_logical() { run_fix("logical"); }
-#[test] fn fix_spacing() { run_fix("spacing"); }
-#[test] fn fix_trailing() { run_fix("trailing"); }
-#[test] fn fix_comment() { run_fix("comment"); }
+#[test]
+fn fix_eq_op() {
+    run_fix("eq_op");
+}
+#[test]
+fn fix_logical() {
+    run_fix("logical");
+}
+#[test]
+fn fix_spacing() {
+    run_fix("spacing");
+}
+#[test]
+fn fix_trailing() {
+    run_fix("trailing");
+}
+#[test]
+fn fix_comment() {
+    run_fix("comment");
+}
