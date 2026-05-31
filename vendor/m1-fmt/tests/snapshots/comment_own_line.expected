@@ -1,6 +1,0 @@
-// file header
-x = 1;
-if (x) {
-    // branch comment
-    y = 2;
-}

@@ -1,0 +1,11 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      m1-toolchain:
+        patterns:
+          - "tree-sitter-m1"
+          - "m1-*"
