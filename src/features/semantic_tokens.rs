@@ -20,6 +20,7 @@ pub const TT_COMMENT: u32 = 5;
 pub const TT_TYPE: u32 = 6;
 pub const TT_PARAMETER: u32 = 7;
 pub const TT_NAMESPACE: u32 = 8;
+pub const TT_PROPERTY: u32 = 9;
 
 pub const TM_DEFINITION: u32 = 1 << 0;
 pub const TM_READONLY: u32 = 1 << 1;
@@ -36,6 +37,7 @@ pub fn legend() -> SemanticTokensLegend {
             SemanticTokenType::TYPE,
             SemanticTokenType::PARAMETER,
             SemanticTokenType::NAMESPACE,
+            SemanticTokenType::PROPERTY,
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DEFINITION,
@@ -141,7 +143,7 @@ fn walk(node: Node, scope: &Scope, li: &LineIndex, enc: PositionEncoding, out: &
                 }
             }
             // General identifier: resolve against scope.
-            let (tt, tm) = classify_path(node.text(), scope);
+            let (tt, tm) = classify_path(node.text(), scope, false);
             push(node, tt, tm, li, enc, out);
         }
 
@@ -164,10 +166,13 @@ fn classify_member(node: Node, scope: &Scope) -> (u32, u32) {
     {
         return (TT_FUNCTION, 0);
     }
-    classify_path(node.text(), scope)
+    // A member access (`A.B.C`) is a qualified data reference; treat it as a
+    // member even when the full chain doesn't resolve (e.g. a channel's
+    // sub-property), so channels and their sub-properties highlight.
+    classify_path(node.text(), scope, true)
 }
 
-fn classify_path(path: &str, scope: &Scope) -> (u32, u32) {
+fn classify_path(path: &str, scope: &Scope, is_member: bool) -> (u32, u32) {
     match resolve(path, scope) {
         Resolution::Local(_) => (TT_VARIABLE, 0),
         Resolution::Symbol(sym) => match sym.kind {
@@ -176,13 +181,23 @@ fn classify_path(path: &str, scope: &Scope) -> (u32, u32) {
             SymbolKind::Function | SymbolKind::Method => (TT_FUNCTION, 0),
             // Objects and groups are containers of members -> namespace.
             SymbolKind::Group | SymbolKind::Object => (TT_NAMESPACE, 0),
+            // Channels (and table/reference data) are model fields -> property,
+            // so they highlight distinctly rather than as plain variables.
             SymbolKind::Channel | SymbolKind::Table | SymbolKind::Reference | SymbolKind::Other => {
-                (TT_VARIABLE, 0)
+                (TT_PROPERTY, 0)
             }
         },
         Resolution::BuiltinObject(_) => (TT_NAMESPACE, 0),
         Resolution::BuiltinFn(_) => (TT_FUNCTION, 0),
-        Resolution::Opaque | Resolution::Unresolved => (TT_VARIABLE, 0),
+        // An unresolved/opaque *member* access is still a property reference
+        // (e.g. a channel sub-property); a bare identifier stays a variable.
+        Resolution::Opaque | Resolution::Unresolved => {
+            if is_member {
+                (TT_PROPERTY, 0)
+            } else {
+                (TT_VARIABLE, 0)
+            }
+        }
     }
 }
 
@@ -345,17 +360,61 @@ mod tests {
     #[test]
     fn no_duplicate_tokens_for_member_expression_children() {
         // "Foo.Bar" is a MemberExpression — identifiers inside must not be
-        // double-emitted alongside the parent token.
+        // double-emitted alongside the parent token. A member access classifies
+        // as a property (not a plain variable), even unresolved.
         let toks = tokens("Foo.Bar = 1;\n");
-        // Only one token for the "Foo.Bar" span (variable), not three.
-        let vars: Vec<_> = toks
+        let props: Vec<_> = toks
             .iter()
-            .filter(|t| t.token_type == TT_VARIABLE)
+            .filter(|t| t.token_type == TT_PROPERTY)
             .collect();
         assert_eq!(
-            vars.len(),
+            props.len(),
             1,
-            "expected exactly one variable token for Foo.Bar"
+            "expected exactly one property token for Foo.Bar"
         );
+    }
+
+    #[test]
+    fn channel_resolves_to_property_token() {
+        use crate::project_store::ProjectStore;
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Drive"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Drive.Speed"><Props Type="s32"/></Component>
+</Project>"#,
+            )
+            .unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+        let src = "Drive.Speed = 1;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        store.with_project(|p| {
+            let toks = semantic_tokens(
+                cst.root(),
+                p.map(|lp| &lp.project),
+                Some("X.m1scr"),
+                &li,
+                PositionEncoding::Utf16,
+            );
+            // The channel access `Drive.Speed` is a property; the group `Drive`
+            // alone would be a namespace, but the whole member resolves to the
+            // channel -> property.
+            assert!(
+                toks.iter().any(|t| t.token_type == TT_PROPERTY),
+                "channel access should emit a property token"
+            );
+            assert!(
+                !toks.iter().any(|t| t.token_type == TT_VARIABLE),
+                "channel access must not be a plain variable"
+            );
+        });
     }
 }
