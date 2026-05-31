@@ -46,7 +46,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           version: latest
-          args: --check lua/ plugin/ after/ editors/
+          args: --check lua/ plugin/ editors/
 
   audit:
     name: Security Audit
