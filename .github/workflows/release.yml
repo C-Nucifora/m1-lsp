@@ -45,15 +45,15 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             ext: ""
-          - os: macos-13
-            target: x86_64-apple-darwin
-            ext: ""
           - os: macos-14
             target: aarch64-apple-darwin
             ext: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             ext: ".exe"
+          # Intel macOS (x86_64-apple-darwin) is intentionally omitted: GitHub no
+          # longer reliably allocates Intel-Mac runners, which stalls the release.
+          # Intel-Mac users build the server from source — see README ("Intel macOS").
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
