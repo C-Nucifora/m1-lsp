@@ -99,7 +99,8 @@ mod tests {
         if let HoverContents::Markup(m) = h.contents {
             assert!(
                 !m.value.contains("type unknown"),
-                "hover should not say 'type unknown' for opaque symbols: {}", m.value
+                "hover should not say 'type unknown' for opaque symbols: {}",
+                m.value
             );
         } else {
             panic!("expected markup");

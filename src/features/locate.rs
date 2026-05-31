@@ -143,9 +143,9 @@ mod tests {
         let src = "local count = 0;\nlocal ratio = 1.5;\nlocal flag = true;\n";
         let cst = m1_core::parse(src);
         let locals = collect_locals(cst.root());
-        assert_eq!(locals.get("count"),  Some(&ValueType::Integer));
-        assert_eq!(locals.get("ratio"),  Some(&ValueType::Float));
-        assert_eq!(locals.get("flag"),   Some(&ValueType::Boolean));
+        assert_eq!(locals.get("count"), Some(&ValueType::Integer));
+        assert_eq!(locals.get("ratio"), Some(&ValueType::Float));
+        assert_eq!(locals.get("flag"), Some(&ValueType::Boolean));
     }
 
     #[test]
