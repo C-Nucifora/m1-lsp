@@ -35,7 +35,7 @@ fn kind_str(k: SymbolKind) -> &'static str {
     }
 }
 
-fn symbol_markdown(sym: &Symbol) -> String {
+fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
     let mut s = format!("**{}** `{}`\n\n", sym.path, kind_str(sym.kind));
     // For objects, show the package class instead of a (meaningless) value type.
     if sym.kind == SymbolKind::Object {
@@ -45,7 +45,15 @@ fn symbol_markdown(sym: &Symbol) -> String {
         }
         return s;
     }
-    s.push_str(&format!("type: `{}`", value_type_str(sym.value_type)));
+    // Name the concrete enum type when known (e.g. `Enum (Drive State)`).
+    let type_str = match sym.value_type {
+        ValueType::Enum(id) => match project.map(|p| p.symbols().enum_type(id).name.as_str()) {
+            Some(name) => format!("Enum ({name})"),
+            None => "Enum".to_string(),
+        },
+        other => value_type_str(other).to_string(),
+    };
+    s.push_str(&format!("type: `{type_str}`"));
     if let Some(unit) = &sym.unit {
         s.push_str(&format!("  ·  unit: `{unit}`"));
     }
@@ -106,7 +114,7 @@ pub fn hover(
     let scope = build_scope(root, project, file_name);
     let md = match resolve(&path, &scope) {
         Resolution::Local(t) => format!("**{path}** `local`\n\ntype: `{}`", value_type_str(t)),
-        Resolution::Symbol(sym) => symbol_markdown(sym),
+        Resolution::Symbol(sym) => symbol_markdown(sym, project),
         Resolution::BuiltinObject(name) => builtin_object_markdown(name),
         Resolution::BuiltinFn(overloads) => builtin_fn_markdown(&path, &overloads),
         Resolution::Opaque => format!("**{path}**\n\nbuilt-in symbol — type not modelled"),
@@ -135,6 +143,52 @@ mod tests {
         if let HoverContents::Markup(m) = h.contents {
             assert!(m.value.contains("local"));
             assert!(m.value.contains("Float"));
+        } else {
+            panic!("expected markup");
+        }
+    }
+
+    #[test]
+    fn hover_names_the_enum_type() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<Project>
+  <DataTypes>
+    <Type Name="Drive State" Storage="enum" Default="Off">
+      <Enum Name="Off" ContainerOrder="0"/>
+    </Type>
+  </DataTypes>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Control"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Control.State"><Props Type="::This.Drive State"/></Component>
+</Project>"#,
+            )
+            .unwrap();
+        let project = m1_typecheck::Project::load(&prj).unwrap();
+        let src = "Control.State = 1;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find("State").unwrap();
+        let h = hover(
+            cst.root(),
+            byte,
+            Some(&project),
+            Some("X.m1scr"),
+            &li,
+            PositionEncoding::Utf16,
+        )
+        .unwrap();
+        if let HoverContents::Markup(m) = h.contents {
+            assert!(
+                m.value.contains("Drive State"),
+                "hover should name the enum type, got: {}",
+                m.value
+            );
         } else {
             panic!("expected markup");
         }
