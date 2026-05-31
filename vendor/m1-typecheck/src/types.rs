@@ -57,23 +57,6 @@ pub fn numeric_join(a: ValueType, b: ValueType) -> ValueType {
     }
 }
 
-/// Infer a local's type from its Hungarian prefix (prefix letter + UpperCase).
-pub fn type_from_hungarian(name: &str) -> Option<ValueType> {
-    let mut chars = name.chars();
-    let first = chars.next()?;
-    let second = chars.next()?;
-    if !second.is_ascii_uppercase() {
-        return None;
-    }
-    match first {
-        'b' => Some(ValueType::Boolean),
-        'u' => Some(ValueType::Unsigned),
-        'i' => Some(ValueType::Integer),
-        'f' => Some(ValueType::Float),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,16 +82,5 @@ mod tests {
         assert_eq!(numeric_join(Integer, Unsigned), Integer);
         assert_eq!(numeric_join(Unknown, Float), Unknown);
         assert_eq!(numeric_join(Boolean, Integer), Unknown);
-    }
-
-    #[test]
-    fn prefix_types() {
-        assert_eq!(type_from_hungarian("bReady"), Some(ValueType::Boolean));
-        assert_eq!(type_from_hungarian("uCount"), Some(ValueType::Unsigned));
-        assert_eq!(type_from_hungarian("iDelta"), Some(ValueType::Integer));
-        assert_eq!(type_from_hungarian("fGain"), Some(ValueType::Float));
-        assert_eq!(type_from_hungarian("count"), None); // no prefix
-        assert_eq!(type_from_hungarian("freq"), None); // 'f' not followed by upper
-        assert_eq!(type_from_hungarian("x"), None);
     }
 }

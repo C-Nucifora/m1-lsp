@@ -96,9 +96,11 @@ mod tests {
     }
 
     #[test]
-    fn hungarian_prefix_hint() {
+    fn hint_follows_initializer_not_name_prefix() {
+        // `fGain` would once have been hinted Float by its name prefix; the
+        // initializer (Integer) is now authoritative.
         let h = hints("local fGain = 0;\n");
-        assert_eq!(label(&h[0]), ": Float");
+        assert_eq!(label(&h[0]), ": Integer");
     }
 
     #[test]

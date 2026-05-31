@@ -2,7 +2,7 @@
 use m1_core::{Kind, Node};
 use m1_typecheck::project::Project;
 use m1_typecheck::resolve::Scope;
-use m1_typecheck::types::{ValueType, type_from_hungarian};
+use m1_typecheck::types::ValueType;
 use std::collections::HashMap;
 
 /// The deepest node whose byte range contains `byte`.
@@ -42,33 +42,32 @@ pub fn path_at_byte(root: Node, byte: usize) -> Option<(Node, String)> {
     Some((top, top.text().to_string()))
 }
 
-/// Infer the type of a single `local` declaration: a Hungarian name prefix wins,
-/// otherwise the initializer expression's type (literals/arithmetic only, via an
-/// empty scope so there are no cross-local ordering hazards).
+/// Infer the type of a single `local` declaration from its initializer
+/// expression (literals/arithmetic only, via an empty scope so there are no
+/// cross-local ordering hazards). Returns `Unknown` when there is no initializer
+/// or its type cannot be determined.
 pub fn local_decl_type(decl: Node) -> ValueType {
-    let Some(name) = decl
+    let Some(_name) = decl
         .named_children()
         .into_iter()
         .find(|c| c.kind() == Kind::Identifier)
     else {
         return ValueType::Unknown;
     };
-    type_from_hungarian(name.text()).unwrap_or_else(|| {
-        let initializer = decl
-            .named_children()
-            .into_iter()
-            .find(|c| c.kind() != Kind::Identifier && c.kind() != Kind::TypeAnnotation);
-        if let Some(init) = initializer {
-            let empty_scope = Scope {
-                locals: HashMap::new(),
-                group: None,
-                project: None,
-            };
-            m1_typecheck::typer::type_of(init, &empty_scope)
-        } else {
-            ValueType::Unknown
-        }
-    })
+    let initializer = decl
+        .named_children()
+        .into_iter()
+        .find(|c| c.kind() != Kind::Identifier && c.kind() != Kind::TypeAnnotation);
+    if let Some(init) = initializer {
+        let empty_scope = Scope {
+            locals: HashMap::new(),
+            group: None,
+            project: None,
+        };
+        m1_typecheck::typer::type_of(init, &empty_scope)
+    } else {
+        ValueType::Unknown
+    }
 }
 
 /// Collect locals (name -> inferred type) from the CST, mirroring m1-typecheck.
@@ -160,11 +159,12 @@ mod tests {
     }
 
     #[test]
-    fn hungarian_prefix_beats_initializer() {
-        // fCount has Hungarian Float prefix; initializer says Integer — prefix wins.
+    fn initializer_type_wins_over_name_prefix() {
+        // `fCount` would once have been forced to Float by its name prefix; now the
+        // initializer (Integer) is authoritative.
         let src = "local fCount = 0;\n";
         let cst = m1_core::parse(src);
         let locals = collect_locals(cst.root());
-        assert_eq!(locals.get("fCount"), Some(&ValueType::Float));
+        assert_eq!(locals.get("fCount"), Some(&ValueType::Integer));
     }
 }

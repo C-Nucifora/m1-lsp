@@ -2,8 +2,8 @@
 //! run on every execution. It may not be called conditionally (inside an
 //! `if`/`when` branch) nor inside a comparison/logical expression, where
 //! short-circuiting could skip it. M1 Build itself rejects these.
-use crate::diagnostics::{TypeCode, TypeDiagnostic, make};
-use crate::resolve::{Resolution, Scope, resolve};
+use crate::diagnostics::{make, TypeCode, TypeDiagnostic};
+use crate::resolve::{resolve, Resolution, Scope};
 use crate::typer::path_text;
 use m1_core::{Field, Kind, Node, Severity};
 
