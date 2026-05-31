@@ -47,6 +47,12 @@ pub fn classify(classname: &str) -> SymbolKind {
         Group
     } else if classname == "BuiltIn.Reference" {
         Reference
+    } else if !classname.starts_with("BuiltIn.") && !classname.is_empty() {
+        // Any non-`BuiltIn.*` component is an instance of a package-defined
+        // object class (e.g. "MoTeC Input.Sensor", "MoTeC Output.Switched
+        // Output", "_IOMethod.abs"). Its members are separate components whose
+        // path is prefixed by this object's path.
+        Object
     } else {
         Other
     }
@@ -116,6 +122,11 @@ pub fn parse(xml: &str) -> Result<Parsed, ParseError> {
                 } else {
                     ValueType::Unknown
                 };
+                let class = if kind == SymbolKind::Object {
+                    Some(classname.to_string())
+                } else {
+                    None
+                };
                 table.push(Symbol {
                     path: name.to_string(),
                     kind,
@@ -123,6 +134,7 @@ pub fn parse(xml: &str) -> Result<Parsed, ParseError> {
                     unit: None,
                     filename,
                     enum_assoc: None,
+                    class,
                 });
             }
             _ => {}
@@ -145,5 +157,50 @@ fn constant_value_type(value: &str) -> ValueType {
         ValueType::Float
     } else {
         ValueType::Unknown // e.g. an enum member name like "CAN Bus 2"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_package_objects_and_keeps_builtins() {
+        assert_eq!(classify("MoTeC Input.Sensor"), SymbolKind::Object);
+        assert_eq!(classify("MoTeC Output.Switched Output"), SymbolKind::Object);
+        assert_eq!(classify("_IOMethod.abs"), SymbolKind::Object);
+        // BuiltIn.* primitives are unchanged.
+        assert_eq!(classify("BuiltIn.Channel"), SymbolKind::Channel);
+        assert_eq!(classify("BuiltIn.MethodUser"), SymbolKind::Method);
+        // An unhandled BuiltIn.* stays Other, not Object.
+        assert_eq!(classify("BuiltIn.IOCharacteristic"), SymbolKind::Other);
+    }
+
+    #[test]
+    fn parses_object_with_class_and_members() {
+        let xml = r#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="MoTeC Input.Sensor" Name="Root.Throttle"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Throttle.Value"/>
+  <Component Classname="BuiltIn.MethodUser" Name="Root.Throttle.Calculation" Filename="Calc.m1scr"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Throttle.Diagnostic.Value"/>
+</Project>"#;
+        let parsed = parse(xml).unwrap();
+        let obj = parsed.table.get("Root.Throttle").expect("object symbol");
+        assert_eq!(obj.kind, SymbolKind::Object);
+        assert_eq!(obj.class.as_deref(), Some("MoTeC Input.Sensor"));
+
+        // Immediate members are Value and Calculation (not the nested Diagnostic.Value).
+        let mut members: Vec<&str> = parsed
+            .table
+            .immediate_children("Root.Throttle")
+            .iter()
+            .map(|s| s.path.as_str())
+            .collect();
+        members.sort();
+        assert_eq!(
+            members,
+            ["Root.Throttle.Calculation", "Root.Throttle.Value"]
+        );
     }
 }

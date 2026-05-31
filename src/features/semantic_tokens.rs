@@ -3,7 +3,7 @@ use crate::features::locate::build_scope;
 use crate::line_index::{LineIndex, PositionEncoding};
 use m1_core::{Kind, Node};
 use m1_typecheck::project::Project;
-use m1_typecheck::resolve::{resolve, Resolution, Scope};
+use m1_typecheck::resolve::{Resolution, Scope, resolve};
 use m1_typecheck::symbols::SymbolKind;
 use tower_lsp::lsp_types::{
     SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokensLegend,
@@ -158,10 +158,11 @@ fn walk(node: Node, scope: &Scope, li: &LineIndex, enc: PositionEncoding, out: &
 
 fn classify_member(node: Node, scope: &Scope) -> (u32, u32) {
     // If the parent is a CallExpression and this node is its callee, it's a function.
-    if let Some(parent) = node.parent() {
-        if parent.kind() == Kind::CallExpression && is_first_named_child(node, parent) {
-            return (TT_FUNCTION, 0);
-        }
+    if let Some(parent) = node.parent()
+        && parent.kind() == Kind::CallExpression
+        && is_first_named_child(node, parent)
+    {
+        return (TT_FUNCTION, 0);
     }
     classify_path(node.text(), scope)
 }
@@ -173,7 +174,8 @@ fn classify_path(path: &str, scope: &Scope) -> (u32, u32) {
             SymbolKind::Parameter => (TT_PARAMETER, 0),
             SymbolKind::Constant => (TT_VARIABLE, TM_READONLY),
             SymbolKind::Function | SymbolKind::Method => (TT_FUNCTION, 0),
-            SymbolKind::Group => (TT_NAMESPACE, 0),
+            // Objects and groups are containers of members -> namespace.
+            SymbolKind::Group | SymbolKind::Object => (TT_NAMESPACE, 0),
             SymbolKind::Channel | SymbolKind::Table | SymbolKind::Reference | SymbolKind::Other => {
                 (TT_VARIABLE, 0)
             }

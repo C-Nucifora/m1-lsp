@@ -57,7 +57,7 @@ mod tests {
     #[test]
     fn maps_type_diagnostic_to_lsp() {
         use m1_core::Severity;
-        use m1_typecheck::diagnostics::{make, TypeCode};
+        use m1_typecheck::diagnostics::{TypeCode, make};
         let src = "x = 1.0 == y;\n";
         let cst = m1_core::parse(src);
         let li = LineIndex::new(src);

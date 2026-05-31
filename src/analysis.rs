@@ -175,9 +175,11 @@ mod tests {
             diags.iter().any(|d| d.message == "use eq"),
             "L004 must survive"
         );
-        assert!(diags
-            .iter()
-            .any(|d| d.source.as_deref() == Some("m1-typecheck")));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.source.as_deref() == Some("m1-typecheck"))
+        );
     }
 
     #[test]

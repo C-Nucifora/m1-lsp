@@ -44,23 +44,21 @@ fn collect(
             .named_children()
             .iter()
             .any(|c| c.kind() == Kind::TypeAnnotation);
-        if !annotated {
-            if let Some(name) = n.child_by_field(Field::Name) {
-                let t = local_decl_type(n);
-                if !matches!(t, ValueType::Unknown) {
-                    let position = li.position(name.byte_range().end, enc);
-                    if position.line >= range.start.line && position.line <= range.end.line {
-                        out.push(InlayHint {
-                            position,
-                            label: InlayHintLabel::String(format!(": {}", value_type_str(&t))),
-                            kind: Some(InlayHintKind::TYPE),
-                            text_edits: None,
-                            tooltip: None,
-                            padding_left: Some(false),
-                            padding_right: Some(false),
-                            data: None,
-                        });
-                    }
+        if !annotated && let Some(name) = n.child_by_field(Field::Name) {
+            let t = local_decl_type(n);
+            if !matches!(t, ValueType::Unknown) {
+                let position = li.position(name.byte_range().end, enc);
+                if position.line >= range.start.line && position.line <= range.end.line {
+                    out.push(InlayHint {
+                        position,
+                        label: InlayHintLabel::String(format!(": {}", value_type_str(&t))),
+                        kind: Some(InlayHintKind::TYPE),
+                        text_edits: None,
+                        tooltip: None,
+                        padding_left: Some(false),
+                        padding_right: Some(false),
+                        data: None,
+                    });
                 }
             }
         }
