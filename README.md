@@ -92,6 +92,27 @@ The corpus smoke test runs `analyze()` over every `.m1scr` in
 `$M1_CORPUS_PATH` (falling back to the sibling m1-example example project) and
 asserts it never panics. It is skipped if the directory is absent.
 
+## Releases
+
+`.github/workflows/release.yml` publishes prebuilt server binaries to a GitHub
+Release (`v<crate-version>`) for **Linux x64**, **Windows x64**, and
+**Apple-Silicon macOS (arm64)**. These are consumed by the `m1-vscode` extension.
+
+### Intel macOS
+
+Intel macOS (`x86_64-apple-darwin`) binaries are **not** published — GitHub no
+longer reliably provides Intel-Mac CI runners. On an Intel Mac, build the server
+yourself:
+
+```bash
+git clone https://github.com/C-Nucifora/m1-lsp && cd m1-lsp
+cargo build --release            # -> target/release/m1-lsp
+```
+
+Then point the editor at it (in VS Code: set `m1.server.path` to that binary, or
+put `m1-lsp` on your `PATH`). See the `m1-vscode` README for the full Intel-Mac
+setup.
+
 ## Status
 
 v1. Hover, completion, goto-definition, semantic tokens, and type diagnostics
