@@ -156,3 +156,9 @@ v2. The symbol-model features (hover, completion, go-to-definition, signature
 help, inlay hints, semantic tokens, and type diagnostics) are implemented on top
 of the `m1-typecheck` project model, alongside references, document highlights,
 folding, rename, and code-action quick-fixes.
+
+## License
+
+Licensed under the GNU General Public License v3.0 or later (GPL-3.0-or-later) — see [LICENSE](LICENSE).
+
+Copyright (C) 2026 The M1 Tools authors.
