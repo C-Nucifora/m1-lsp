@@ -56,8 +56,17 @@ async fn initialize_advertises_capabilities() {
     assert_eq!(caps["textDocumentSync"], json!(1)); // FULL == 1
     assert_eq!(caps["hoverProvider"], json!(true));
     assert_eq!(caps["definitionProvider"], json!(true));
+    assert_eq!(caps["referencesProvider"], json!(true));
+    assert_eq!(caps["documentHighlightProvider"], json!(true));
+    assert_eq!(caps["foldingRangeProvider"], json!(true));
+    assert_eq!(caps["codeActionProvider"], json!(true));
     assert_eq!(caps["documentSymbolProvider"], json!(true));
     assert!(caps.get("completionProvider").is_some());
+    // `.` is registered so library-member completion auto-triggers.
+    assert_eq!(
+        caps["completionProvider"]["triggerCharacters"],
+        json!(["."])
+    );
 }
 
 // Direct-call tests of the pure analysis path (no transport needed).

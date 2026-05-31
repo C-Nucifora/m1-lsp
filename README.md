@@ -37,22 +37,59 @@ link. Build/merge ordering across the stack is a manual, local-workspace concern
 The `m1-example` example project (used by the corpus smoke test) is an optional further
 sibling.
 
-## Features (v1)
+## Features
 
 - **Diagnostics** (`textDocument/publishDiagnostics`): the union of
-  - `m1-core` syntax diagnostics (source `m1-core`), and
+  - `m1-core` syntax diagnostics (source `m1-core`),
   - `m1-lint` rule findings `L001`–`L009` (source `m1-lint`),
+  - `m1-typecheck` type diagnostics `T0xx` (source `m1-typecheck`, requires a
+    loaded project), with deprecated-overload findings tagged
+    `DiagnosticTag::Deprecated`, and
+  - an `unsupported-c-token` check (source `m1-intrinsics`) that flags C
+    operators M1 rejects (`==`/`!=`/`&&`/`||`/`!`/`while`/`for`/`do`).
 
-  recomputed on open / change / save.
+  Recomputed on open / change / save, and re-published when the project model
+  reloads.
+- **Quick-fixes** (`textDocument/codeAction`): for the fixable
+  `unsupported-c-token` operators, a quick-fix replaces them with the M1
+  keyword (`==`→`eq`, `!=`→`neq`, `&&`→`and`, `||`→`or`, `!`→`not`).
 - **Formatting** (`textDocument/formatting`): whole-document reformat via
   `m1-fmt`, returned as a single full-document `TextEdit`. No edits are returned
   when the document is already formatted or has syntax errors (pass-through
   safety).
+- **Hover** (`textDocument/hover`): type / kind of the symbol under the cursor —
+  locals (inferred type), project channels/parameters/constants (with units and
+  named enum types), and library functions (signatures, `stateful` /
+  `deprecated` flags).
+- **Go-to-definition** (`textDocument/definition`): jumps to the backing
+  `.m1scr` / `.m1dbc` file of a project function or DBC signal. (The target is
+  opened at its start; the symbol model does not track a finer position.)
+- **References & document highlights** (`textDocument/references`,
+  `textDocument/documentHighlight`): all same-file occurrences of the local /
+  channel / symbol under the cursor, with read/write classification for
+  highlights.
+- **Document symbols** (`textDocument/documentSymbol`): outline of locals and
+  assignment targets.
+- **Completion** (`textDocument/completion`): in-scope locals, project symbols,
+  library objects and keywords; after a library object `.` (a trigger
+  character), that object's methods.
+- **Signature help** (`textDocument/signatureHelp`): library-function overloads
+  with the active argument highlighted, triggered on `(` and `,`.
+- **Inlay hints** (`textDocument/inlayHint`): an inline `: Type` after each
+  un-annotated `local`.
+- **Rename** (`textDocument/rename` + `prepareRename`): file-scoped rename of a
+  `local` (project symbols are declared in `.m1prj` and are not renamed here).
+- **Folding** (`textDocument/foldingRange`): `{ … }` blocks and multi-line block
+  comments.
+- **Semantic tokens** (`textDocument/semanticTokens/full`): full-document token
+  classification (variables, functions, keywords, numbers, strings, comments,
+  types, parameters, namespaces; `definition` / `readonly` modifiers).
 - **Position encoding**: byte offsets from `m1-core` are converted to LSP
   positions in UTF-16 code units by default, or UTF-8 when the client negotiates
   it.
 - **Document lifecycle**: full-document sync (`didOpen` / `didChange` /
-  `didSave` / `didClose`).
+  `didSave` / `didClose`), plus `workspace/didChangeWatchedFiles` for
+  `.m1prj` / `.m1cfg` reloads.
 
 ## Build
 
@@ -115,5 +152,7 @@ setup.
 
 ## Status
 
-v1. Hover, completion, goto-definition, semantic tokens, and type diagnostics
-are deferred to v2 (they need the `m1-typecheck` symbol model).
+v2. The symbol-model features (hover, completion, go-to-definition, signature
+help, inlay hints, semantic tokens, and type diagnostics) are implemented on top
+of the `m1-typecheck` project model, alongside references, document highlights,
+folding, rename, and code-action quick-fixes.

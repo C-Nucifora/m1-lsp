@@ -9,7 +9,8 @@ use tower_lsp::{Client, LanguageServer};
 use crate::analysis::{LintProvider, NoLint, NoTypes, TypeProvider, analyze};
 use crate::document::Document;
 use crate::features::{
-    completion, document_symbols, goto, hover, inlay, rename, semantic_tokens, signature_help,
+    code_action, completion, document_symbols, folding, goto, hover, inlay, references, rename,
+    semantic_tokens, signature_help,
 };
 use crate::format::{Formatter, NoFormat, format_edits};
 use crate::line_index::PositionEncoding;
@@ -156,8 +157,15 @@ impl LanguageServer for Backend {
                 document_formatting_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
+                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
-                completion_provider: Some(CompletionOptions::default()),
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec![".".into()]),
+                    ..Default::default()
+                }),
                 signature_help_provider: Some(SignatureHelpOptions {
                     trigger_characters: Some(vec!["(".into(), ",".into()]),
                     retrigger_characters: None,
@@ -427,6 +435,70 @@ impl LanguageServer for Backend {
             result_id: None,
             data: tokens,
         })))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let tdp = params.text_document_position;
+        let uri = tdp.text_document.uri;
+        let Some(doc) = self.docs.get(&uri) else {
+            return Ok(None);
+        };
+        let byte = doc.line_index.offset(tdp.position, &doc.text, self.enc());
+        let cst = m1_core::parse(&doc.text);
+        Ok(references::references(
+            cst.root(),
+            byte,
+            uri.clone(),
+            &doc.line_index,
+            self.enc(),
+        ))
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let tdp = params.text_document_position_params;
+        let uri = tdp.text_document.uri;
+        let Some(doc) = self.docs.get(&uri) else {
+            return Ok(None);
+        };
+        let byte = doc.line_index.offset(tdp.position, &doc.text, self.enc());
+        let cst = m1_core::parse(&doc.text);
+        Ok(references::document_highlights(
+            cst.root(),
+            byte,
+            &doc.line_index,
+            self.enc(),
+        ))
+    }
+
+    async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
+        let uri = params.text_document.uri;
+        let Some(doc) = self.docs.get(&uri) else {
+            return Ok(None);
+        };
+        let cst = m1_core::parse(&doc.text);
+        Ok(Some(folding::folding_ranges(
+            cst.root(),
+            &doc.line_index,
+            self.enc(),
+        )))
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri;
+        let Some(doc) = self.docs.get(&uri) else {
+            return Ok(None);
+        };
+        let actions = code_action::code_actions(
+            &doc.text,
+            &doc.line_index,
+            self.enc(),
+            &uri,
+            &params.context.diagnostics,
+        );
+        Ok((!actions.is_empty()).then_some(actions))
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {

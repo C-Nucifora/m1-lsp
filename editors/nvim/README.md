@@ -87,9 +87,23 @@ buffer-local keymaps on `LspAttach`:
   `local` variable and every reference to it in the file. Only locals are
   renameable — channels, parameters and other project symbols are declared in
   `Project.m1prj`, not the script, so `prepareRename` rejects them.
+- **References** — `gr` (or the built-in `grr` on Nvim 0.11+): lists every
+  in-file occurrence of the local / channel / symbol under the cursor.
+- **Document highlights** — occurrences of the symbol under the cursor are
+  underlined while it rests there (read vs write classified), via the
+  `CursorHold` autocmd in the snippet.
+- **Code actions** — `<leader>ca` (or the built-in `gra` on Nvim 0.11+): a
+  quick-fix replaces an unsupported C operator with its M1 keyword
+  (`==`→`eq`, `!=`→`neq`, `&&`→`and`, `||`→`or`, `!`→`not`).
+- **Signature help** — `<leader>k` in normal mode (and `<C-s>` in insert on Nvim
+  0.11+); also auto-pops on `(` / `,`. Shows the library-function overload with
+  the active argument highlighted.
 - **Inline type hints** — an inlay `: Type` after each `local` whose type is
   inferred and that isn't already `<Type>`-annotated (same inference as hover).
   Enabled by the snippet; toggle off with `:lua vim.lsp.inlay_hint.enable(false)`.
+- **Folding** — `{ … }` blocks and multi-line block comments fold via the
+  server (use `zc` / `za`); this is independent of the tree-sitter fold queries
+  in section 2.
 
 **`root_dir` matters now.** The project model (and therefore `T001`, hover,
 goto, and project completions) only loads when the server's `root_dir` is at or

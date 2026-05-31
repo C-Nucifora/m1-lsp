@@ -59,8 +59,31 @@ vim.api.nvim_create_autocmd("LspAttach", {
     vim.keymap.set("n", "K", vim.lsp.buf.hover, opts)
     vim.keymap.set("n", "gd", vim.lsp.buf.definition, opts)
     vim.keymap.set("n", "gO", vim.lsp.buf.document_symbol, opts)
+    -- Find all in-file references to the local/channel under the cursor
+    -- (Nvim 0.11+ also maps `grr`).
+    vim.keymap.set("n", "gr", vim.lsp.buf.references, opts)
     -- Rename a local variable and all its references (Nvim 0.11+ also maps `grn`).
     vim.keymap.set("n", "<leader>rn", vim.lsp.buf.rename, opts)
+    -- Code-action quick-fixes, e.g. `==` -> `eq` (Nvim 0.11+ also maps `gra`).
+    vim.keymap.set({ "n", "x" }, "<leader>ca", vim.lsp.buf.code_action, opts)
+    -- Signature help while typing a library call (also auto-pops on `(`/`,`).
+    -- Nvim 0.11+ maps `<C-s>` in insert mode; map it in normal mode too.
+    vim.keymap.set("n", "<leader>k", vim.lsp.buf.signature_help, opts)
+    -- Highlight other occurrences of the symbol under the cursor while it rests
+    -- there (mirrors the document-highlight support VS Code shows automatically).
+    if client.server_capabilities.documentHighlightProvider then
+      local hl = vim.api.nvim_create_augroup("m1_lsp_highlight", { clear = false })
+      vim.api.nvim_create_autocmd({ "CursorHold", "CursorHoldI" }, {
+        group = hl,
+        buffer = args.buf,
+        callback = vim.lsp.buf.document_highlight,
+      })
+      vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
+        group = hl,
+        buffer = args.buf,
+        callback = vim.lsp.buf.clear_references,
+      })
+    end
     -- Inline type hints (`: Integer`) after locals. Toggle off with
     -- `:lua vim.lsp.inlay_hint.enable(false)` if you find them noisy.
     if vim.lsp.inlay_hint and vim.lsp.inlay_hint.enable then
