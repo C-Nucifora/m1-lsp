@@ -39,6 +39,43 @@ mod tests {
 </Project>"#;
 
     #[test]
+    fn goto_dbc_object_returns_its_m1dbc_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(br#"<?xml version="1.0"?><Project><Component Classname="BuiltIn.GroupCompound" Name="Root"/></Project>"#)
+            .unwrap();
+        let dbcdir = tmp.path().join("dbc");
+        std::fs::create_dir_all(&dbcdir).unwrap();
+        std::fs::File::create(dbcdir.join("Balls3EV25.m1dbc"))
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<DBC><ComponentStream><List>
+  <Component Classname="BuiltIn.CAN.DBC" Name="Balls3EV25"/>
+  <Component Classname="BuiltIn.CAN.Message" Name="Balls3EV25.DashVals"/>
+  <Component Classname="BuiltIn.CAN.Signal" Name="Balls3EV25.DashVals.Inverter Error"><Props Type="u32"/></Component>
+</List></ComponentStream></DBC>"#,
+            )
+            .unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        // A direct reference to a DBC signal resolves to its symbol, so goto
+        // opens the defining .m1dbc. (`.Init()`-style accessor calls stay opaque
+        // by design — path_at_byte resolves the whole member expression.)
+        let src = "Balls3EV25.DashVals.Inverter Error = 1;\n";
+        let cst = m1_core::parse(src);
+        store.with_project(|p| {
+            let loc = goto(cst.root(), 0, p.unwrap(), Some("CAN.DBC Init.m1scr"))
+                .expect("DBC signal should resolve to its .m1dbc file");
+            let fs = loc.uri.to_file_path().unwrap();
+            assert!(fs.ends_with("Balls3EV25.m1dbc"), "got {fs:?}");
+        });
+    }
+
+    #[test]
     fn goto_func_returns_its_file() {
         let tmp = tempfile::tempdir().unwrap();
         let prj = tmp.path().join("Project.m1prj");

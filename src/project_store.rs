@@ -9,6 +9,8 @@ pub struct LoadedProject {
     pub root: PathBuf,
     pub m1prj_path: PathBuf,
     pub m1cfg_path: Option<PathBuf>,
+    /// `.m1dbc` files merged into the project (watched for reload).
+    pub dbc_paths: Vec<PathBuf>,
 }
 
 #[derive(Default)]
@@ -52,6 +54,28 @@ impl ProjectStore {
         })
     }
 
+    /// All `*.m1dbc` files under the project root (recursively; typically in a
+    /// `dbc/` subdirectory). Sorted for deterministic load order.
+    fn find_m1dbc(root: &Path) -> Vec<PathBuf> {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().and_then(|x| x.to_str()) == Some("m1dbc") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, &mut out);
+        out.sort();
+        out
+    }
+
     /// Discover + load from `start_dir`, replacing any cached project. Returns
     /// `Ok(true)` if a project was loaded, `Ok(false)` if none was found, and
     /// `Err(msg)` if a found project failed to load (store is left empty).
@@ -71,11 +95,21 @@ impl ProjectStore {
         if let Some(cfg) = &m1cfg_path {
             project = project.with_config(cfg).map_err(|e| e.to_string())?;
         }
+        let dbc_paths = Self::find_m1dbc(&root);
+        for dbc in &dbc_paths {
+            let rel = dbc
+                .strip_prefix(&root)
+                .unwrap_or(dbc)
+                .to_string_lossy()
+                .into_owned();
+            project = project.with_dbc(dbc, &rel).map_err(|e| e.to_string())?;
+        }
         *self.inner.write().unwrap() = Some(LoadedProject {
             project,
             root,
             m1prj_path: m1prj_path.to_path_buf(),
             m1cfg_path,
+            dbc_paths,
         });
         Ok(true)
     }
@@ -83,8 +117,12 @@ impl ProjectStore {
     /// True if `path` is the currently-loaded `.m1prj` or `.m1cfg` (reload trigger).
     pub fn is_watched(&self, path: &Path) -> bool {
         self.with_project(|p| {
-            p.map(|lp| lp.m1prj_path == path || lp.m1cfg_path.as_deref() == Some(path))
-                .unwrap_or(false)
+            p.map(|lp| {
+                lp.m1prj_path == path
+                    || lp.m1cfg_path.as_deref() == Some(path)
+                    || lp.dbc_paths.iter().any(|d| d == path)
+            })
+            .unwrap_or(false)
         })
     }
 }
@@ -106,6 +144,42 @@ mod tests {
         let mut f = std::fs::File::create(&p).unwrap();
         f.write_all(M1PRJ.as_bytes()).unwrap();
         p
+    }
+
+    const DBC: &[u8] = br#"<?xml version="1.0"?>
+<DBC>
+ <ComponentStream>
+  <List>
+   <Component Classname="BuiltIn.CAN.DBC" Name="Balls3EV25"/>
+   <Component Classname="BuiltIn.CAN.Message" Name="Balls3EV25.DashVals"/>
+   <Component Classname="BuiltIn.CAN.Signal" Name="Balls3EV25.DashVals.Inverter Error">
+    <Props Type="u32"/>
+   </Component>
+  </List>
+ </ComponentStream>
+</DBC>"#;
+
+    #[test]
+    fn discovers_and_loads_dbc_objects() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_project(tmp.path());
+        let dbcdir = tmp.path().join("dbc");
+        std::fs::create_dir_all(&dbcdir).unwrap();
+        let dbc = dbcdir.join("Balls3EV25.m1dbc");
+        std::fs::File::create(&dbc).unwrap().write_all(DBC).unwrap();
+
+        let store = ProjectStore::new();
+        assert_eq!(store.discover_and_load(tmp.path()), Ok(true));
+        store.with_project(|p| {
+            let t = p.unwrap().project.symbols();
+            assert!(t.get("Balls3EV25").is_some(), "DBC root must be a symbol");
+            let sig = t
+                .get("Balls3EV25.DashVals.Inverter Error")
+                .expect("signal symbol");
+            assert_eq!(sig.value_type, m1_typecheck::ValueType::Unsigned);
+        });
+        // The DBC file is watched so edits trigger a reload.
+        assert!(store.is_watched(&dbc), "dbc must be watched");
     }
 
     #[test]
