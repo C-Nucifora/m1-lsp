@@ -8,8 +8,6 @@ use std::path::Path;
 pub mod t001_unresolved;
 pub mod t002_float_eq;
 pub mod t003_int_float_mix;
-pub mod t010_local_prefix;
-pub mod t011_prefix_mismatch;
 pub mod t020_enum_member;
 pub mod t021_enum_numeric_cmp;
 pub mod t030_assign_mismatch;
@@ -32,8 +30,6 @@ impl Registry {
                 Box::new(t001_unresolved::Rule),
                 Box::new(t002_float_eq::Rule),
                 Box::new(t003_int_float_mix::Rule),
-                Box::new(t010_local_prefix::Rule),
-                Box::new(t011_prefix_mismatch::Rule),
                 Box::new(t060_stateful_conditional::Rule),
                 Box::new(t061_integrated_only::Rule),
                 Box::new(t062_deprecated_overload::Rule),
@@ -46,8 +42,6 @@ impl Registry {
                 Box::new(t001_unresolved::Rule),
                 Box::new(t002_float_eq::Rule),
                 Box::new(t003_int_float_mix::Rule),
-                Box::new(t010_local_prefix::Rule),
-                Box::new(t011_prefix_mismatch::Rule),
                 Box::new(t020_enum_member::Rule),
                 Box::new(t021_enum_numeric_cmp::Rule),
                 Box::new(t030_assign_mismatch::Rule),
@@ -62,9 +56,11 @@ impl Registry {
     }
 }
 
-/// Collect locals (name -> type) declared anywhere in the script.
+/// Collect locals (name -> type) declared anywhere in the script. The type is
+/// inferred from the declaration's initialiser via the expression typer, using an
+/// empty scope to avoid cross-local ordering hazards.
 fn collect_locals(root: Node) -> std::collections::HashMap<String, crate::types::ValueType> {
-    use crate::types::{type_from_hungarian, ValueType};
+    use crate::types::ValueType;
     let mut locals = std::collections::HashMap::new();
     fn walk(n: Node, locals: &mut std::collections::HashMap<String, ValueType>) {
         if n.kind() == m1_core::Kind::LocalDeclaration {
@@ -74,7 +70,21 @@ fn collect_locals(root: Node) -> std::collections::HashMap<String, crate::types:
                 .find(|c| c.kind() == m1_core::Kind::Identifier)
             {
                 let name = name_node.text().to_string();
-                let t = type_from_hungarian(&name).unwrap_or(ValueType::Unknown);
+                let initializer = n.named_children().into_iter().find(|c| {
+                    c.kind() != m1_core::Kind::Identifier
+                        && c.kind() != m1_core::Kind::TypeAnnotation
+                });
+                let t = match initializer {
+                    Some(init) => crate::typer::type_of(
+                        init,
+                        &Scope {
+                            locals: std::collections::HashMap::new(),
+                            group: None,
+                            project: None,
+                        },
+                    ),
+                    None => ValueType::Unknown,
+                };
                 locals.insert(name, t);
             }
         }
@@ -141,12 +151,13 @@ mod tests {
     use super::*;
     #[test]
     fn clean_script_no_project_has_no_diagnostics_for_resolution() {
-        // local with proper prefix, simple int math -> no T010/T011/T002/T003
-        let r = check_script_no_project("local iSum = 1 + 2;\n");
+        // simple int math -> no T002/T003 and no spurious diagnostics
+        let r = check_script_no_project("local sum = 1 + 2;\n");
         assert!(r.syntax_errors.is_empty());
-        assert!(r
-            .diagnostics
-            .iter()
-            .all(|d| d.code != crate::diagnostics::TypeCode::T010));
+        assert!(
+            r.diagnostics.is_empty(),
+            "expected no diagnostics, got {:?}",
+            r.diagnostics
+        );
     }
 }

@@ -40,21 +40,3 @@ fn t003_no_flag_pure_float() {
         !codes("local fX = 1.0;\nlocal fY = 2.0;\nlocal fZ = fX + fY;\n").contains(&TypeCode::T003)
     );
 }
-
-#[test]
-fn t010_flags_missing_prefix() {
-    assert!(codes("local count = 1;\n").contains(&TypeCode::T010));
-}
-#[test]
-fn t010_accepts_valid_prefix() {
-    assert!(!codes("local iCount = 1;\n").contains(&TypeCode::T010));
-}
-#[test]
-fn t011_flags_prefix_type_mismatch() {
-    // fCount declared float-prefix but initialised with an Integer literal
-    assert!(codes("local fCount = 3;\n").contains(&TypeCode::T011));
-}
-#[test]
-fn t011_no_flag_when_matching() {
-    assert!(!codes("local fGain = 3.0;\n").contains(&TypeCode::T011));
-}
