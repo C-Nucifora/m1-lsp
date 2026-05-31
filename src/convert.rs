@@ -38,14 +38,19 @@ pub fn core_diagnostic(d: &CoreDiag, li: &LineIndex, enc: PositionEncoding) -> L
 }
 
 use m1_typecheck::diagnostics::TypeDiagnostic;
+use tower_lsp::lsp_types::DiagnosticTag;
 
 pub fn type_diagnostic(d: &TypeDiagnostic, li: &LineIndex, enc: PositionEncoding) -> LspDiag {
+    let code = d.code.as_str();
+    // T062 flags use of a deprecated overload; tag it so editors strike it through.
+    let tags = (code == "T062").then(|| vec![DiagnosticTag::DEPRECATED]);
     LspDiag {
         range: range(&d.inner.byte_range, li, enc),
         severity: Some(severity(d.inner.severity)),
-        code: Some(NumberOrString::String(d.code.as_str().to_string())),
+        code: Some(NumberOrString::String(code.to_string())),
         source: Some("m1-typecheck".to_string()),
         message: d.inner.message.clone(),
+        tags,
         ..Default::default()
     }
 }
