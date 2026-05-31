@@ -52,7 +52,23 @@ pub fn collect_locals(root: Node) -> HashMap<String, ValueType> {
                 .into_iter()
                 .find(|c| c.kind() == Kind::Identifier)
             {
-                let t = type_from_hungarian(name.text()).unwrap_or(ValueType::Unknown);
+                let t = type_from_hungarian(name.text()).unwrap_or_else(|| {
+                    // Fall back to typing the initializer expression.
+                    let initializer = n
+                        .named_children()
+                        .into_iter()
+                        .find(|c| c.kind() != Kind::Identifier && c.kind() != Kind::TypeAnnotation);
+                    if let Some(init) = initializer {
+                        let empty_scope = m1_typecheck::resolve::Scope {
+                            locals: HashMap::new(),
+                            group: None,
+                            project: None,
+                        };
+                        m1_typecheck::typer::type_of(init, &empty_scope)
+                    } else {
+                        ValueType::Unknown
+                    }
+                });
                 locals.insert(name.text().to_string(), t);
             }
         }
@@ -120,5 +136,24 @@ mod tests {
         let locals = collect_locals(cst.root());
         assert_eq!(locals.get("fGain"), Some(&ValueType::Float));
         assert_eq!(locals.get("iCount"), Some(&ValueType::Integer));
+    }
+
+    #[test]
+    fn infers_type_from_initializer_when_no_prefix() {
+        let src = "local count = 0;\nlocal ratio = 1.5;\nlocal flag = true;\n";
+        let cst = m1_core::parse(src);
+        let locals = collect_locals(cst.root());
+        assert_eq!(locals.get("count"),  Some(&ValueType::Integer));
+        assert_eq!(locals.get("ratio"),  Some(&ValueType::Float));
+        assert_eq!(locals.get("flag"),   Some(&ValueType::Boolean));
+    }
+
+    #[test]
+    fn hungarian_prefix_beats_initializer() {
+        // fCount has Hungarian Float prefix; initializer says Integer — prefix wins.
+        let src = "local fCount = 0;\n";
+        let cst = m1_core::parse(src);
+        let locals = collect_locals(cst.root());
+        assert_eq!(locals.get("fCount"), Some(&ValueType::Float));
     }
 }
