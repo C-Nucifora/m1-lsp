@@ -130,18 +130,14 @@ fn walk(node: Node, scope: &Scope, li: &LineIndex, enc: PositionEncoding, out: &
                 }
                 // Callee of a bare call (not member): CallExpression's first
                 // named child is the function name.
-                if parent.kind() == Kind::CallExpression {
-                    if is_first_named_child(node, parent) {
-                        push(node, TT_FUNCTION, 0, li, enc, out);
-                        return;
-                    }
+                if parent.kind() == Kind::CallExpression && is_first_named_child(node, parent) {
+                    push(node, TT_FUNCTION, 0, li, enc, out);
+                    return;
                 }
                 // Declaration site of a local variable.
-                if parent.kind() == Kind::LocalDeclaration {
-                    if is_first_named_child(node, parent) {
-                        push(node, TT_VARIABLE, TM_DEFINITION, li, enc, out);
-                        return;
-                    }
+                if parent.kind() == Kind::LocalDeclaration && is_first_named_child(node, parent) {
+                    push(node, TT_VARIABLE, TM_DEFINITION, li, enc, out);
+                    return;
                 }
             }
             // General identifier: resolve against scope.
@@ -178,10 +174,9 @@ fn classify_path(path: &str, scope: &Scope) -> (u32, u32) {
             SymbolKind::Constant => (TT_VARIABLE, TM_READONLY),
             SymbolKind::Function | SymbolKind::Method => (TT_FUNCTION, 0),
             SymbolKind::Group => (TT_NAMESPACE, 0),
-            SymbolKind::Channel
-            | SymbolKind::Table
-            | SymbolKind::Reference
-            | SymbolKind::Other => (TT_VARIABLE, 0),
+            SymbolKind::Channel | SymbolKind::Table | SymbolKind::Reference | SymbolKind::Other => {
+                (TT_VARIABLE, 0)
+            }
         },
         Resolution::Opaque | Resolution::Unresolved => (TT_VARIABLE, 0),
     }
@@ -224,7 +219,14 @@ fn push_singleline(
 
 /// Emit a token; assumes the node is guaranteed to be single-line (keywords,
 /// numbers, identifiers, type annotations).
-fn push(node: Node, tt: u32, tm: u32, li: &LineIndex, enc: PositionEncoding, out: &mut Vec<RawToken>) {
+fn push(
+    node: Node,
+    tt: u32,
+    tm: u32,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    out: &mut Vec<RawToken>,
+) {
     push_singleline(node, tt, tm, li, enc, out);
 }
 
@@ -279,7 +281,10 @@ mod tests {
         let var = toks
             .iter()
             .find(|t| t.token_type == TT_VARIABLE && t.token_modifiers_bitset & TM_DEFINITION != 0);
-        assert!(var.is_some(), "expected variable+definition token for local name");
+        assert!(
+            var.is_some(),
+            "expected variable+definition token for local name"
+        );
     }
 
     #[test]
@@ -292,7 +297,10 @@ mod tests {
     #[test]
     fn local_variable_reference_gets_variable_type() {
         let toks = tokens("local fGain = 1.0;\nfGain = fGain + 1.0;\n");
-        let vars: Vec<_> = toks.iter().filter(|t| t.token_type == TT_VARIABLE).collect();
+        let vars: Vec<_> = toks
+            .iter()
+            .filter(|t| t.token_type == TT_VARIABLE)
+            .collect();
         // At least: the declaration name + one or two references
         assert!(vars.len() >= 2);
     }
@@ -307,7 +315,11 @@ mod tests {
         // positions correctly — verify by re-accumulating.
         let mut col = 0u32;
         for t in &toks {
-            col = if t.delta_line == 0 { col + t.delta_start } else { t.delta_start };
+            col = if t.delta_line == 0 {
+                col + t.delta_start
+            } else {
+                t.delta_start
+            };
             assert!(col < 200, "reconstructed column looks sane");
         }
     }
@@ -332,7 +344,14 @@ mod tests {
         // double-emitted alongside the parent token.
         let toks = tokens("Foo.Bar = 1;\n");
         // Only one token for the "Foo.Bar" span (variable), not three.
-        let vars: Vec<_> = toks.iter().filter(|t| t.token_type == TT_VARIABLE).collect();
-        assert_eq!(vars.len(), 1, "expected exactly one variable token for Foo.Bar");
+        let vars: Vec<_> = toks
+            .iter()
+            .filter(|t| t.token_type == TT_VARIABLE)
+            .collect();
+        assert_eq!(
+            vars.len(),
+            1,
+            "expected exactly one variable token for Foo.Bar"
+        );
     }
 }
