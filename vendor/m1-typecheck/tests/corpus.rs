@@ -8,7 +8,8 @@ fn project_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("M1_PROJECT") {
         return Some(PathBuf::from(p));
     }
-    let cand = Path::new(env!("CARGO_MANIFEST_DIR")).join("../m1-example/UQR-EV/01.00/Project.m1prj");
+    let cand =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../m1-example/UQR-EV/01.00/Project.m1prj");
     cand.is_file().then_some(cand)
 }
 fn corpus_dir() -> PathBuf {
