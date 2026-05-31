@@ -13,7 +13,8 @@ vim.filetype.add({
 
 -- 2. Find the project root: nearest ancestor with Project.m1prj, else .git, else file dir.
 local function root_dir(fname)
-  local found = vim.fs.find({ "Project.m1prj", ".git" }, { upward = true, path = fname })[1]
+  local found =
+    vim.fs.find({ "Project.m1prj", ".git" }, { upward = true, path = fname })[1]
   if found then
     return vim.fs.dirname(found)
   end
