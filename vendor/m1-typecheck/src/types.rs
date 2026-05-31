@@ -83,5 +83,4 @@ mod tests {
         assert_eq!(numeric_join(Unknown, Float), Unknown);
         assert_eq!(numeric_join(Boolean, Integer), Unknown);
     }
-
 }

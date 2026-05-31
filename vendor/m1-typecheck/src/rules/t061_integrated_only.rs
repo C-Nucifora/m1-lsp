@@ -3,8 +3,8 @@
 //! built into hardware classes and must not be called directly. Warn on a direct
 //! call — but only when the head does not resolve to a same-named project symbol
 //! (a project may legitimately own a `GPS` channel tree).
-use crate::diagnostics::{TypeCode, TypeDiagnostic, make};
-use crate::resolve::{Resolution, Scope, resolve};
+use crate::diagnostics::{make, TypeCode, TypeDiagnostic};
+use crate::resolve::{resolve, Resolution, Scope};
 use crate::typer::path_text;
 use m1_core::{Field, Kind, Node, Severity};
 

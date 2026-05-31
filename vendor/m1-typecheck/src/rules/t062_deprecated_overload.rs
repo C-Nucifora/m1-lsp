@@ -1,8 +1,8 @@
 //! T062 `deprecated-overload`: a library call that resolves to a deprecated
 //! overload (e.g. `Serial.GetTransmitHandle` -> `Serial.GetHandle`). Emitted as
 //! a hint so editors can surface the replacement without blocking.
-use crate::diagnostics::{TypeCode, TypeDiagnostic, make};
-use crate::resolve::{Resolution, Scope, resolve};
+use crate::diagnostics::{make, TypeCode, TypeDiagnostic};
+use crate::resolve::{resolve, Resolution, Scope};
 use crate::typer::path_text;
 use m1_core::{Field, Kind, Node, Severity};
 
