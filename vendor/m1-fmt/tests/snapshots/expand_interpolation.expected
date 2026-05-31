@@ -1,3 +1,0 @@
-expand (SEG = 1 to 6) {
-    Channel.$(SEG).Value = 0;
-}

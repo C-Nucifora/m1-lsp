@@ -1,2 +1,0 @@
-x = 1; // assign
-y = foo(a,b); // call

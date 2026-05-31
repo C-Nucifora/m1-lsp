@@ -18,10 +18,10 @@ tower-lsp = "0.20"
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "macros"] }
 dashmap = "5"
 serde_json = "1"
-m1-core = { path = "vendor/m1-core" }
-m1-lint = { path = "vendor/m1-lint" }
-m1-fmt = { path = "vendor/m1-fmt" }
-m1-typecheck = { path = "vendor/m1-typecheck" }
+m1-core = { git = "https://github.com/C-Nucifora/m1-core.git", branch = "main" }
+m1-lint = { git = "https://github.com/C-Nucifora/m1-lint.git", branch = "main" }
+m1-fmt = { git = "https://github.com/C-Nucifora/m1-fmt.git", branch = "main" }
+m1-typecheck = { git = "https://github.com/C-Nucifora/m1-typecheck.git", branch = "main" }
 
 [dev-dependencies]
 serde_json = "1"
