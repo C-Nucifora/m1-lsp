@@ -8,3 +8,4 @@ pub mod inlay;
 pub mod locate;
 pub mod rename;
 pub mod semantic_tokens;
+pub mod signature_help;

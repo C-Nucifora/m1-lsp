@@ -8,7 +8,9 @@ use tower_lsp::{Client, LanguageServer};
 
 use crate::analysis::{analyze, LintProvider, NoLint, NoTypes, TypeProvider};
 use crate::document::Document;
-use crate::features::{completion, document_symbols, goto, hover, inlay, rename, semantic_tokens};
+use crate::features::{
+    completion, document_symbols, goto, hover, inlay, rename, semantic_tokens, signature_help,
+};
 use crate::format::{format_edits, Formatter, NoFormat};
 use crate::line_index::PositionEncoding;
 use crate::project_store::ProjectStore;
@@ -156,6 +158,11 @@ impl LanguageServer for Backend {
                 definition_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions::default()),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".into(), ",".into()]),
+                    retrigger_characters: None,
+                    work_done_progress_options: Default::default(),
+                }),
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
@@ -312,6 +319,28 @@ impl LanguageServer for Backend {
             .store
             .with_project(|p| completion::completions(cst.root(), p, file_name.as_deref()));
         Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let tdp = params.text_document_position_params;
+        let uri = tdp.text_document.uri;
+        let Some(doc) = self.docs.get(&uri) else {
+            return Ok(None);
+        };
+        let byte = doc.line_index.offset(tdp.position, &doc.text, self.enc());
+        let cst = m1_core::parse(&doc.text);
+        let file_name = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        Ok(self.store.with_project(|p| {
+            signature_help::signature_help(
+                cst.root(),
+                byte,
+                p.map(|lp| &lp.project),
+                file_name.as_deref(),
+            )
+        }))
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
