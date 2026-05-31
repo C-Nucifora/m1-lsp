@@ -546,54 +546,27 @@ dependencies = [
 [[package]]
 name = "m1-core"
 version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-core.git?branch=main#ed7c9f4ea4f9ae53eb6e77ddd524513ed483ec20"
+source = "git+https://github.com/C-Nucifora/m1-core.git?branch=main#b70e3f3af1a34c51eca131cddfb30cf89c8bf4fd"
 dependencies = [
  "tree-sitter",
- "tree-sitter-m1 0.2.0 (git+https://github.com/C-Nucifora/m1-core.git?branch=main)",
-]
-
-[[package]]
-name = "m1-core"
-version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-fmt.git?branch=main#ed7e6d00e460be783e61b3ec1c5b2a7571561488"
-dependencies = [
- "tree-sitter",
- "tree-sitter-m1 0.2.0 (git+https://github.com/C-Nucifora/m1-fmt.git?branch=main)",
-]
-
-[[package]]
-name = "m1-core"
-version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-lint.git?branch=main#2051e6bdb9344cba086351946b41ca1698c14134"
-dependencies = [
- "tree-sitter",
- "tree-sitter-m1 0.2.0 (git+https://github.com/C-Nucifora/m1-lint.git?branch=main)",
-]
-
-[[package]]
-name = "m1-core"
-version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?branch=main#70b66ac7b960fbf1b4c57e4c10aa34caca1e13fc"
-dependencies = [
- "tree-sitter",
- "tree-sitter-m1 0.2.0 (git+https://github.com/C-Nucifora/m1-typecheck.git?branch=main)",
+ "tree-sitter-m1",
 ]
 
 [[package]]
 name = "m1-fmt"
 version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-fmt.git?branch=main#ed7e6d00e460be783e61b3ec1c5b2a7571561488"
+source = "git+https://github.com/C-Nucifora/m1-fmt.git?branch=main#9127810a2405d4ed8acb1c36c185b13b35039470"
 dependencies = [
  "clap",
- "m1-core 0.2.0 (git+https://github.com/C-Nucifora/m1-fmt.git?branch=main)",
+ "m1-core",
 ]
 
 [[package]]
 name = "m1-lint"
 version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-lint.git?branch=main#2051e6bdb9344cba086351946b41ca1698c14134"
+source = "git+https://github.com/C-Nucifora/m1-lint.git?branch=main#fb7ebd56753f5654f565e2f8b3bfdf1944a11850"
 dependencies = [
- "m1-core 0.2.0 (git+https://github.com/C-Nucifora/m1-lint.git?branch=main)",
+ "m1-core",
  "toml",
 ]
 
@@ -602,7 +575,7 @@ name = "m1-lsp"
 version = "0.4.0"
 dependencies = [
  "dashmap",
- "m1-core 0.2.0 (git+https://github.com/C-Nucifora/m1-core.git?branch=main)",
+ "m1-core",
  "m1-fmt",
  "m1-lint",
  "m1-typecheck",
@@ -615,10 +588,10 @@ dependencies = [
 [[package]]
 name = "m1-typecheck"
 version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?branch=main#70b66ac7b960fbf1b4c57e4c10aa34caca1e13fc"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?branch=main#f1794bd540054951f2a2c26d4e1c9df16bdccbe2"
 dependencies = [
  "clap",
- "m1-core 0.2.0 (git+https://github.com/C-Nucifora/m1-typecheck.git?branch=main)",
+ "m1-core",
  "roxmltree",
  "serde",
  "serde_json",
@@ -1134,34 +1107,7 @@ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 [[package]]
 name = "tree-sitter-m1"
 version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-core.git?branch=main#ed7c9f4ea4f9ae53eb6e77ddd524513ed483ec20"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-m1"
-version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-fmt.git?branch=main#ed7e6d00e460be783e61b3ec1c5b2a7571561488"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-m1"
-version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-lint.git?branch=main#2051e6bdb9344cba086351946b41ca1698c14134"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-m1"
-version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?branch=main#70b66ac7b960fbf1b4c57e4c10aa34caca1e13fc"
+source = "git+https://github.com/C-Nucifora/tree-sitter-m1.git?branch=main#c7c9ce001803f88bc6f78ac375196ba38f1885a3"
 dependencies = [
  "cc",
  "tree-sitter-language",
