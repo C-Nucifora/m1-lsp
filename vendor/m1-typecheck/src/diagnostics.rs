@@ -13,6 +13,9 @@ pub enum TypeCode {
     T030, // assignment-type-mismatch
     T040, // channel-multiple-assignment
     T050, // symbol-name-convention (project audit)
+    T060, // stateful-conditional
+    T061, // integrated-only-call
+    T062, // deprecated-overload
 }
 
 impl TypeCode {
@@ -28,6 +31,9 @@ impl TypeCode {
             TypeCode::T030 => "T030",
             TypeCode::T040 => "T040",
             TypeCode::T050 => "T050",
+            TypeCode::T060 => "T060",
+            TypeCode::T061 => "T061",
+            TypeCode::T062 => "T062",
         }
     }
 }

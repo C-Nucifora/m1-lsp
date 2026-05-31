@@ -13,6 +13,9 @@ pub mod t011_prefix_mismatch;
 pub mod t020_enum_member;
 pub mod t021_enum_numeric_cmp;
 pub mod t030_assign_mismatch;
+pub mod t060_stateful_conditional;
+pub mod t061_integrated_only;
+pub mod t062_deprecated_overload;
 
 pub trait Rule: Send + Sync {
     fn check_node(&self, node: &Node, scope: &Scope, out: &mut Vec<TypeDiagnostic>);
@@ -31,6 +34,9 @@ impl Registry {
                 Box::new(t003_int_float_mix::Rule),
                 Box::new(t010_local_prefix::Rule),
                 Box::new(t011_prefix_mismatch::Rule),
+                Box::new(t060_stateful_conditional::Rule),
+                Box::new(t061_integrated_only::Rule),
+                Box::new(t062_deprecated_overload::Rule),
             ],
         }
     }
@@ -45,6 +51,9 @@ impl Registry {
                 Box::new(t020_enum_member::Rule),
                 Box::new(t021_enum_numeric_cmp::Rule),
                 Box::new(t030_assign_mismatch::Rule),
+                Box::new(t060_stateful_conditional::Rule),
+                Box::new(t061_integrated_only::Rule),
+                Box::new(t062_deprecated_overload::Rule),
             ],
         }
     }
