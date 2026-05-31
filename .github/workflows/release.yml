@@ -1,0 +1,92 @@
+name: Release binaries
+
+# Publishes the m1-lsp server as prebuilt binaries (Linux/macOS/Windows) on a
+# GitHub Release named after the crate version. The m1-vscode extension bundles
+# these. A release is cut automatically whenever the Cargo.toml version changes
+# (i.e. no release tag exists for it yet); can also be run manually.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      should_release: ${{ steps.v.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "Release v$VERSION already exists — nothing to do."
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "Will release v$VERSION."
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+          - os: macos-13
+            target: x86_64-apple-darwin
+            ext: ""
+          - os: macos-14
+            target: aarch64-apple-darwin
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} --bin m1-lsp
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "target/${{ matrix.target }}/release/m1-lsp${{ matrix.ext }}" \
+             "out/m1-lsp-${{ matrix.target }}${{ matrix.ext }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.target }}
+          path: out/*
+
+  release:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Publish release v${{ needs.check.outputs.version }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ needs.check.outputs.version }}" out/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "m1-lsp v${{ needs.check.outputs.version }}" \
+            --notes "Prebuilt m1-lsp server binaries (Linux/macOS/Windows). Consumed by the m1-vscode extension."
