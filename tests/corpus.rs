@@ -1,6 +1,6 @@
 //! analyze() must not panic on any real script. Corpus path via M1_CORPUS_PATH,
 //! else the sibling m1-example example project. Skipped if the dir is absent.
-use m1_lsp::analysis::{analyze, NoLint, NoTypes};
+use m1_lsp::analysis::{NoLint, NoTypes, analyze};
 use m1_lsp::features::locate::path_at_byte;
 use m1_lsp::line_index::{LineIndex, PositionEncoding};
 use std::path::{Path, PathBuf};

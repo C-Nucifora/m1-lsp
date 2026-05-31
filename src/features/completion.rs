@@ -29,15 +29,15 @@ pub fn completions(
                 kind: Some(CompletionItemKind::FIELD),
                 ..Default::default()
             });
-            if let Some(g) = &group {
-                if let Some(tail) = sym.path.strip_prefix(&format!("{g}.")) {
-                    items.push(CompletionItem {
-                        label: tail.to_string(),
-                        kind: Some(CompletionItemKind::FIELD),
-                        detail: Some(sym.path.clone()),
-                        ..Default::default()
-                    });
-                }
+            if let Some(g) = &group
+                && let Some(tail) = sym.path.strip_prefix(&format!("{g}."))
+            {
+                items.push(CompletionItem {
+                    label: tail.to_string(),
+                    kind: Some(CompletionItemKind::FIELD),
+                    detail: Some(sym.path.clone()),
+                    ..Default::default()
+                });
             }
         }
     }

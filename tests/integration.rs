@@ -1,5 +1,5 @@
-use serde_json::{json, Value};
-use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream};
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
 use tower_lsp::{LspService, Server};
 
 // Helper: frame a JSON-RPC message with Content-Length, write it.
@@ -63,7 +63,7 @@ async fn initialize_advertises_capabilities() {
 // Direct-call tests of the pure analysis path (no transport needed).
 #[test]
 fn analyze_reports_syntax_error() {
-    use m1_lsp::analysis::{analyze, NoLint, NoTypes};
+    use m1_lsp::analysis::{NoLint, NoTypes, analyze};
     use m1_lsp::line_index::{LineIndex, PositionEncoding};
     use tower_lsp::lsp_types::Url;
     let src = "local <Integer> = 1;\n";
