@@ -173,7 +173,8 @@ fn classify_path(path: &str, scope: &Scope) -> (u32, u32) {
             SymbolKind::Parameter => (TT_PARAMETER, 0),
             SymbolKind::Constant => (TT_VARIABLE, TM_READONLY),
             SymbolKind::Function | SymbolKind::Method => (TT_FUNCTION, 0),
-            SymbolKind::Group => (TT_NAMESPACE, 0),
+            // Objects and groups are containers of members -> namespace.
+            SymbolKind::Group | SymbolKind::Object => (TT_NAMESPACE, 0),
             SymbolKind::Channel | SymbolKind::Table | SymbolKind::Reference | SymbolKind::Other => {
                 (TT_VARIABLE, 0)
             }
