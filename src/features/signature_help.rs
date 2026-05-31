@@ -4,7 +4,7 @@ use crate::features::locate::{build_scope, node_at_byte};
 use m1_core::{Field, Kind, Node};
 use m1_typecheck::intrinsics::Overload;
 use m1_typecheck::project::Project;
-use m1_typecheck::resolve::{resolve, Resolution};
+use m1_typecheck::resolve::{Resolution, resolve};
 use tower_lsp::lsp_types::{
     ParameterInformation, ParameterLabel, SignatureHelp, SignatureInformation,
 };
@@ -13,12 +13,12 @@ use tower_lsp::lsp_types::{
 fn enclosing_call(root: Node, byte: usize) -> Option<Node> {
     let mut node = node_at_byte(root, byte)?;
     loop {
-        if node.kind() == Kind::CallExpression {
-            if let Some(args) = node.child_by_field(Field::Arguments) {
-                let r = args.byte_range();
-                if byte >= r.start && byte <= r.end {
-                    return Some(node);
-                }
+        if node.kind() == Kind::CallExpression
+            && let Some(args) = node.child_by_field(Field::Arguments)
+        {
+            let r = args.byte_range();
+            if byte >= r.start && byte <= r.end {
+                return Some(node);
             }
         }
         node = node.parent()?;

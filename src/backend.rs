@@ -6,12 +6,12 @@ use tower_lsp::jsonrpc::{Error, Result};
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use crate::analysis::{analyze, LintProvider, NoLint, NoTypes, TypeProvider};
+use crate::analysis::{LintProvider, NoLint, NoTypes, TypeProvider, analyze};
 use crate::document::Document;
 use crate::features::{
     completion, document_symbols, goto, hover, inlay, rename, semantic_tokens, signature_help,
 };
-use crate::format::{format_edits, Formatter, NoFormat};
+use crate::format::{Formatter, NoFormat, format_edits};
 use crate::line_index::PositionEncoding;
 use crate::project_store::ProjectStore;
 

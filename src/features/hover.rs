@@ -3,7 +3,7 @@ use crate::convert::range;
 use crate::features::locate::{build_scope, path_at_byte};
 use crate::line_index::{LineIndex, PositionEncoding};
 use m1_typecheck::project::Project;
-use m1_typecheck::resolve::{resolve, Resolution};
+use m1_typecheck::resolve::{Resolution, resolve};
 use m1_typecheck::symbols::{Symbol, SymbolKind};
 use m1_typecheck::types::ValueType;
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
@@ -30,12 +30,21 @@ fn kind_str(k: SymbolKind) -> &'static str {
         SymbolKind::Table => "table",
         SymbolKind::Group => "group",
         SymbolKind::Reference => "reference",
+        SymbolKind::Object => "object",
         SymbolKind::Other => "symbol",
     }
 }
 
 fn symbol_markdown(sym: &Symbol) -> String {
     let mut s = format!("**{}** `{}`\n\n", sym.path, kind_str(sym.kind));
+    // For objects, show the package class instead of a (meaningless) value type.
+    if sym.kind == SymbolKind::Object {
+        match &sym.class {
+            Some(class) => s.push_str(&format!("class: `{class}`")),
+            None => s.push_str("object"),
+        }
+        return s;
+    }
     s.push_str(&format!("type: `{}`", value_type_str(sym.value_type)));
     if let Some(unit) = &sym.unit {
         s.push_str(&format!("  ·  unit: `{unit}`"));
