@@ -13,6 +13,12 @@ pub struct Scope<'p> {
 pub enum Resolution<'p> {
     Local(ValueType),
     Symbol(&'p crate::symbols::Symbol),
+    /// A built-in library object, e.g. `Calculate` (carries its name for
+    /// hover/completion of its methods).
+    BuiltinObject(&'static str),
+    /// A built-in library function / object-method call, e.g.
+    /// `CanComms.GetUnsignedInteger` — its overload set (1+ signatures).
+    BuiltinFn(Vec<&'static crate::intrinsics::Overload>),
     Opaque,     // resolves to a built-in/unknown root; type Unknown, never flagged
     Unresolved, // project-rooted path with no matching symbol
 }
@@ -31,6 +37,27 @@ pub fn resolve<'p>(path: &str, scope: &Scope<'p>) -> Resolution<'p> {
             return Resolution::Local(t);
         }
     }
+
+    // 2. Built-in library intrinsics (firmware objects: Calculate, CanComms, …).
+    //    Project-independent and resolved before project symbols, per the M1
+    //    scope order (local -> library -> project). `Object` -> the object;
+    //    `Object.Method` -> its overload set. A project object that shadows a
+    //    library name is reached via the `This.`/`Library.` anchors.
+    let intr = crate::intrinsics::get();
+    let lib_root = root_segment(path);
+    if let Some(obj_name) = intr.library_object_name(lib_root) {
+        if path == lib_root {
+            return Resolution::BuiltinObject(obj_name);
+        }
+        let method = &path[lib_root.len() + 1..];
+        let overloads = intr.library_overloads(lib_root, method);
+        if !overloads.is_empty() {
+            return Resolution::BuiltinFn(overloads);
+        }
+        // Known library object, unknown member: still a built-in root, not a miss.
+        return Resolution::Opaque;
+    }
+
     let Some(project) = scope.project else {
         // project-less mode: locals only, everything else opaque
         return Resolution::Opaque;
@@ -129,4 +156,42 @@ fn symbol_exists(path: &str, scope: &Scope, table: &crate::symbols::SymbolTable)
         }
     }
     false
+}
+
+#[cfg(test)]
+mod intrinsics_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn scope() -> Scope<'static> {
+        Scope {
+            locals: HashMap::new(),
+            group: None,
+            project: None,
+        }
+    }
+
+    #[test]
+    fn resolves_library_object_and_method() {
+        // Project-less scope -> a library object/method still resolves via 4b.
+        match resolve("Calculate", &scope()) {
+            Resolution::BuiltinObject(n) => assert_eq!(n, "Calculate"),
+            other => panic!("expected BuiltinObject, got {other:?}"),
+        }
+        match resolve("CanComms.GetUnsignedInteger", &scope()) {
+            Resolution::BuiltinFn(ov) => {
+                assert!(!ov.is_empty());
+                assert_eq!(ov[0].name, "GetUnsignedInteger");
+            }
+            other => panic!("expected BuiltinFn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_library_root_stays_opaque() {
+        assert!(matches!(
+            resolve("Engine.Speed", &scope()),
+            Resolution::Opaque
+        ));
+    }
 }

@@ -63,6 +63,10 @@ pub fn type_of(node: Node, scope: &Scope) -> ValueType {
             match resolve(&path, scope) {
                 Resolution::Local(t) => t,
                 Resolution::Symbol(s) => s.value_type,
+                // A library object or a function reference used as a bare value
+                // has no value type; a call's return type is handled at
+                // CallExpression (v1: still Unknown).
+                Resolution::BuiltinObject(_) | Resolution::BuiltinFn(_) => ValueType::Unknown,
                 Resolution::Opaque | Resolution::Unresolved => ValueType::Unknown,
             }
         }

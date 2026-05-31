@@ -1,0 +1,2664 @@
+{
+  "$schema": "./m1-intrinsics.schema.json",
+  "version": 1,
+  "source": {
+    "origin": "MoTeC M1 Build Development Manual",
+    "m1BuildVersion": "1.4.0.0092",
+    "published": "2015-12-18",
+    "note": "Bootstrap seed transcribed from the manual. Replace/augment by regenerating from an M1 Build firmware export to pick up the installed firmware version and the project object tree."
+  },
+  "dataTypes": [
+    "FloatingPoint",
+    "Enumeration",
+    "Integer",
+    "UnsignedInteger",
+    "Boolean",
+    "String",
+    "FixedPoint7dps",
+    "Handle",
+    "Bit"
+  ],
+  "library": {
+    "Calculate": {
+      "doc": "Common arithmetic: statistical, trigonometric and time-based helpers, plus readability helpers.",
+      "functions": [
+        {
+          "name": "Absolute",
+          "returns": "Integer|FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Absolute value of argument.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Average",
+          "returns": "Integer|FloatingPoint",
+          "params": [
+            {
+              "name": "Argument1",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "Argument2",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Average of two arguments.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Between",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "min",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "max",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "filter",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "True if argument is within [min, max] for at least filter time.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Beyond",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "min",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "max",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "filter",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "True if argument is outside [min, max] for at least filter time.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Bias",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument1",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "Argument2",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "bias",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Biased average. bias -1 = min(a,b), 0 = average, +1 = max(a,b).",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Ceiling",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Round up to the next higher integer value.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "FastCos",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Cosine (<0.5% error).",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "FastSin",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Sine (<0.5% error).",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "FastSquareRoot",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Square root (<0.0013% error).",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "FastTan",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Tangent (<0.5% error).",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Floor",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Round down to the next lower integer value.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Hysteresis",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "Low",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "High",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "Filter",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "True if argument >= High for filter time, false if <= Low for filter time.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Infinity",
+          "returns": "FloatingPoint",
+          "params": [],
+          "doc": "A value representing positive infinity.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "InverseCos",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Inverse cosine.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "InverseSin",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Inverse sine.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "InverseTan",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Inverse tangent.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "InverseTan2",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "ArgumentY",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "ArgumentX",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Inverse tangent including quadrant.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "IsNAN",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Test whether the argument is not a number.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Max",
+          "returns": "Integer|FloatingPoint",
+          "params": [
+            {
+              "name": "Argument1",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "Argument2",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Greater of two arguments.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "MaximumFloat",
+          "returns": "FloatingPoint",
+          "params": [],
+          "doc": "The maximum floating point value.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Min",
+          "returns": "Integer|FloatingPoint",
+          "params": [
+            {
+              "name": "Argument1",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "Argument2",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Lesser of two arguments.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Modulo",
+          "returns": "Integer|FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "denom",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Remainder of Argument / denom.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "NAN",
+          "returns": "FloatingPoint",
+          "params": [],
+          "doc": "A value that is \"not a number\".",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "PI",
+          "returns": "FloatingPoint",
+          "params": [],
+          "doc": "Constant value of PI.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Power",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "x",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "y",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "x to the power of y.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Stable",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "Filter",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "True if argument has not changed for Filter seconds.",
+          "stateful": true,
+          "deprecated": false
+        }
+      ]
+    },
+    "CanComms": {
+      "doc": "CAN messaging control and status. Get*/Set* read/write fields of the message buffer held by a handle.",
+      "functions": [
+        {
+          "name": "BusStatus",
+          "returns": "Enumeration",
+          "params": [
+            {
+              "name": "bus",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Enumerated status of the specified bus.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "GetBit",
+          "returns": "Bit",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "bitoff",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Read one bit from message at bit offset 0..63.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "GetFixed7DP",
+          "returns": "FixedPoint7dps",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "bitoff",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Read fixed point 7DP number from CAN message.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "GetFloat",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "bitoff",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Read 32-bit IEEE754-2008 float from CAN message.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "GetID",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            }
+          ],
+          "doc": "Extract message ID from current CAN receive message.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "GetInteger",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "bitoff",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "bitlen",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Extract a signed integer of size bitlen (1..32) from offset bitoff (0..63) in current CAN receive message.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "GetLength",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            }
+          ],
+          "doc": "Message length in bytes of specified handle.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "GetTicks",
+          "returns": "UnsignedInteger",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            }
+          ],
+          "doc": "Message receive time in ticks.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "GetUnsignedInteger",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "bitoff",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "bitlen",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Extract an unsigned integer of size bitlen (1..32) from offset bitoff (0..63) in current CAN receive message.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Init",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "bus",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "kbaud",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Initialise CAN bus at kbaud kilobits/second.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "RxMessage",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            }
+          ],
+          "doc": "Receive CAN message from handle.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "RxOpenExtended",
+          "returns": "Handle",
+          "params": [
+            {
+              "name": "bus",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "match",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "mask",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "bigendian",
+              "type": "Boolean",
+              "doc": ""
+            }
+          ],
+          "doc": "Open a CAN receive handle on bus (0-2) at 29-bit address match with address mask, word alignment if bigendian.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "RxOpenStandard",
+          "returns": "Handle",
+          "params": [
+            {
+              "name": "bus",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "match",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "mask",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "bigendian",
+              "type": "Boolean",
+              "doc": ""
+            }
+          ],
+          "doc": "Open a CAN receive handle on bus (0-2) at 11-bit address match with address mask, word alignment if bigendian.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "SetBit",
+          "returns": "Void",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "bitoff",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "bitval",
+              "type": "Boolean",
+              "doc": ""
+            }
+          ],
+          "doc": "Set one bit in message at offset 0..63.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "SetFloat",
+          "returns": "Void",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "bitoff",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "value",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Write 32-bit IEEE754-2008 float into CAN message.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "SetInteger",
+          "returns": "Void",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "bitoff",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "bitlen",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "value",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Populate a signed integer of size bitlen (1..32) at offset bitoff (0..63) in current CAN transmit message.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "SetUnsignedInteger",
+          "returns": "Void",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "bitoff",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "bitlen",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "value",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Populate an unsigned integer of size bitlen (1..32) at offset bitoff (0..63) in current CAN transmit message.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "TxExtended",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "bus",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "ID",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Transmit from current handle on bus at 29-bit address ID.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "TxExtendedRR",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "bus",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "ID",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "len",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Transmit CAN remote request frame with extended id.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "TxInitialise",
+          "returns": "Void",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "len",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Clear message of current handle before populating; len bytes.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "TxOpen",
+          "returns": "Handle",
+          "params": [
+            {
+              "name": "bigendian",
+              "type": "Boolean",
+              "doc": ""
+            }
+          ],
+          "doc": "Open a transmit CAN handle; bigendian byte order if true.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "TxStandard",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "bus",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "ID",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Transmit from current handle on bus at 11-bit address ID; returns true if transmitted.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "TxStandardRR",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "bus",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "ID",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "len",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Transmit CAN remote request frame with standard id.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "XOR8",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            }
+          ],
+          "doc": "Exclusive-or of all bytes in message.",
+          "stateful": false,
+          "deprecated": false
+        }
+      ]
+    },
+    "Change": {
+      "doc": "Boolean results determined by whether the argument changed in a given fashion. Stateful.",
+      "functions": [
+        {
+          "name": "By",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "delta",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "filter",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "True if argument changed by delta for filter time.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "By",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "delta",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "True if argument changed by delta.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Down",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "delta",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "filter",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "True if argument changed downwards by delta for filter time.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Down",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "delta",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "True if argument changed downwards by delta.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Either",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "cond",
+              "type": "Boolean",
+              "doc": ""
+            },
+            {
+              "name": "filter",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "True for one iteration after >= filter seconds from cond changing.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Either",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "cond",
+              "type": "Boolean",
+              "doc": ""
+            }
+          ],
+          "doc": "True for one iteration after cond changes.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "From",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "cond",
+              "type": "Boolean",
+              "doc": ""
+            },
+            {
+              "name": "filter",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "True for one iteration after >= filter seconds from cond becoming false.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "From",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "cond",
+              "type": "Boolean",
+              "doc": ""
+            }
+          ],
+          "doc": "True for one iteration after cond becomes false.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "To",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "cond",
+              "type": "Boolean",
+              "doc": ""
+            },
+            {
+              "name": "filter",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "True for one iteration after >= filter seconds from cond becoming true.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "To",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "cond",
+              "type": "Boolean",
+              "doc": ""
+            }
+          ],
+          "doc": "True for one iteration after cond becomes true.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Up",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "delta",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "filter",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "True for one iteration after >= filter seconds from arg increasing past its previous value by delta.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Up",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "delta",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "True when arg increases past its previous value by delta.",
+          "stateful": true,
+          "deprecated": false
+        }
+      ]
+    },
+    "Convert": {
+      "doc": "Convert a value from one data type to another.",
+      "functions": [
+        {
+          "name": "ToInteger",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Round to nearest Integer.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "ToUnsignedInteger",
+          "returns": "UnsignedInteger",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Round to nearest Unsigned Integer.",
+          "stateful": false,
+          "deprecated": false
+        }
+      ]
+    },
+    "Debounce": {
+      "doc": "Boolean results determined by whether the argument stayed stable for the filter time (timing starts on a state change). Stateful.",
+      "functions": [
+        {
+          "name": "Fast",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "cond",
+              "type": "Boolean",
+              "doc": ""
+            },
+            {
+              "name": "filter",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Debounce cond for at least filter seconds.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Filter",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "cond",
+              "type": "Boolean",
+              "doc": ""
+            },
+            {
+              "name": "response",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Debounce cond with smoothing filter and 0.2/0.8 hysteresis.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Stable",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "cond",
+              "type": "Boolean",
+              "doc": ""
+            },
+            {
+              "name": "filter",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Debounce cond for >= filter seconds; restart if cond reverts.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Verify",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "cond",
+              "type": "Boolean",
+              "doc": ""
+            },
+            {
+              "name": "filter",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Debounce cond for >= filter seconds; verify new state after filtering.",
+          "stateful": true,
+          "deprecated": false
+        }
+      ]
+    },
+    "Delay": {
+      "doc": "Boolean (or delayed) results after a delay defined by the delay time. Stateful.",
+      "functions": [
+        {
+          "name": "Falling",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "cond",
+              "type": "Boolean",
+              "doc": ""
+            },
+            {
+              "name": "delay",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "cond must be false for >= delay seconds before output goes false.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Rising",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "cond",
+              "type": "Boolean",
+              "doc": ""
+            },
+            {
+              "name": "delay",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "cond must be true for >= delay seconds before output goes true.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Signal15",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "delay",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Delay signal by up to 15 samples.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Stable",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "delay",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "delta",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "argument must be stable for >= delay seconds before output goes true.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Stable",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "delay",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "argument must be stable for >= delay seconds before output goes true.",
+          "stateful": true,
+          "deprecated": false
+        }
+      ]
+    },
+    "Derivative": {
+      "doc": "Rate-of-change of a signal. Stateful.",
+      "functions": [
+        {
+          "name": "Normal",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Normal derivative.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Filtered",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Filtered derivative.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Adaptive",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "delta",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "max_dt",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Adaptive filtered derivative using minimum delta and maximum time max_dt before update.",
+          "stateful": true,
+          "deprecated": false
+        }
+      ]
+    },
+    "Filter": {
+      "doc": "Common filter models. y[n] = a0*x[n] + b1*y[n-1] with a0 = dT/(tc+dT), b1 = 1-a0. Stateful.",
+      "functions": [
+        {
+          "name": "FirstOrder",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "tc",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "First order filter of Argument with time constant tc.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "FirstOrder",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "tc",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "reset",
+              "type": "Boolean",
+              "doc": ""
+            }
+          ],
+          "doc": "First order filter with reset (resets to current x[n]).",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Maximum",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "tc",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Track higher value of Argument; filter towards smaller values.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Maximum",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "tc",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "reset",
+              "type": "Boolean",
+              "doc": ""
+            }
+          ],
+          "doc": "Filter.Maximum with reset.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Minimum",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "tc",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Track smaller value of Argument; filter towards greater values.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "Minimum",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "tc",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "reset",
+              "type": "Boolean",
+              "doc": ""
+            }
+          ],
+          "doc": "Filter.Minimum with reset.",
+          "stateful": true,
+          "deprecated": false
+        }
+      ]
+    },
+    "Integral": {
+      "doc": "Numerical integration. Stateful.",
+      "functions": [
+        {
+          "name": "Normal",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "min",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "max",
+              "type": "FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "reset",
+              "type": "Boolean",
+              "doc": ""
+            },
+            {
+              "name": "preset",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Integral of argument clamped within [min, max], with optional reset function and preset value.",
+          "stateful": true,
+          "deprecated": false
+        }
+      ]
+    },
+    "Limit": {
+      "doc": "Clamp the argument to max, min, or both.",
+      "functions": [
+        {
+          "name": "Max",
+          "returns": "Integer|FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "max",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Value limited to max.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Min",
+          "returns": "Integer|FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "min",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Value limited to min.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Range",
+          "returns": "Integer|FloatingPoint",
+          "params": [
+            {
+              "name": "Argument",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "min",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            },
+            {
+              "name": "max",
+              "type": "Integer|FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Value limited within [min, max].",
+          "stateful": false,
+          "deprecated": false
+        }
+      ]
+    },
+    "Logging": {
+      "doc": "Status of the logging system.",
+      "functions": [
+        {
+          "name": "Running",
+          "returns": "Boolean",
+          "params": [],
+          "doc": "True if logging is running.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Running",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "system",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "True if logging system (0-7) is running.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Unloading",
+          "returns": "Boolean",
+          "params": [],
+          "doc": "True if logging is unloading.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Unloading",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "system",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "True if logging system (0-7) is unloading.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Used",
+          "returns": "FloatingPoint",
+          "params": [
+            {
+              "name": "system",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Ratio of flash memory used in system (0-7).",
+          "stateful": false,
+          "deprecated": false
+        }
+      ]
+    },
+    "Serial": {
+      "doc": "Serial (RS232/LIN) messaging. Get*/Set* read/write the message buffer held by a handle.",
+      "functions": [
+        {
+          "name": "GetHandle",
+          "returns": "Handle",
+          "params": [
+            {
+              "name": "bigendian",
+              "type": "Boolean",
+              "doc": ""
+            }
+          ],
+          "doc": "Open a serial handle.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "GetInteger",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "offset",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "length",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Read signed integer.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "GetLinOffset",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "id",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Find the data offset for a LIN frame with the specified ID.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "GetTransmitHandle",
+          "returns": "Handle",
+          "params": [
+            {
+              "name": "bigendian",
+              "type": "Boolean",
+              "doc": ""
+            }
+          ],
+          "doc": "Open transmit-mode serial handle.",
+          "stateful": false,
+          "deprecated": true
+        },
+        {
+          "name": "GetUnsignedInteger",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "offset",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "length",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Read unsigned integer.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "LinDump",
+          "returns": "Void",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            }
+          ],
+          "doc": "Print all packets to the ECU log.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "PortDiagnostic",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "port",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Check serial port diagnostic.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "PortInit",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "port",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "baud",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "protocol",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Initialise serial port for communications.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Receive",
+          "returns": "Boolean",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "port",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Receive data from the serial port.",
+          "stateful": true,
+          "deprecated": false
+        },
+        {
+          "name": "SetFloat",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "offset",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "value",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Write floating point value into serial message.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "SetInteger",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "offset",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "length",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "value",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Write integer into serial message.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "SetLinHeader",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "offset",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "length",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "id",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "tx",
+              "type": "Boolean",
+              "doc": ""
+            },
+            {
+              "name": "enhanced",
+              "type": "Boolean",
+              "doc": ""
+            }
+          ],
+          "doc": "Write a LIN header into the serial message.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "SetString",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "offset",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "length",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "text",
+              "type": "String",
+              "doc": ""
+            }
+          ],
+          "doc": "Write a string into serial message.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "SetUnsignedInteger",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "offset",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "length",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "value",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Write unsigned integer into serial message.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Sum8",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "offset",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "length",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Sum of the message data bytes.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Transmit",
+          "returns": "Void",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "port",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "length",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Send length bytes on serial port.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "XOR8",
+          "returns": "Integer",
+          "params": [
+            {
+              "name": "handle",
+              "type": "Handle",
+              "doc": ""
+            },
+            {
+              "name": "offset",
+              "type": "Integer",
+              "doc": ""
+            },
+            {
+              "name": "length",
+              "type": "Integer",
+              "doc": ""
+            }
+          ],
+          "doc": "Exclusive-or of the message data bytes.",
+          "stateful": false,
+          "deprecated": false
+        }
+      ]
+    },
+    "System": {
+      "doc": "ECU system services: timing, memory, debug, tuning state.",
+      "functions": [
+        {
+          "name": "AllowTuning",
+          "returns": "Void",
+          "params": [
+            {
+              "name": "value",
+              "type": "Boolean",
+              "doc": ""
+            }
+          ],
+          "doc": "Enable or disable calibration modifications.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "CpuIdle",
+          "returns": "FloatingPoint",
+          "params": [],
+          "doc": "Proportion of time the CPU is idle (ratio).",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Debug",
+          "returns": "Void",
+          "params": [
+            {
+              "name": "msg",
+              "type": "String",
+              "doc": ""
+            }
+          ],
+          "doc": "Write a message to the ECU system log.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Debug",
+          "returns": "Void",
+          "params": [
+            {
+              "name": "msg",
+              "type": "String",
+              "doc": ""
+            },
+            {
+              "name": "value",
+              "type": "FloatingPoint",
+              "doc": ""
+            }
+          ],
+          "doc": "Write a message to the ECU system log with a value.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "ElapsedTime",
+          "returns": "FloatingPoint",
+          "params": [],
+          "doc": "Elapsed seconds since this line of code was executed.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "EventMiss",
+          "returns": "UnsignedInteger",
+          "params": [],
+          "doc": "Times this thread has missed an event.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "FlashSize",
+          "returns": "UnsignedInteger",
+          "params": [],
+          "doc": "Size of flash memory.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "HiResTickPeriod",
+          "returns": "FloatingPoint",
+          "params": [],
+          "doc": "High resolution tick period in seconds.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "HiResTicks",
+          "returns": "UnsignedInteger",
+          "params": [],
+          "doc": "High resolution tick count (<10 seconds).",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "HiResTicksSince",
+          "returns": "UnsignedInteger",
+          "params": [
+            {
+              "name": "prev",
+              "type": "UnsignedInteger",
+              "doc": ""
+            }
+          ],
+          "doc": "Elapsed high resolution ticks since the supplied tick count.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Preserve",
+          "returns": "Void",
+          "params": [],
+          "doc": "Force a preserve of all flash-backed channels (max 1Hz).",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "RamSize",
+          "returns": "UnsignedInteger",
+          "params": [],
+          "doc": "Size of RAM memory.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "SerialNumber",
+          "returns": "UnsignedInteger",
+          "params": [],
+          "doc": "ECU serial number.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "TickPeriod",
+          "returns": "FloatingPoint",
+          "params": [],
+          "doc": "System tick period in seconds.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "Ticks",
+          "returns": "UnsignedInteger",
+          "params": [],
+          "doc": "Current system tick count.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "TicksBetween",
+          "returns": "UnsignedInteger",
+          "params": [
+            {
+              "name": "begin",
+              "type": "UnsignedInteger",
+              "doc": ""
+            },
+            {
+              "name": "end",
+              "type": "UnsignedInteger",
+              "doc": ""
+            }
+          ],
+          "doc": "Ticks between begin and end.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "TicksRemaining",
+          "returns": "UnsignedInteger",
+          "params": [
+            {
+              "name": "ticks",
+              "type": "UnsignedInteger",
+              "doc": ""
+            },
+            {
+              "name": "limit",
+              "type": "UnsignedInteger",
+              "doc": ""
+            }
+          ],
+          "doc": "Ticks from ticks to limit.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "TicksSince",
+          "returns": "UnsignedInteger",
+          "params": [
+            {
+              "name": "prev",
+              "type": "UnsignedInteger",
+              "doc": ""
+            }
+          ],
+          "doc": "Ticks since prev.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "TimedDebug",
+          "returns": "Void",
+          "params": [
+            {
+              "name": "msg",
+              "type": "String",
+              "doc": ""
+            }
+          ],
+          "doc": "Write a log message, limited to one per second.",
+          "stateful": false,
+          "deprecated": false
+        },
+        {
+          "name": "XcpConnected",
+          "returns": "Boolean",
+          "params": [],
+          "doc": "True if tune software is connected to the ECU.",
+          "stateful": false,
+          "deprecated": false
+        }
+      ]
+    }
+  },
+  "objectMethods": [
+    {
+      "name": "AsInteger",
+      "returns": "Integer",
+      "params": [],
+      "doc": "Integer representation of an enumerated value.",
+      "stateful": false,
+      "deprecated": false
+    },
+    {
+      "name": "AsString",
+      "returns": "String",
+      "params": [],
+      "doc": "String representation of an enumerated value.",
+      "stateful": false,
+      "deprecated": false
+    },
+    {
+      "name": "Set",
+      "returns": "Void",
+      "params": [
+        {
+          "name": "v",
+          "type": "Integer|FloatingPoint",
+          "doc": ""
+        }
+      ],
+      "doc": "Set the object to v (clamped to validation range).",
+      "stateful": false,
+      "deprecated": false
+    },
+    {
+      "name": "Validate",
+      "returns": "Boolean",
+      "params": [
+        {
+          "name": "v",
+          "type": "Integer|FloatingPoint",
+          "doc": ""
+        }
+      ],
+      "doc": "True if v is within the validation range.",
+      "stateful": false,
+      "deprecated": false
+    },
+    {
+      "name": "Constrain",
+      "returns": "Integer|FloatingPoint",
+      "params": [
+        {
+          "name": "v",
+          "type": "Integer|FloatingPoint",
+          "doc": ""
+        }
+      ],
+      "doc": "Constrain v to the object's limits.",
+      "stateful": false,
+      "deprecated": false
+    },
+    {
+      "name": "GetUnscheduled",
+      "returns": "Integer|FloatingPoint",
+      "params": [],
+      "doc": "Read value but exclude from scheduling dependency analysis.",
+      "stateful": false,
+      "deprecated": false
+    },
+    {
+      "name": "Lookup",
+      "returns": "FloatingPoint",
+      "params": [
+        {
+          "name": "x",
+          "type": "Integer|FloatingPoint",
+          "doc": ""
+        },
+        {
+          "name": "y",
+          "type": "Integer|FloatingPoint",
+          "doc": ""
+        },
+        {
+          "name": "z",
+          "type": "Integer|FloatingPoint",
+          "doc": ""
+        }
+      ],
+      "doc": "Interpolated table lookup (y, z optional depending on axis count).",
+      "stateful": false,
+      "deprecated": false
+    }
+  ],
+  "integratedOnly": [
+    "BR2",
+    "GPS",
+    "LTC",
+    "MDD",
+    "PDM",
+    "RS232Comms",
+    "VCS"
+  ],
+  "language": {
+    "keywords": {
+      "control": [
+        "if",
+        "else",
+        "when",
+        "is",
+        "expand",
+        "to"
+      ],
+      "declaration": [
+        "local",
+        "static"
+      ],
+      "logical": [
+        "and",
+        "or",
+        "not"
+      ],
+      "comparison": [
+        "eq",
+        "neq"
+      ],
+      "literal": [
+        "true",
+        "false"
+      ],
+      "scope": [
+        "In",
+        "Out",
+        "Parent",
+        "Root",
+        "This",
+        "Library"
+      ]
+    },
+    "scopeAnchors": {
+      "In": "Input-arguments object of the current function; In.<Arg> reads an arg.",
+      "Out": "Return-value object of the current function; assign with Out = ....",
+      "Parent": "The parent group of the current object; chain Parent.Parent. to walk further up the group tree.",
+      "Root": "The project root group; start of an absolute object reference.",
+      "This": "The group the current object lives in; disambiguates same-named objects / library names.",
+      "Library": "Forces the library namespace; use when a project object shadows a library name, e.g. Library.Calculate.Max(...)."
+    },
+    "operators": {
+      "assign": "=",
+      "add": "+",
+      "subtract": "-",
+      "multiply": "*",
+      "divide": "/",
+      "modulo": "%",
+      "negate": "-",
+      "gt": ">",
+      "lt": "<",
+      "ge": ">=",
+      "le": "<=",
+      "bitNot": "~",
+      "bitAnd": "&",
+      "bitOr": "|",
+      "bitXor": "^",
+      "shiftLeft": "<<",
+      "shiftRight": ">>",
+      "addAssign": "+=",
+      "subAssign": "-=",
+      "mulAssign": "*=",
+      "divAssign": "/=",
+      "modAssign": "%=",
+      "andAssign": "&=",
+      "orAssign": "|=",
+      "xorAssign": "^=",
+      "shlAssign": "<<=",
+      "shrAssign": ">>=",
+      "comma": ",",
+      "member": ".",
+      "ternaryThen": "?",
+      "ternaryElse": ":",
+      "call": "()"
+    },
+    "unsupported": {
+      "==": "use 'eq' (only on Integer or Enumeration; never on Floating Point)",
+      "!=": "use 'neq' (only on Integer or Enumeration)",
+      "&&": "use 'and'",
+      "||": "use 'or'",
+      "!": "use 'not'",
+      "while": "iteration is not supported; M1 code runs once per scheduled event",
+      "for": "iteration is not supported; use 'expand ... to' for inline repeats",
+      "do": "iteration is not supported"
+    },
+    "lexing": {
+      "comments": [
+        "/* C-style block */",
+        "// C++-style line"
+      ],
+      "shortCircuit": true,
+      "identifiersMayContainSpaces": true,
+      "localDeclaration": "local [<Type>] name = value;  (type inferred if omitted)",
+      "staticLocalDeclaration": "static local [<Type>] name = value;  (initialiser must be literal/enumerator/constant)",
+      "expandSubstitution": "$(name) inside an 'expand (name = a to b) { }' block (pure text substitution, not type-checked)",
+      "numericLiterals": [
+        "floating point e.g. 1.0",
+        "signed integer e.g. 1",
+        "hexadecimal e.g. 0x4B4"
+      ]
+    },
+    "naming": {
+      "objects": "Begin with an uppercase letter; spaces allowed between words; referenced by parent group (Fuel.Pressure).",
+      "locals": "Begin with a lowercase letter (camelCase optional); no spaces.",
+      "enumerators": "Keep short; value 0 = neutral/initial state; negatives for errors, positives for normal operation."
+    }
+  },
+  "diagnostics": [
+    {
+      "id": "stateful-conditional",
+      "severity": "error",
+      "rule": "A stateful (purple-icon) library function must not be called conditionally or inside a comparison; call it every execution.",
+      "source": "library[*].functions[*].stateful"
+    },
+    {
+      "id": "channel-single-assignment",
+      "severity": "error",
+      "rule": "A channel may be assigned at most once per code path (not in two functions, not twice in one). Use if/else or a local instead.",
+      "source": "Assignment of variables"
+    },
+    {
+      "id": "float-equality",
+      "severity": "error",
+      "rule": "Equality/inequality (eq/neq) is not supported on Floating Point; compare with a tolerance via Calculate.Absolute(a - b) < eps.",
+      "source": "Comparisons"
+    },
+    {
+      "id": "signed-unsigned-compare",
+      "severity": "error",
+      "rule": "Comparisons between signed and unsigned integers are not allowed; use Convert.ToInteger / Convert.ToUnsignedInteger.",
+      "source": "Comparisons"
+    },
+    {
+      "id": "when-is-exhaustive",
+      "severity": "error",
+      "rule": "A when/is must cover every enumerator of the argument's enum.",
+      "source": "Constructs / when...is"
+    },
+    {
+      "id": "integrated-only-call",
+      "severity": "warning",
+      "rule": "Integrated-only objects (BR2, GPS, ...) must not be called directly.",
+      "source": "integratedOnly"
+    },
+    {
+      "id": "deprecated-overload",
+      "severity": "hint",
+      "rule": "Overload is deprecated; prefer its replacement.",
+      "source": "library[*].functions[*].deprecated"
+    },
+    {
+      "id": "name-case-collision",
+      "severity": "warning",
+      "rule": "Names must not differ only by case, nor collide with a class or library function name.",
+      "source": "Naming Conventions"
+    },
+    {
+      "id": "unsupported-c-token",
+      "severity": "error",
+      "rule": "Token is not part of M1PL (see 'unsupported' for replacement).",
+      "source": "unsupported"
+    }
+  ]
+}

@@ -178,6 +178,8 @@ fn classify_path(path: &str, scope: &Scope) -> (u32, u32) {
                 (TT_VARIABLE, 0)
             }
         },
+        Resolution::BuiltinObject(_) => (TT_NAMESPACE, 0),
+        Resolution::BuiltinFn(_) => (TT_FUNCTION, 0),
         Resolution::Opaque | Resolution::Unresolved => (TT_VARIABLE, 0),
     }
 }

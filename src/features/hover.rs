@@ -43,6 +43,47 @@ fn symbol_markdown(sym: &Symbol) -> String {
     s
 }
 
+use m1_typecheck::intrinsics::Overload;
+
+/// `(p1: T1, p2: T2) -> Ret` for one overload signature.
+fn signature(path: &str, ov: &Overload) -> String {
+    let params: Vec<String> = ov
+        .params
+        .iter()
+        .map(|p| format!("{}: {}", p.name, p.ty))
+        .collect();
+    format!("{path}({}) -> {}", params.join(", "), ov.returns)
+}
+
+fn builtin_object_markdown(name: &str) -> String {
+    let doc = m1_typecheck::intrinsics::get()
+        .library_object(name)
+        .map(|o| o.doc.as_str())
+        .unwrap_or("");
+    format!("**{name}** `library object`\n\n{doc}")
+}
+
+fn builtin_fn_markdown(path: &str, overloads: &[&Overload]) -> String {
+    let mut s = format!("**{path}** `library function`\n\n");
+    for ov in overloads {
+        s.push_str(&format!("```\n{}\n```\n", signature(path, ov)));
+    }
+    if let Some(first) = overloads.first() {
+        if !first.doc.is_empty() {
+            s.push_str(&format!("\n{}\n", first.doc));
+        }
+        if first.stateful {
+            s.push_str(
+                "\n⚠ **stateful** — call it on every execution; never inside an `if`/`when` or a comparison.",
+            );
+        }
+        if first.deprecated {
+            s.push_str("\n⚠ **deprecated**");
+        }
+    }
+    s
+}
+
 /// Render hover for the path at `byte`. `project`/`file_name` drive resolution.
 pub fn hover(
     root: m1_core::Node,
@@ -57,6 +98,8 @@ pub fn hover(
     let md = match resolve(&path, &scope) {
         Resolution::Local(t) => format!("**{path}** `local`\n\ntype: `{}`", value_type_str(t)),
         Resolution::Symbol(sym) => symbol_markdown(sym),
+        Resolution::BuiltinObject(name) => builtin_object_markdown(name),
+        Resolution::BuiltinFn(overloads) => builtin_fn_markdown(&path, &overloads),
         Resolution::Opaque => format!("**{path}**\n\nbuilt-in symbol — type not modelled"),
         Resolution::Unresolved => return None,
     };
@@ -102,6 +145,22 @@ mod tests {
                 "hover should not say 'type unknown' for opaque symbols: {}",
                 m.value
             );
+        } else {
+            panic!("expected markup");
+        }
+    }
+
+    #[test]
+    fn library_function_hover_shows_signature() {
+        let src = "x = Calculate.Max(a, b);\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find("Max").unwrap();
+        let h = hover(cst.root(), byte, None, None, &li, PositionEncoding::Utf16).unwrap();
+        if let HoverContents::Markup(m) = h.contents {
+            assert!(m.value.contains("library function"), "{}", m.value);
+            assert!(m.value.contains("Calculate.Max"), "{}", m.value);
+            assert!(m.value.contains("->"), "{}", m.value);
         } else {
             panic!("expected markup");
         }
