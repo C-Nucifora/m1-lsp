@@ -589,6 +589,8 @@ dependencies = [
  "clap",
  "m1-core",
  "roxmltree",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

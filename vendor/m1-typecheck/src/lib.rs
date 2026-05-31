@@ -2,6 +2,7 @@
 pub mod audit;
 pub mod diagnostics;
 pub mod flow;
+pub mod intrinsics;
 pub mod project;
 pub mod resolve;
 pub mod rules;

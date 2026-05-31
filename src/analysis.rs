@@ -1,7 +1,41 @@
 //! The analysis pass: union of m1-core syntax, m1-lint, and m1-typecheck diagnostics.
 use crate::convert;
 use crate::line_index::{LineIndex, PositionEncoding};
-use tower_lsp::lsp_types::{Diagnostic as LspDiag, NumberOrString, Url};
+use tower_lsp::lsp_types::{Diagnostic as LspDiag, DiagnosticSeverity, NumberOrString, Url};
+
+/// `unsupported-c-token`: flag C operators that M1 doesn't accept (`==`/`!=`/
+/// `&&`/`||`/`!`), with the M1 replacement from the intrinsic language table.
+fn unsupported_c_tokens(
+    root: m1_core::Node,
+    li: &LineIndex,
+    enc: PositionEncoding,
+) -> Vec<LspDiag> {
+    let intr = m1_typecheck::intrinsics::get();
+    let mut out = Vec::new();
+    fn walk(
+        n: m1_core::Node,
+        intr: &'static m1_typecheck::intrinsics::Intrinsics,
+        li: &LineIndex,
+        enc: PositionEncoding,
+        out: &mut Vec<LspDiag>,
+    ) {
+        if let Some(replacement) = intr.unsupported_c_token(n.kind_str()) {
+            out.push(LspDiag {
+                range: convert::range(&n.byte_range(), li, enc),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: Some(NumberOrString::String("unsupported-c-token".into())),
+                source: Some("m1-intrinsics".into()),
+                message: format!("`{}` is not valid in M1 — {replacement}", n.kind_str()),
+                ..Default::default()
+            });
+        }
+        for c in n.children() {
+            walk(c, intr, li, enc, out);
+        }
+    }
+    walk(root, intr, li, enc, &mut out);
+    out
+}
 
 /// Source of lint diagnostics (v1).
 pub trait LintProvider: Send + Sync {
@@ -53,6 +87,7 @@ pub fn analyze(
         .iter()
         .map(|d| convert::core_diagnostic(d, li, enc))
         .collect();
+    out.extend(unsupported_c_tokens(cst.root(), li, enc));
 
     let mut lint_diags = lint.lint(src, li, enc);
     // When a project is loaded, m1-typecheck's T002 supersedes m1-lint's L006
@@ -162,6 +197,20 @@ mod tests {
         assert!(
             diags.iter().any(is_l006),
             "L006 must survive without a project"
+        );
+    }
+
+    #[test]
+    fn flags_unsupported_c_tokens() {
+        let src = "x = a == b and c;\n"; // == is a C token; 'and' is fine
+        let li = LineIndex::new(src);
+        let diags = analyze(&uri(), src, &li, PositionEncoding::Utf16, &NoLint, &NoTypes);
+        assert!(
+            diags.iter().any(|d| d.code
+                == Some(tower_lsp::lsp_types::NumberOrString::String(
+                    "unsupported-c-token".into()
+                ))),
+            "expected an unsupported-c-token diagnostic for `==`"
         );
     }
 }
