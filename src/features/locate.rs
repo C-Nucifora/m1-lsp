@@ -42,6 +42,35 @@ pub fn path_at_byte(root: Node, byte: usize) -> Option<(Node, String)> {
     Some((top, top.text().to_string()))
 }
 
+/// Infer the type of a single `local` declaration: a Hungarian name prefix wins,
+/// otherwise the initializer expression's type (literals/arithmetic only, via an
+/// empty scope so there are no cross-local ordering hazards).
+pub fn local_decl_type(decl: Node) -> ValueType {
+    let Some(name) = decl
+        .named_children()
+        .into_iter()
+        .find(|c| c.kind() == Kind::Identifier)
+    else {
+        return ValueType::Unknown;
+    };
+    type_from_hungarian(name.text()).unwrap_or_else(|| {
+        let initializer = decl
+            .named_children()
+            .into_iter()
+            .find(|c| c.kind() != Kind::Identifier && c.kind() != Kind::TypeAnnotation);
+        if let Some(init) = initializer {
+            let empty_scope = Scope {
+                locals: HashMap::new(),
+                group: None,
+                project: None,
+            };
+            m1_typecheck::typer::type_of(init, &empty_scope)
+        } else {
+            ValueType::Unknown
+        }
+    })
+}
+
 /// Collect locals (name -> inferred type) from the CST, mirroring m1-typecheck.
 pub fn collect_locals(root: Node) -> HashMap<String, ValueType> {
     let mut locals = HashMap::new();
@@ -52,24 +81,7 @@ pub fn collect_locals(root: Node) -> HashMap<String, ValueType> {
                 .into_iter()
                 .find(|c| c.kind() == Kind::Identifier)
             {
-                let t = type_from_hungarian(name.text()).unwrap_or_else(|| {
-                    // Fall back to typing the initializer expression.
-                    let initializer = n
-                        .named_children()
-                        .into_iter()
-                        .find(|c| c.kind() != Kind::Identifier && c.kind() != Kind::TypeAnnotation);
-                    if let Some(init) = initializer {
-                        let empty_scope = m1_typecheck::resolve::Scope {
-                            locals: HashMap::new(),
-                            group: None,
-                            project: None,
-                        };
-                        m1_typecheck::typer::type_of(init, &empty_scope)
-                    } else {
-                        ValueType::Unknown
-                    }
-                });
-                locals.insert(name.text().to_string(), t);
+                locals.insert(name.text().to_string(), local_decl_type(n));
             }
         }
         for c in n.children() {

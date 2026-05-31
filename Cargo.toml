@@ -1,6 +1,6 @@
 [package]
 name = "m1-lsp"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Language server for the MoTeC M1 script language (.m1scr)"
 publish = false
