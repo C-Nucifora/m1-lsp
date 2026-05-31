@@ -45,10 +45,31 @@ fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
         }
         return s;
     }
-    // Name the concrete enum type when known (e.g. `Enum (Drive State)`).
+    // Name the concrete enum type when known (e.g. `Enum (Drive State)`), and
+    // collect its valid values to list below.
+    let mut enum_values: Option<String> = None;
     let type_str = match sym.value_type {
-        ValueType::Enum(id) => match project.map(|p| p.symbols().enum_type(id).name.as_str()) {
-            Some(name) => format!("Enum ({name})"),
+        ValueType::Enum(id) => match project.map(|p| p.symbols().enum_type(id)) {
+            Some(et) => {
+                // List members in ContainerOrder, marking the default.
+                let mut members: Vec<&(String, i64)> = et.members.iter().collect();
+                members.sort_by_key(|(_, order)| *order);
+                let list = members
+                    .iter()
+                    .map(|(name, _)| {
+                        if et.default.as_deref() == Some(name.as_str()) {
+                            format!("`{name}` (default)")
+                        } else {
+                            format!("`{name}`")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !list.is_empty() {
+                    enum_values = Some(list);
+                }
+                format!("Enum ({})", et.name)
+            }
             None => "Enum".to_string(),
         },
         other => value_type_str(other).to_string(),
@@ -56,6 +77,9 @@ fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
     s.push_str(&format!("type: `{type_str}`"));
     if let Some(unit) = &sym.unit {
         s.push_str(&format!("  ·  unit: `{unit}`"));
+    }
+    if let Some(values) = enum_values {
+        s.push_str(&format!("\n\nvalues: {values}"));
     }
     s
 }
@@ -159,8 +183,10 @@ mod tests {
                 br#"<?xml version="1.0"?>
 <Project>
   <DataTypes>
-    <Type Name="Drive State" Storage="enum" Default="Off">
+    <Type Name="Drive State" Storage="enum" Default="Idle">
+      <Enum Name="Idle" ContainerOrder="1"/>
       <Enum Name="Off" ContainerOrder="0"/>
+      <Enum Name="Running" ContainerOrder="2"/>
     </Type>
   </DataTypes>
   <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
@@ -187,6 +213,19 @@ mod tests {
             assert!(
                 m.value.contains("Drive State"),
                 "hover should name the enum type, got: {}",
+                m.value
+            );
+            // Lists every valid value, in ContainerOrder, with the default marked.
+            assert!(m.value.contains("values:"), "got: {}", m.value);
+            assert!(m.value.contains("`Off`"), "got: {}", m.value);
+            assert!(m.value.contains("`Idle` (default)"), "got: {}", m.value);
+            assert!(m.value.contains("`Running`"), "got: {}", m.value);
+            let off = m.value.find("`Off`").unwrap();
+            let idle = m.value.find("`Idle`").unwrap();
+            let running = m.value.find("`Running`").unwrap();
+            assert!(
+                off < idle && idle < running,
+                "values not in ContainerOrder: {}",
                 m.value
             );
         } else {
