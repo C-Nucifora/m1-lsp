@@ -306,18 +306,20 @@ impl LanguageServer for Backend {
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        let uri = params.text_document_position.text_document.uri;
+        let tdp = params.text_document_position;
+        let uri = tdp.text_document.uri;
         let Some(doc) = self.docs.get(&uri) else {
             return Ok(None);
         };
+        let byte = doc.line_index.offset(tdp.position, &doc.text, self.enc());
         let cst = m1_core::parse(&doc.text);
         let file_name = uri
             .to_file_path()
             .ok()
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
-        let items = self
-            .store
-            .with_project(|p| completion::completions(cst.root(), p, file_name.as_deref()));
+        let items = self.store.with_project(|p| {
+            completion::completions(cst.root(), p, file_name.as_deref(), &doc.text, byte)
+        });
         Ok(Some(CompletionResponse::Array(items)))
     }
 
