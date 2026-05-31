@@ -57,7 +57,7 @@ pub fn hover(
     let md = match resolve(&path, &scope) {
         Resolution::Local(t) => format!("**{path}** `local`\n\ntype: `{}`", value_type_str(t)),
         Resolution::Symbol(sym) => symbol_markdown(sym),
-        Resolution::Opaque => format!("**{path}**\n\nbuilt-in / opaque (type unknown)"),
+        Resolution::Opaque => format!("**{path}**\n\nbuilt-in symbol — type not modelled"),
         Resolution::Unresolved => return None,
     };
     Some(Hover {
@@ -83,6 +83,25 @@ mod tests {
         if let HoverContents::Markup(m) = h.contents {
             assert!(m.value.contains("local"));
             assert!(m.value.contains("Float"));
+        } else {
+            panic!("expected markup");
+        }
+    }
+
+    #[test]
+    fn opaque_hover_does_not_say_type_unknown() {
+        // "Output" has no project context — resolves as Opaque.
+        let src = "Output.Value = 1;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find("Output").unwrap();
+        let h = hover(cst.root(), byte, None, None, &li, PositionEncoding::Utf16).unwrap();
+        if let HoverContents::Markup(m) = h.contents {
+            assert!(
+                !m.value.contains("type unknown"),
+                "hover should not say 'type unknown' for opaque symbols: {}",
+                m.value
+            );
         } else {
             panic!("expected markup");
         }
