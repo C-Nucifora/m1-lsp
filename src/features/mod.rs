@@ -7,3 +7,4 @@ pub mod hover;
 pub mod inlay;
 pub mod locate;
 pub mod rename;
+pub mod semantic_tokens;

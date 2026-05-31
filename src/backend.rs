@@ -8,7 +8,7 @@ use tower_lsp::{Client, LanguageServer};
 
 use crate::analysis::{analyze, LintProvider, NoLint, NoTypes, TypeProvider};
 use crate::document::Document;
-use crate::features::{completion, document_symbols, goto, hover, inlay, rename};
+use crate::features::{completion, document_symbols, goto, hover, inlay, rename, semantic_tokens};
 use crate::format::{format_edits, Formatter, NoFormat};
 use crate::line_index::PositionEncoding;
 use crate::project_store::ProjectStore;
@@ -161,6 +161,16 @@ impl LanguageServer for Backend {
                     prepare_provider: Some(true),
                     work_done_progress_options: Default::default(),
                 })),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: semantic_tokens::legend(),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            range: None,
+                            work_done_progress_options: Default::default(),
+                        },
+                    ),
+                ),
                 ..Default::default()
             },
         })
@@ -356,6 +366,36 @@ impl LanguageServer for Backend {
             &doc.line_index,
             self.enc(),
         ))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri;
+        let Some(doc) = self.docs.get(&uri) else {
+            return Ok(None);
+        };
+        let cst = m1_core::parse(&doc.text);
+        let file_name = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let li = &doc.line_index;
+        let enc = self.enc();
+        let tokens = self.store.with_project(|p| {
+            semantic_tokens::semantic_tokens(
+                cst.root(),
+                p.map(|lp| &lp.project),
+                file_name.as_deref(),
+                li,
+                enc,
+            )
+        });
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: tokens,
+        })))
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
