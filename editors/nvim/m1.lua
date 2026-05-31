@@ -59,6 +59,13 @@ vim.api.nvim_create_autocmd("LspAttach", {
     vim.keymap.set("n", "K", vim.lsp.buf.hover, opts)
     vim.keymap.set("n", "gd", vim.lsp.buf.definition, opts)
     vim.keymap.set("n", "gO", vim.lsp.buf.document_symbol, opts)
+    -- Rename a local variable and all its references (Nvim 0.11+ also maps `grn`).
+    vim.keymap.set("n", "<leader>rn", vim.lsp.buf.rename, opts)
+    -- Inline type hints (`: Integer`) after locals. Toggle off with
+    -- `:lua vim.lsp.inlay_hint.enable(false)` if you find them noisy.
+    if vim.lsp.inlay_hint and vim.lsp.inlay_hint.enable then
+      vim.lsp.inlay_hint.enable(true, { bufnr = args.buf })
+    end
     -- Completion (Nvim 0.11+ built-in; otherwise use <C-x><C-o> via omnifunc).
     if vim.lsp.completion and vim.lsp.completion.enable then
       vim.lsp.completion.enable(true, client.id, args.buf, { autotrigger = false })

@@ -83,6 +83,13 @@ buffer-local keymaps on `LspAttach`:
   group-relative tail for the current file's group) plus in-scope locals. Use
   the Nvim 0.11+ built-in completion (enabled by the snippet) or
   `<C-x><C-o>` via `omnifunc`.
+- **Rename** — `<leader>rn` (or the built-in `grn` on Nvim 0.11+): renames a
+  `local` variable and every reference to it in the file. Only locals are
+  renameable — channels, parameters and other project symbols are declared in
+  `Project.m1prj`, not the script, so `prepareRename` rejects them.
+- **Inline type hints** — an inlay `: Type` after each `local` whose type is
+  inferred and that isn't already `<Type>`-annotated (same inference as hover).
+  Enabled by the snippet; toggle off with `:lua vim.lsp.inlay_hint.enable(false)`.
 
 **`root_dir` matters now.** The project model (and therefore `T001`, hover,
 goto, and project completions) only loads when the server's `root_dir` is at or

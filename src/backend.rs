@@ -2,13 +2,13 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tower_lsp::jsonrpc::Result;
+use tower_lsp::jsonrpc::{Error, Result};
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 use crate::analysis::{analyze, LintProvider, NoLint, NoTypes, TypeProvider};
 use crate::document::Document;
-use crate::features::{completion, document_symbols, goto, hover};
+use crate::features::{completion, document_symbols, goto, hover, inlay, rename};
 use crate::format::{format_edits, Formatter, NoFormat};
 use crate::line_index::PositionEncoding;
 use crate::project_store::ProjectStore;
@@ -156,6 +156,11 @@ impl LanguageServer for Backend {
                 definition_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions::default()),
+                inlay_hint_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
                 ..Default::default()
             },
         })
@@ -297,6 +302,60 @@ impl LanguageServer for Backend {
             .store
             .with_project(|p| completion::completions(cst.root(), p, file_name.as_deref()));
         Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri;
+        let Some(doc) = self.docs.get(&uri) else {
+            return Ok(None);
+        };
+        let cst = m1_core::parse(&doc.text);
+        let hints = inlay::inlay_hints(cst.root(), params.range, &doc.line_index, self.enc());
+        Ok(Some(hints))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri;
+        let Some(doc) = self.docs.get(&uri) else {
+            return Ok(None);
+        };
+        let byte = doc
+            .line_index
+            .offset(params.position, &doc.text, self.enc());
+        let cst = m1_core::parse(&doc.text);
+        Ok(rename::prepare_rename(
+            cst.root(),
+            byte,
+            &doc.line_index,
+            self.enc(),
+        ))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let new_name = params.new_name;
+        if !rename::is_valid_identifier(&new_name) {
+            return Err(Error::invalid_params(format!(
+                "'{new_name}' is not a valid M1 local name (letters, digits, underscore; no leading digit or spaces)"
+            )));
+        }
+        let tdp = params.text_document_position;
+        let uri = tdp.text_document.uri;
+        let Some(doc) = self.docs.get(&uri) else {
+            return Ok(None);
+        };
+        let byte = doc.line_index.offset(tdp.position, &doc.text, self.enc());
+        let cst = m1_core::parse(&doc.text);
+        Ok(rename::rename(
+            cst.root(),
+            byte,
+            &new_name,
+            uri.clone(),
+            &doc.line_index,
+            self.enc(),
+        ))
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
