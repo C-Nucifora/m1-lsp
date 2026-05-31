@@ -57,9 +57,11 @@ mod tests {
         let uri = Url::parse("file:///x.m1scr").unwrap();
         let li = LineIndex::new(src);
         let diags = p.types(&uri, src, &li, PositionEncoding::Utf16);
-        assert!(diags
-            .iter()
-            .any(|d| d.source.as_deref() == Some("m1-typecheck")));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.source.as_deref() == Some("m1-typecheck"))
+        );
         assert!(!p.project_loaded());
     }
 }

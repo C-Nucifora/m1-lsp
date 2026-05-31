@@ -1,7 +1,7 @@
 //! textDocument/definition: jump to a FuncUser/MethodUser's .m1scr file.
 use crate::features::locate::{build_scope, path_at_byte};
 use crate::project_store::LoadedProject;
-use m1_typecheck::resolve::{resolve, Resolution};
+use m1_typecheck::resolve::{Resolution, resolve};
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
 /// Resolve the path at `byte`; if it is a symbol with a backing `.m1scr` file,

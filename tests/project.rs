@@ -1,5 +1,5 @@
 //! Project discovery and type-diagnostic wiring.
-use m1_lsp::analysis::{analyze, NoLint};
+use m1_lsp::analysis::{NoLint, analyze};
 use m1_lsp::line_index::{LineIndex, PositionEncoding};
 use m1_lsp::project_store::ProjectStore;
 use m1_lsp::type_backend::M1Type;
@@ -15,7 +15,9 @@ fn type_diagnostics_published_via_analyze() {
     let li = LineIndex::new(src);
     let uri = Url::parse("file:///x.m1scr").unwrap();
     let diags = analyze(&uri, src, &li, PositionEncoding::Utf16, &NoLint, &types);
-    assert!(diags
-        .iter()
-        .any(|d| d.source.as_deref() == Some("m1-typecheck")));
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.source.as_deref() == Some("m1-typecheck"))
+    );
 }

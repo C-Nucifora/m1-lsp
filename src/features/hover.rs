@@ -3,7 +3,7 @@ use crate::convert::range;
 use crate::features::locate::{build_scope, path_at_byte};
 use crate::line_index::{LineIndex, PositionEncoding};
 use m1_typecheck::project::Project;
-use m1_typecheck::resolve::{resolve, Resolution};
+use m1_typecheck::resolve::{Resolution, resolve};
 use m1_typecheck::symbols::{Symbol, SymbolKind};
 use m1_typecheck::types::ValueType;
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};

@@ -2,7 +2,7 @@
 use m1_core::{Kind, Node};
 use m1_typecheck::project::Project;
 use m1_typecheck::resolve::Scope;
-use m1_typecheck::types::{type_from_hungarian, ValueType};
+use m1_typecheck::types::{ValueType, type_from_hungarian};
 use std::collections::HashMap;
 
 /// The deepest node whose byte range contains `byte`.
@@ -75,14 +75,13 @@ pub fn local_decl_type(decl: Node) -> ValueType {
 pub fn collect_locals(root: Node) -> HashMap<String, ValueType> {
     let mut locals = HashMap::new();
     fn walk(n: Node, locals: &mut HashMap<String, ValueType>) {
-        if n.kind() == Kind::LocalDeclaration {
-            if let Some(name) = n
+        if n.kind() == Kind::LocalDeclaration
+            && let Some(name) = n
                 .named_children()
                 .into_iter()
                 .find(|c| c.kind() == Kind::Identifier)
-            {
-                locals.insert(name.text().to_string(), local_decl_type(n));
-            }
+        {
+            locals.insert(name.text().to_string(), local_decl_type(n));
         }
         for c in n.children() {
             walk(c, locals);

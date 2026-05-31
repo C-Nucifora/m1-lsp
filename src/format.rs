@@ -43,11 +43,7 @@ mod tests {
     impl Formatter for Upper {
         fn format(&self, s: &str) -> Option<String> {
             let up = s.to_uppercase();
-            if up == s {
-                None
-            } else {
-                Some(up)
-            }
+            if up == s { None } else { Some(up) }
         }
     }
 
