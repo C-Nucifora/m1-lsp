@@ -57,10 +57,12 @@ pub fn code_actions(
     for d in diagnostics.iter().filter(|d| is_unsupported_c_token(d)) {
         let start = li.offset(d.range.start, text, enc);
         let end = li.offset(d.range.end, text, enc);
-        if start >= end || end > text.len() {
+        // Use get() instead of indexing: if the diagnostic's range was produced
+        // under a different position encoding, start/end may not land on char
+        // boundaries — skip rather than panic.
+        let Some(op) = text.get(start..end).filter(|s| !s.is_empty()) else {
             continue;
-        }
-        let op = &text[start..end];
+        };
         let Some(keyword) = replacement(op) else {
             continue; // while / for / do: no mechanical fix
         };
@@ -89,7 +91,7 @@ pub fn code_actions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tower_lsp::lsp_types::{DiagnosticSeverity, Range};
+    use tower_lsp::lsp_types::{DiagnosticSeverity, Position, Range};
 
     fn uri() -> Url {
         Url::parse("file:///t.m1scr").unwrap()
@@ -146,5 +148,28 @@ mod tests {
         let li = LineIndex::new(src);
         let d = diag_for(src, "while", &li);
         assert!(code_actions(src, &li, PositionEncoding::Utf16, &uri(), &[d]).is_empty());
+    }
+
+    #[test]
+    fn works_after_multibyte_char() {
+        // The operator follows a multibyte char (`é` = 2 bytes); slicing must
+        // land on the right bytes and produce the fix.
+        assert_eq!(fix("x = café==b;\n", "==").unwrap(), "x = café eq b;\n");
+    }
+
+    #[test]
+    fn off_boundary_range_is_skipped_not_panicked() {
+        // `𝄞` is 4 bytes / 2 UTF-16 units. A range whose character offsets were
+        // computed under UTF-16 (start=2) but get resolved here under UTF-8
+        // lands mid-codepoint (byte 2); it must be skipped, not panic.
+        let src = "𝄞==b;\n";
+        let li = LineIndex::new(src);
+        let d = Diagnostic {
+            range: Range::new(Position::new(0, 2), Position::new(0, 4)),
+            code: Some(NumberOrString::String("unsupported-c-token".into())),
+            ..Default::default()
+        };
+        // Must not panic (produces no action for the mid-codepoint slice).
+        let _ = code_actions(src, &li, PositionEncoding::Utf8, &uri(), &[d]);
     }
 }
