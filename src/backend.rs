@@ -102,17 +102,23 @@ impl Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        // Negotiate position encoding: prefer UTF-16, accept UTF-8 if offered.
+        // Negotiate position encoding: the client's list is in PREFERENCE
+        // order (LSP spec), so pick the first entry we support (UTF-16 or
+        // UTF-8). Default to UTF-16 when none is offered/supported.
         let chosen = params
             .capabilities
             .general
             .and_then(|g| g.position_encodings)
-            .map(|encs| {
-                if encs.contains(&PositionEncodingKind::UTF8) {
-                    (PositionEncoding::Utf8, PositionEncodingKind::UTF8)
-                } else {
-                    (PositionEncoding::Utf16, PositionEncodingKind::UTF16)
-                }
+            .and_then(|encs| {
+                encs.iter().find_map(|e| {
+                    if *e == PositionEncodingKind::UTF16 {
+                        Some((PositionEncoding::Utf16, PositionEncodingKind::UTF16))
+                    } else if *e == PositionEncodingKind::UTF8 {
+                        Some((PositionEncoding::Utf8, PositionEncodingKind::UTF8))
+                    } else {
+                        None
+                    }
+                })
             })
             .unwrap_or((PositionEncoding::Utf16, PositionEncodingKind::UTF16));
         *self.encoding.write().unwrap() = chosen.0;
