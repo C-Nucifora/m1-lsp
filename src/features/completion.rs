@@ -4,7 +4,28 @@ use crate::features::locate::collect_locals;
 use crate::project_store::LoadedProject;
 use m1_core::Node;
 use std::collections::HashSet;
-use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Documentation};
+use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Documentation, InsertTextFormat};
+
+/// A `${N:param}` snippet body for a function call, e.g.
+/// `Max(${1:a}, ${2:b})`, so the client tabs through the argument
+/// placeholders (#28). No-arg functions insert `Name()`.
+fn call_snippet(name: &str, params: &[m1_typecheck::intrinsics::Param]) -> String {
+    if params.is_empty() {
+        return format!("{name}()");
+    }
+    let args: Vec<String> = params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| format!("${{{}:{}}}", i + 1, p.name))
+        .collect();
+    format!("{name}({})", args.join(", "))
+}
+
+/// A human-readable signature for the completion `detail`, e.g. `(a, b) -> Float`.
+fn signature_detail(params: &[m1_typecheck::intrinsics::Param], returns: &str) -> String {
+    let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+    format!("({}) -> {returns}", names.join(", "))
+}
 
 /// The dotted parent path immediately before the cursor's `.`, e.g. with the
 /// cursor after `Calculate.` -> `Some("Calculate")`. Library object names have
@@ -43,8 +64,10 @@ pub fn completions(
             .map(|f| CompletionItem {
                 label: f.name.clone(),
                 kind: Some(CompletionItemKind::METHOD),
-                detail: Some(format!("-> {}", f.returns)),
+                detail: Some(signature_detail(&f.params, &f.returns)),
                 documentation: (!f.doc.is_empty()).then(|| Documentation::String(f.doc.clone())),
+                insert_text: Some(call_snippet(&f.name, &f.params)),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             })
             .collect();
@@ -151,6 +174,19 @@ mod tests {
         assert!(labels.contains(&"Min"));
         // only methods after a library-object dot (no keywords/objects mixed in)
         assert!(!labels.contains(&"if"));
+
+        // Methods carry a snippet insert-text with ${N:param} placeholders (#28).
+        let max = items.iter().find(|i| i.label == "Max").unwrap();
+        assert_eq!(
+            max.insert_text_format,
+            Some(InsertTextFormat::SNIPPET),
+            "Max should be a snippet"
+        );
+        let snip = max.insert_text.as_deref().unwrap_or("");
+        assert!(
+            snip.starts_with("Max(") && snip.contains("${1:"),
+            "expected placeholder snippet, got {snip:?}"
+        );
     }
 
     #[test]
