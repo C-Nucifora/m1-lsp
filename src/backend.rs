@@ -12,7 +12,7 @@ use crate::features::{
     code_action, completion, document_symbols, folding, goto, hover, inlay, references, rename,
     semantic_tokens, signature_help,
 };
-use crate::format::{Formatter, NoFormat, format_edits};
+use crate::format::{Formatter, NoFormat, format_edits, range_format_edits};
 use crate::line_index::PositionEncoding;
 use crate::project_store::ProjectStore;
 
@@ -188,6 +188,7 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                document_range_formatting_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
@@ -303,6 +304,17 @@ impl LanguageServer for Backend {
             .docs
             .get(&uri)
             .and_then(|doc| format_edits(&doc, self.enc(), self.formatter.as_ref())))
+    }
+
+    async fn range_formatting(
+        &self,
+        params: DocumentRangeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        Ok(self
+            .docs
+            .get(&uri)
+            .and_then(|doc| range_format_edits(&doc, params.range, self.formatter.as_ref())))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {

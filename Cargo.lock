@@ -581,7 +581,7 @@ dependencies = [
 [[package]]
 name = "m1-fmt"
 version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-fmt.git?branch=main#901cbd7a7fc9173f69371fad60cf6c4b2bff334d"
+source = "git+https://github.com/C-Nucifora/m1-fmt.git?branch=main#e44fdbd5e8aad21d06d3f1ec45c92b0e4ed4a1ea"
 dependencies = [
  "clap",
  "m1-core",
