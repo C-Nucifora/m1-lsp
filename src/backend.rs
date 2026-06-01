@@ -397,14 +397,21 @@ impl LanguageServer for Backend {
         };
         let byte = doc.line_index.offset(tdp.position, &doc.text, self.enc());
         let cst = m1_core::parse(&doc.text);
-        Ok(rename::rename(
+        match rename::rename(
             cst.root(),
             byte,
             &new_name,
             uri.clone(),
             &doc.line_index,
             self.enc(),
-        ))
+        ) {
+            Some(edit) => Ok(Some(edit)),
+            // Returning Ok(None) makes the client silently do nothing (it reads
+            // it as "no rename here"); return an error so the user sees why.
+            None => Err(Error::invalid_params(
+                "no renameable symbol here — only `local` variables can be renamed".to_string(),
+            )),
+        }
     }
 
     async fn semantic_tokens_full(
