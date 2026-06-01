@@ -127,7 +127,10 @@ mod tests {
                 .expect("channel should resolve to the .m1prj");
             let fs = loc.uri.to_file_path().unwrap();
             assert!(fs.ends_with("Project.m1prj"), "got {fs:?}");
-            assert_eq!(loc.range.start.line, 3, "should point at the declaration line");
+            assert_eq!(
+                loc.range.start.line, 3,
+                "should point at the declaration line"
+            );
         });
     }
 }
