@@ -1,7 +1,9 @@
 //! Discovery, loading, caching, and reload of the m1-typecheck Project.
 use m1_typecheck::Project;
+use m1_typecheck::symbols::Symbol;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
 /// A loaded project plus the paths it came from (for reload + goto).
 pub struct LoadedProject {
@@ -11,6 +13,24 @@ pub struct LoadedProject {
     pub m1cfg_path: Option<PathBuf>,
     /// `.m1dbc` files merged into the project (watched for reload).
     pub dbc_paths: Vec<PathBuf>,
+}
+
+impl LoadedProject {
+    /// The definition [`Location`] of a project symbol: its backing script/DBC
+    /// file (at the start) for file-backed symbols, else the `.m1prj` at the
+    /// symbol's declared line. `None` if no definition site is known or the path
+    /// can't form a file URL. Mirrors the goto-definition resolution.
+    pub fn symbol_location(&self, sym: &Symbol) -> Option<Location> {
+        let (target, line) = match &sym.filename {
+            Some(f) => (self.root.join(f), 0),
+            None => (self.m1prj_path.clone(), sym.def_line?),
+        };
+        let uri = Url::from_file_path(&target).ok()?;
+        Some(Location {
+            uri,
+            range: Range::new(Position::new(line, 0), Position::new(line, 0)),
+        })
+    }
 }
 
 #[derive(Default)]
