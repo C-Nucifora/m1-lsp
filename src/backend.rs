@@ -89,19 +89,26 @@ impl Backend {
     }
 
     async fn publish(&self, uri: Url) {
-        if let Some(doc) = self.docs.get(&uri) {
-            let diags = analyze(
-                &uri,
-                &doc.text,
-                &doc.line_index,
-                self.enc(),
-                self.lint.as_ref(),
-                self.types.as_ref(),
-            );
-            let version = Some(doc.version);
-            drop(doc);
-            self.client.publish_diagnostics(uri, diags, version).await;
-        }
+        // Snapshot the doc and drop the shard guard before parsing, so a
+        // concurrent did_change on the same shard isn't blocked for the parse.
+        let Some((text, lindex, version)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone(), d.version))
+        else {
+            return;
+        };
+        let diags = analyze(
+            &uri,
+            &text,
+            &lindex,
+            self.enc(),
+            self.lint.as_ref(),
+            self.types.as_ref(),
+        );
+        self.client
+            .publish_diagnostics(uri, diags, Some(version))
+            .await;
     }
 }
 
@@ -295,16 +302,20 @@ impl LanguageServer for Backend {
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let tdp = params.text_document_position_params;
         let uri = tdp.text_document.uri;
-        let Some(doc) = self.docs.get(&uri) else {
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
             return Ok(None);
         };
-        let byte = doc.line_index.offset(tdp.position, &doc.text, self.enc());
-        let cst = m1_core::parse(&doc.text);
+        let byte = lindex.offset(tdp.position, &text, self.enc());
+        let cst = m1_core::parse(&text);
         let file_name = uri
             .to_file_path()
             .ok()
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
-        let li = &doc.line_index;
+        let li = &lindex;
         let enc = self.enc();
         Ok(self.store.with_project(|p| {
             hover::hover(
@@ -324,11 +335,15 @@ impl LanguageServer for Backend {
     ) -> Result<Option<GotoDefinitionResponse>> {
         let tdp = params.text_document_position_params;
         let uri = tdp.text_document.uri;
-        let Some(doc) = self.docs.get(&uri) else {
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
             return Ok(None);
         };
-        let byte = doc.line_index.offset(tdp.position, &doc.text, self.enc());
-        let cst = m1_core::parse(&doc.text);
+        let byte = lindex.offset(tdp.position, &text, self.enc());
+        let cst = m1_core::parse(&text);
         let file_name = uri
             .to_file_path()
             .ok()
@@ -344,28 +359,36 @@ impl LanguageServer for Backend {
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = params.text_document.uri;
-        let Some(doc) = self.docs.get(&uri) else {
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
             return Ok(None);
         };
-        let cst = m1_core::parse(&doc.text);
-        let syms = document_symbols::document_symbols(cst.root(), &doc.line_index, self.enc());
+        let cst = m1_core::parse(&text);
+        let syms = document_symbols::document_symbols(cst.root(), &lindex, self.enc());
         Ok(Some(DocumentSymbolResponse::Nested(syms)))
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let tdp = params.text_document_position;
         let uri = tdp.text_document.uri;
-        let Some(doc) = self.docs.get(&uri) else {
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
             return Ok(None);
         };
-        let byte = doc.line_index.offset(tdp.position, &doc.text, self.enc());
-        let cst = m1_core::parse(&doc.text);
+        let byte = lindex.offset(tdp.position, &text, self.enc());
+        let cst = m1_core::parse(&text);
         let file_name = uri
             .to_file_path()
             .ok()
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
         let items = self.store.with_project(|p| {
-            completion::completions(cst.root(), p, file_name.as_deref(), &doc.text, byte)
+            completion::completions(cst.root(), p, file_name.as_deref(), &text, byte)
         });
         Ok(Some(CompletionResponse::Array(items)))
     }
@@ -373,11 +396,15 @@ impl LanguageServer for Backend {
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
         let tdp = params.text_document_position_params;
         let uri = tdp.text_document.uri;
-        let Some(doc) = self.docs.get(&uri) else {
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
             return Ok(None);
         };
-        let byte = doc.line_index.offset(tdp.position, &doc.text, self.enc());
-        let cst = m1_core::parse(&doc.text);
+        let byte = lindex.offset(tdp.position, &text, self.enc());
+        let cst = m1_core::parse(&text);
         let file_name = uri
             .to_file_path()
             .ok()
@@ -394,11 +421,15 @@ impl LanguageServer for Backend {
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let uri = params.text_document.uri;
-        let Some(doc) = self.docs.get(&uri) else {
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
             return Ok(None);
         };
-        let cst = m1_core::parse(&doc.text);
-        let hints = inlay::inlay_hints(cst.root(), params.range, &doc.line_index, self.enc());
+        let cst = m1_core::parse(&text);
+        let hints = inlay::inlay_hints(cst.root(), params.range, &lindex, self.enc());
         Ok(Some(hints))
     }
 
@@ -407,17 +438,19 @@ impl LanguageServer for Backend {
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
         let uri = params.text_document.uri;
-        let Some(doc) = self.docs.get(&uri) else {
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
             return Ok(None);
         };
-        let byte = doc
-            .line_index
-            .offset(params.position, &doc.text, self.enc());
-        let cst = m1_core::parse(&doc.text);
+        let byte = lindex.offset(params.position, &text, self.enc());
+        let cst = m1_core::parse(&text);
         Ok(rename::prepare_rename(
             cst.root(),
             byte,
-            &doc.line_index,
+            &lindex,
             self.enc(),
         ))
     }
@@ -431,17 +464,21 @@ impl LanguageServer for Backend {
         }
         let tdp = params.text_document_position;
         let uri = tdp.text_document.uri;
-        let Some(doc) = self.docs.get(&uri) else {
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
             return Ok(None);
         };
-        let byte = doc.line_index.offset(tdp.position, &doc.text, self.enc());
-        let cst = m1_core::parse(&doc.text);
+        let byte = lindex.offset(tdp.position, &text, self.enc());
+        let cst = m1_core::parse(&text);
         match rename::rename(
             cst.root(),
             byte,
             &new_name,
             uri.clone(),
-            &doc.line_index,
+            &lindex,
             self.enc(),
         ) {
             Some(edit) => Ok(Some(edit)),
@@ -458,15 +495,19 @@ impl LanguageServer for Backend {
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
         let uri = params.text_document.uri;
-        let Some(doc) = self.docs.get(&uri) else {
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
             return Ok(None);
         };
-        let cst = m1_core::parse(&doc.text);
+        let cst = m1_core::parse(&text);
         let file_name = uri
             .to_file_path()
             .ok()
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
-        let li = &doc.line_index;
+        let li = &lindex;
         let enc = self.enc();
         let tokens = self.store.with_project(|p| {
             semantic_tokens::semantic_tokens(
@@ -486,16 +527,20 @@ impl LanguageServer for Backend {
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let tdp = params.text_document_position;
         let uri = tdp.text_document.uri;
-        let Some(doc) = self.docs.get(&uri) else {
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
             return Ok(None);
         };
-        let byte = doc.line_index.offset(tdp.position, &doc.text, self.enc());
-        let cst = m1_core::parse(&doc.text);
+        let byte = lindex.offset(tdp.position, &text, self.enc());
+        let cst = m1_core::parse(&text);
         Ok(references::references(
             cst.root(),
             byte,
             uri.clone(),
-            &doc.line_index,
+            &lindex,
             self.enc(),
         ))
     }
@@ -506,40 +551,52 @@ impl LanguageServer for Backend {
     ) -> Result<Option<Vec<DocumentHighlight>>> {
         let tdp = params.text_document_position_params;
         let uri = tdp.text_document.uri;
-        let Some(doc) = self.docs.get(&uri) else {
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
             return Ok(None);
         };
-        let byte = doc.line_index.offset(tdp.position, &doc.text, self.enc());
-        let cst = m1_core::parse(&doc.text);
+        let byte = lindex.offset(tdp.position, &text, self.enc());
+        let cst = m1_core::parse(&text);
         Ok(references::document_highlights(
             cst.root(),
             byte,
-            &doc.line_index,
+            &lindex,
             self.enc(),
         ))
     }
 
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
         let uri = params.text_document.uri;
-        let Some(doc) = self.docs.get(&uri) else {
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
             return Ok(None);
         };
-        let cst = m1_core::parse(&doc.text);
+        let cst = m1_core::parse(&text);
         Ok(Some(folding::folding_ranges(
             cst.root(),
-            &doc.line_index,
+            &lindex,
             self.enc(),
         )))
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         let uri = params.text_document.uri;
-        let Some(doc) = self.docs.get(&uri) else {
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
             return Ok(None);
         };
         let actions = code_action::code_actions(
-            &doc.text,
-            &doc.line_index,
+            &text,
+            &lindex,
             self.enc(),
             &uri,
             &params.context.diagnostics,
