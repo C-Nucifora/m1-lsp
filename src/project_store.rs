@@ -13,6 +13,8 @@ pub struct LoadedProject {
     pub m1cfg_path: Option<PathBuf>,
     /// `.m1dbc` files merged into the project (watched for reload).
     pub dbc_paths: Vec<PathBuf>,
+    /// Every `*.m1scr` under the root, found once at load (see [`walk_scripts`]).
+    pub script_files: Vec<PathBuf>,
 }
 
 impl LoadedProject {
@@ -33,6 +35,32 @@ impl LoadedProject {
     }
 }
 
+/// Every `*.m1scr` file under `root`, recursively (sorted). Taken from the
+/// filesystem rather than the symbol table's `Filename` attributes, because a
+/// real `.m1prj` typically omits `Filename=` (scripts are matched to components
+/// by the path-encoding convention) — so the symbol-based list would be empty.
+/// Computed once at load and cached in [`LoadedProject::script_files`] for the
+/// workspace-wide features (cross-file references, rename).
+fn walk_scripts(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().and_then(|x| x.to_str()) == Some("m1scr") {
+                out.push(p);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out.sort();
+    out
+}
+
 #[derive(Default)]
 pub struct ProjectStore {
     inner: RwLock<Option<LoadedProject>>,
@@ -45,6 +73,15 @@ impl ProjectStore {
 
     pub fn project_loaded(&self) -> bool {
         self.inner.read().unwrap().is_some()
+    }
+
+    /// Re-walk the project root for `*.m1scr` files, refreshing the cached set
+    /// without re-parsing the project. Cheap; called when a script file is
+    /// created or deleted (an edit to an existing script doesn't change the set).
+    pub fn refresh_scripts(&self) {
+        if let Some(lp) = self.inner.write().unwrap().as_mut() {
+            lp.script_files = walk_scripts(&lp.root);
+        }
     }
 
     /// Read access to the loaded project for the feature handlers.
@@ -131,12 +168,14 @@ impl ProjectStore {
         };
         match build() {
             Ok(project) => {
+                let script_files = walk_scripts(&root);
                 *self.inner.write().unwrap() = Some(LoadedProject {
                     project,
                     root,
                     m1prj_path: m1prj_path.to_path_buf(),
                     m1cfg_path,
                     dbc_paths,
+                    script_files,
                 });
                 Ok(true)
             }
@@ -257,6 +296,29 @@ mod tests {
         let store = ProjectStore::new();
         assert_eq!(store.discover_and_load(tmp.path()), Ok(false));
         assert!(!store.project_loaded());
+    }
+
+    #[test]
+    fn caches_scripts_at_load_and_refreshes_on_demand() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_project(tmp.path());
+        let scripts = tmp.path().join("Scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("A.m1scr"), "x = 1;\n").unwrap();
+
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+        // Cached at load: the one script present.
+        store.with_project(|p| assert_eq!(p.unwrap().script_files.len(), 1));
+
+        // A new script created after load is invisible until a refresh.
+        std::fs::write(scripts.join("B.m1scr"), "y = 2;\n").unwrap();
+        store.with_project(|p| assert_eq!(p.unwrap().script_files.len(), 1));
+        store.refresh_scripts();
+        store.with_project(|p| {
+            let files = &p.unwrap().script_files;
+            assert_eq!(files.len(), 2, "refresh picks up the new script: {files:?}");
+        });
     }
 
     #[test]

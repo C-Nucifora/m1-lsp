@@ -246,6 +246,12 @@ impl LanguageServer for Backend {
                     glob_pattern: GlobPattern::String("**/.m1lint.toml".into()),
                     kind: None,
                 },
+                // Script create/delete changes the workspace script set that
+                // cross-file references and rename walk; refresh the cached list.
+                FileSystemWatcher {
+                    glob_pattern: GlobPattern::String("**/*.m1scr".into()),
+                    kind: None,
+                },
             ];
             let reg = Registration {
                 id: "m1-lsp-watch-project".into(),
@@ -679,6 +685,18 @@ impl LanguageServer for Backend {
             && let Some(dir) = p.parent()
         {
             self.lint.reload_config(dir);
+        }
+        // A created/deleted `.m1scr` changes the cached workspace script set
+        // (an edit to an existing one doesn't); refresh it cheaply, no reparse.
+        let scripts_changed = params.changes.iter().any(|c| {
+            c.uri
+                .to_file_path()
+                .ok()
+                .map(|p| p.extension().and_then(|x| x.to_str()) == Some("m1scr"))
+                .unwrap_or(false)
+        });
+        if scripts_changed {
+            self.store.refresh_scripts();
         }
         if !touches_project && lint_change.is_none() {
             return;

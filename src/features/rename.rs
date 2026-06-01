@@ -22,7 +22,7 @@
 //! renaming them means renaming their backing file); and compound symbols that
 //! have children (would require a cascading rename of every descendant path).
 use crate::convert::range as to_range;
-use crate::features::locate::{collect_locals, node_at_byte, path_at_byte};
+use crate::features::locate::{build_scope, collect_locals, node_at_byte, path_at_byte};
 use crate::line_index::{LineIndex, PositionEncoding};
 use crate::project_store::LoadedProject;
 use m1_core::{Field, Kind, Node};
@@ -131,44 +131,13 @@ fn parent_of(path: &str) -> Option<&str> {
     path.rsplit_once('.').map(|(p, _)| p)
 }
 
-/// The enclosing group of the script `file_name`, for group-relative and
-/// anchor resolution. Prefers the project's own `file → group` map (populated
-/// from explicit `Filename=` attributes); falls back to the filename
-/// **convention** — `Engine.Update.m1scr` is the body of `Root.Engine.Update`,
-/// whose group is `Root.Engine` — verified against the symbol table so a
-/// non-conforming name yields `None` rather than a guess. (The real corpus omits
-/// `Filename=`, so the convention is the path that actually resolves there.)
-fn group_for(project: &Project, file_name: Option<&str>) -> Option<String> {
-    let file_name = file_name?;
-    if let Some(g) = project.group_for_script(file_name) {
-        return Some(g);
-    }
-    let base = file_name.rsplit(['/', '\\']).next().unwrap_or(file_name);
-    let stem = base
-        .strip_suffix(".m1scr")
-        .or_else(|| base.strip_suffix(".M1SCR"))
-        .unwrap_or(base);
-    let candidate = match stem.rsplit_once('.') {
-        Some((group_rel, _)) => format!("Root.{group_rel}"),
-        None => "Root".to_string(),
-    };
-    project
-        .symbols()
-        .get(&candidate)
-        .filter(|s| matches!(s.kind, SymbolKind::Group))
-        .map(|_| candidate)
-}
-
 /// The resolution scope for `root` (the parsed script), in the context of
-/// `project` and the script's `file_name`. Like `locate::build_scope` but with
-/// the filename-convention group fallback above, so relative references resolve
-/// even when the `.m1prj` carries no `Filename=` attributes.
+/// `project` and the script's `file_name`. The enclosing group comes from
+/// `group_for_script`, which m1-typecheck now derives by the filename convention
+/// when the `.m1prj` carries no `Filename=` attributes — so group-relative and
+/// `This.`/`Parent.`-anchored references resolve on real projects.
 fn scope_for<'p>(root: Node, project: &'p Project, file_name: Option<&str>) -> Scope<'p> {
-    Scope {
-        locals: collect_locals(root),
-        group: group_for(project, file_name),
-        project: Some(project),
-    }
+    build_scope(root, Some(project), file_name)
 }
 
 /// Resolve a `This.`/`Parent.`-anchored path to the symbol it denotes. `This` is
@@ -324,29 +293,6 @@ fn m1prj_name_edit(
     })
 }
 
-/// All `*.m1scr` files under `root`, recursively. Robust to a `.m1prj` that
-/// carries no `Filename=` attributes (the real-corpus case), where the project's
-/// own file list is empty.
-fn walk_m1scr(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                walk(&p, out);
-            } else if p.extension().and_then(|x| x.to_str()) == Some("m1scr") {
-                out.push(p);
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(root, &mut out);
-    out.sort();
-    out
-}
-
 /// `(uri, text)` for every project script: the cursor file first (always, using
 /// its open buffer), then every other `*.m1scr` under the project root, deduped
 /// by URI, preferring open buffers over disk.
@@ -368,14 +314,14 @@ fn project_scripts(
         seen.insert(cursor_uri.clone());
         out.push((cursor_uri.clone(), t));
     }
-    for p in walk_m1scr(&loaded.root) {
-        let Ok(u) = Url::from_file_path(&p) else {
+    for p in &loaded.script_files {
+        let Ok(u) = Url::from_file_path(p) else {
             continue;
         };
         if seen.contains(&u) {
             continue;
         }
-        if let Some(t) = open_text(&u).or_else(|| std::fs::read_to_string(&p).ok()) {
+        if let Some(t) = open_text(&u).or_else(|| std::fs::read_to_string(p).ok()) {
             seen.insert(u.clone());
             out.push((u, t));
         }
@@ -698,6 +644,9 @@ mod tests {
         let b = "local e = Root.Engine.Threshold;\nlocal f = Threshold;\n";
         std::fs::write(tmp.path().join("Engine.Update.m1scr"), a).unwrap();
         std::fs::write(tmp.path().join("Other.Update.m1scr"), b).unwrap();
+        // Reload so the scripts (written after the initial load) are in the
+        // cached `script_files` set the workspace search walks.
+        store.discover_and_load(tmp.path()).unwrap();
 
         let a_uri = Url::from_file_path(tmp.path().join("Engine.Update.m1scr")).unwrap();
         let cst = m1_core::parse(a);
