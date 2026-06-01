@@ -1,19 +1,25 @@
 //! Real lint provider backed by m1-lint.
+use std::path::Path;
+use std::sync::RwLock;
+
 use crate::analysis::LintProvider;
 use crate::convert::{range, severity};
 use crate::line_index::{LineIndex, PositionEncoding};
+use m1_lint::config::Config;
 use m1_lint::registry::Registry;
 use m1_lint::runner::Runner;
 use tower_lsp::lsp_types::{Diagnostic as LspDiag, NumberOrString};
 
 pub struct M1Lint {
-    runner: Runner,
+    /// Behind a lock so `reload_config` can swap the rule set when a
+    /// `.m1lint.toml` is discovered or changes (#9).
+    runner: RwLock<Runner>,
 }
 
 impl M1Lint {
     pub fn new() -> Self {
         Self {
-            runner: Runner::new(Registry::default_v1()),
+            runner: RwLock::new(Runner::new(Registry::default_v1())),
         }
     }
 }
@@ -28,6 +34,8 @@ impl LintProvider for M1Lint {
     fn lint(&self, src: &str, li: &LineIndex, enc: PositionEncoding) -> Vec<LspDiag> {
         // Use only lint findings; syntax errors come from m1-core in analyze().
         self.runner
+            .read()
+            .unwrap()
             .run_source(src)
             .diagnostics
             .iter()
@@ -40,6 +48,15 @@ impl LintProvider for M1Lint {
                 ..Default::default()
             })
             .collect()
+    }
+
+    fn reload_config(&self, root: &Path) {
+        // Discover `.m1lint.toml` (walking up from `root`, then the user-global
+        // fallback) and rebuild the rule set. On a config error, keep the
+        // current ruleset rather than reverting to defaults silently.
+        if let Ok(cfg) = Config::discover(root) {
+            *self.runner.write().unwrap() = Runner::new(Registry::from_config(&cfg));
+        }
     }
 }
 
@@ -54,5 +71,29 @@ mod tests {
         let li = LineIndex::new(src);
         let diags = M1Lint::new().lint(src, &li, PositionEncoding::Utf16);
         assert!(diags.iter().any(|d| d.source.as_deref() == Some("m1-lint")));
+    }
+
+    #[test]
+    fn reload_config_honours_discovered_m1lint_toml() {
+        let dir = std::env::temp_dir().join(format!("m1lint_lsp_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".m1lint.toml"), "ignore = [\"L004\"]\n").unwrap();
+
+        let lint = M1Lint::new();
+        let src = "if (a == b) {\n    x = 1;\n}\n";
+        let li = LineIndex::new(src);
+        let has_l004 = |l: &M1Lint| {
+            l.lint(src, &li, PositionEncoding::Utf16)
+                .iter()
+                .any(|d| matches!(&d.code, Some(NumberOrString::String(s)) if s == "L004"))
+        };
+
+        assert!(has_l004(&lint), "default ruleset flags L004 on `==`");
+        lint.reload_config(&dir);
+        assert!(
+            !has_l004(&lint),
+            "after discovering a config that ignores L004, it must not fire"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

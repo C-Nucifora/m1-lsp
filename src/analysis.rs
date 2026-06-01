@@ -40,6 +40,11 @@ fn unsupported_c_tokens(
 /// Source of lint diagnostics (v1).
 pub trait LintProvider: Send + Sync {
     fn lint(&self, src: &str, li: &LineIndex, enc: PositionEncoding) -> Vec<LspDiag>;
+
+    /// Re-resolve lint configuration by discovering a `.m1lint.toml` from `root`
+    /// (and the user-global fallback). Called on `initialize` and whenever a
+    /// `.m1lint.toml` changes. Default: no-op (providers without config).
+    fn reload_config(&self, _root: &std::path::Path) {}
 }
 
 /// A no-op lint provider (syntax diagnostics only).
