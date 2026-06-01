@@ -1,11 +1,16 @@
-//! textDocument/definition: jump to a FuncUser/MethodUser's .m1scr file.
+//! textDocument/definition: jump to a symbol's definition site — a script/DBC
+//! file for file-backed symbols (FuncUser/MethodUser, DBC signals), or the
+//! `.m1prj` at the declaring `<Component>` line for project objects (channels,
+//! parameters, groups, tables, references, package objects).
 use crate::features::locate::{build_scope, path_at_byte};
 use crate::project_store::LoadedProject;
 use m1_typecheck::resolve::{Resolution, resolve};
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
-/// Resolve the path at `byte`; if it is a symbol with a backing `.m1scr` file,
-/// return a Location at that file's start. Otherwise None.
+/// Resolve the path at `byte` to a symbol and return its definition Location.
+/// File-backed symbols open their backing file at its start; other project
+/// symbols open the `.m1prj` at their declaration line. `None` if the path does
+/// not resolve to a symbol or no definition site is known.
 pub fn goto(
     root: m1_core::Node,
     byte: usize,
@@ -17,12 +22,16 @@ pub fn goto(
     let Resolution::Symbol(sym) = resolve(&path, &scope) else {
         return None;
     };
-    let filename = sym.filename.as_ref()?;
-    let target = loaded.root.join(filename);
+    let (target, line) = match &sym.filename {
+        // Script/DBC-backed: open the body file at its start.
+        Some(f) => (loaded.root.join(f), 0),
+        // Project object: jump to its declaration line in the .m1prj (#31).
+        None => (loaded.m1prj_path.clone(), sym.def_line?),
+    };
     let uri = Url::from_file_path(&target).ok()?;
     Some(Location {
         uri,
-        range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+        range: Range::new(Position::new(line, 0), Position::new(line, 0)),
     })
 }
 
@@ -95,6 +104,30 @@ mod tests {
             // `Url::path()` percent-encodes spaces; compare the decoded fs path.
             let fs = loc.uri.to_file_path().unwrap();
             assert!(fs.ends_with("Do Thing.m1scr"), "got {fs:?}");
+        });
+    }
+
+    #[test]
+    fn goto_channel_returns_m1prj_at_definition_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        // 0-based: line 0 = <?xml>, 1 = <Project>, 2 = Root, 3 = Root.Speed.
+        let xml = "<?xml version=\"1.0\"?>\n<Project>\n  <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root\"/>\n  <Component Classname=\"BuiltIn.Channel\" Name=\"Root.Speed\"><Props Type=\"f32\"/></Component>\n</Project>";
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(xml.as_bytes())
+            .unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        let src = "Root.Speed = 1.0;\n";
+        let cst = m1_core::parse(src);
+        store.with_project(|p| {
+            let loc = goto(cst.root(), 0, p.unwrap(), Some("X.m1scr"))
+                .expect("channel should resolve to the .m1prj");
+            let fs = loc.uri.to_file_path().unwrap();
+            assert!(fs.ends_with("Project.m1prj"), "got {fs:?}");
+            assert_eq!(loc.range.start.line, 3, "should point at the declaration line");
         });
     }
 }
