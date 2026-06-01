@@ -91,27 +91,40 @@ impl ProjectStore {
     pub fn load_from(&self, m1prj_path: &Path) -> Result<bool, String> {
         let root = m1prj_path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let m1cfg_path = Self::find_m1cfg(&root);
-        let mut project = Project::load(m1prj_path).map_err(|e| e.to_string())?;
-        if let Some(cfg) = &m1cfg_path {
-            project = project.with_config(cfg).map_err(|e| e.to_string())?;
-        }
         let dbc_paths = Self::find_m1dbc(&root);
-        for dbc in &dbc_paths {
-            let rel = dbc
-                .strip_prefix(&root)
-                .unwrap_or(dbc)
-                .to_string_lossy()
-                .into_owned();
-            project = project.with_dbc(dbc, &rel).map_err(|e| e.to_string())?;
+        // Build the full project first; if ANY step (.m1prj/.m1cfg/.m1dbc) fails,
+        // clear the store so we don't keep serving a stale/partial project.
+        let build = || -> Result<Project, String> {
+            let mut project = Project::load(m1prj_path).map_err(|e| e.to_string())?;
+            if let Some(cfg) = &m1cfg_path {
+                project = project.with_config(cfg).map_err(|e| e.to_string())?;
+            }
+            for dbc in &dbc_paths {
+                let rel = dbc
+                    .strip_prefix(&root)
+                    .unwrap_or(dbc)
+                    .to_string_lossy()
+                    .into_owned();
+                project = project.with_dbc(dbc, &rel).map_err(|e| e.to_string())?;
+            }
+            Ok(project)
+        };
+        match build() {
+            Ok(project) => {
+                *self.inner.write().unwrap() = Some(LoadedProject {
+                    project,
+                    root,
+                    m1prj_path: m1prj_path.to_path_buf(),
+                    m1cfg_path,
+                    dbc_paths,
+                });
+                Ok(true)
+            }
+            Err(e) => {
+                *self.inner.write().unwrap() = None;
+                Err(e)
+            }
         }
-        *self.inner.write().unwrap() = Some(LoadedProject {
-            project,
-            root,
-            m1prj_path: m1prj_path.to_path_buf(),
-            m1cfg_path,
-            dbc_paths,
-        });
-        Ok(true)
     }
 
     /// True if `path` is the currently-loaded `.m1prj` or `.m1cfg` (reload trigger).
@@ -158,6 +171,29 @@ mod tests {
   </List>
  </ComponentStream>
 </DBC>"#;
+
+    #[test]
+    fn partial_load_failure_clears_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_project(tmp.path());
+        let store = ProjectStore::new();
+        // First load succeeds and populates the store.
+        assert!(store.discover_and_load(tmp.path()).unwrap());
+        assert!(store.with_project(|p| p.is_some()));
+        // Add a malformed .m1dbc; the reload must fail AND clear the store so we
+        // don't keep serving the now-stale project. (Regression for #37.)
+        let dbcdir = tmp.path().join("dbc");
+        std::fs::create_dir_all(&dbcdir).unwrap();
+        std::fs::File::create(dbcdir.join("bad.m1dbc"))
+            .unwrap()
+            .write_all(b"<<< not valid xml")
+            .unwrap();
+        assert!(store.discover_and_load(tmp.path()).is_err());
+        assert!(
+            store.with_project(|p| p.is_none()),
+            "store must be cleared after a partial load failure"
+        );
+    }
 
     #[test]
     fn discovers_and_loads_dbc_objects() {
