@@ -69,6 +69,42 @@ async fn initialize_advertises_capabilities() {
     );
 }
 
+async fn negotiate_encoding(encs: Value) -> String {
+    let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
+    let (mut client, server) = duplex(8192);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+    let msg = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "processId":null,"rootUri":null,
+        "capabilities":{"general":{"positionEncodings":encs}}}});
+    write_msg(&mut client, &msg).await;
+    let resp = read_msg(&mut client).await;
+    resp["result"]["capabilities"]["positionEncoding"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
+}
+
+#[tokio::test]
+async fn position_encoding_respects_client_preference_order() {
+    // The client's list is in preference order; pick the first we support.
+    assert_eq!(
+        negotiate_encoding(json!(["utf-16", "utf-8"])).await,
+        "utf-16"
+    );
+    assert_eq!(
+        negotiate_encoding(json!(["utf-8", "utf-16"])).await,
+        "utf-8"
+    );
+    // Unsupported-first falls through to the next supported entry.
+    assert_eq!(
+        negotiate_encoding(json!(["utf-32", "utf-8"])).await,
+        "utf-8"
+    );
+}
+
 // Direct-call tests of the pure analysis path (no transport needed).
 #[test]
 fn analyze_reports_syntax_error() {
