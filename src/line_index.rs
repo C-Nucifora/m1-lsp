@@ -9,6 +9,7 @@ pub enum PositionEncoding {
 }
 
 /// Byte offsets of each line start in a document.
+#[derive(Clone)]
 pub struct LineIndex {
     line_starts: Vec<usize>,
     text: String,
