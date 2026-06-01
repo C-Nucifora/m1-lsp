@@ -10,7 +10,7 @@ use crate::analysis::{LintProvider, NoLint, NoTypes, TypeProvider, analyze};
 use crate::document::Document;
 use crate::features::{
     code_action, completion, document_symbols, folding, goto, hover, inlay, references, rename,
-    semantic_tokens, signature_help,
+    semantic_tokens, signature_help, workspace_symbol,
 };
 use crate::format::{Formatter, NoFormat, format_edits, range_format_edits};
 use crate::line_index::PositionEncoding;
@@ -189,6 +189,7 @@ impl LanguageServer for Backend {
                 )),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 document_range_formatting_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
@@ -315,6 +316,17 @@ impl LanguageServer for Backend {
             .docs
             .get(&uri)
             .and_then(|doc| range_format_edits(&doc, params.range, self.formatter.as_ref())))
+    }
+
+    #[allow(deprecated)]
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let q = params.query;
+        Ok(self
+            .store
+            .with_project(|p| p.map(|lp| workspace_symbol::workspace_symbols(lp, &q))))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
