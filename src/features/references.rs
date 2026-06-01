@@ -4,8 +4,9 @@
 //! ("where else in *this* file?"). `references` is project-wide for project
 //! symbols (#29): `project_references` searches every `.m1scr` in the workspace
 //! for the dotted path. Locals stay file-scoped (the type model scopes them per
-//! file). The script set comes from the project's function/method symbols, so no
-//! separate index is maintained — it's derived from the loaded model on demand.
+//! file). The script set is the one cached on `LoadedProject` at load
+//! (`script_files`), enumerated from the filesystem since a real `.m1prj` omits
+//! `Filename=` attributes and the symbol-table list would be empty.
 use crate::convert::range;
 use crate::features::locate::{collect_locals, node_at_byte, path_at_byte};
 use crate::line_index::{LineIndex, PositionEncoding};
@@ -182,24 +183,12 @@ fn path_locations(
         .collect()
 }
 
-/// The distinct `.m1scr` files referenced by the project's function/method
-/// symbols (relative to the project root).
-fn project_script_files(loaded: &LoadedProject) -> Vec<String> {
-    let mut set = std::collections::BTreeSet::new();
-    for s in loaded.project.symbols().iter() {
-        if let Some(f) = &s.filename
-            && f.ends_with(".m1scr")
-        {
-            set.insert(f.clone());
-        }
-    }
-    set.into_iter().collect()
-}
-
 /// Project-wide references (#29). A local stays file-local; a project symbol is
-/// searched across every `.m1scr` in the workspace. `open_text` supplies the
-/// in-memory buffer for a file when one is open (newer than disk); files not open
-/// are read from disk. The cursor's own file is always included.
+/// searched across every `.m1scr` in the workspace. The script set is taken from
+/// the filesystem (a real `.m1prj` carries no `Filename=` attributes, so the
+/// symbol-table list would be empty). `open_text` supplies the in-memory buffer
+/// for a file when one is open (newer than disk); files not open are read from
+/// disk. The cursor's own file is always included.
 pub fn project_references(
     loaded: &LoadedProject,
     cursor_uri: &Url,
@@ -219,15 +208,14 @@ pub fn project_references(
             // Gather (uri, text) for the cursor file first, then every other
             // project script (deduped by uri), preferring open buffers.
             let mut files: Vec<(Url, String)> = vec![(cursor_uri.clone(), cursor_text.to_string())];
-            for fname in project_script_files(loaded) {
-                let p = loaded.root.join(&fname);
-                let Ok(uri) = Url::from_file_path(&p) else {
+            for p in &loaded.script_files {
+                let Ok(uri) = Url::from_file_path(p) else {
                     continue;
                 };
                 if files.iter().any(|(u, _)| *u == uri) {
                     continue;
                 }
-                if let Some(t) = open_text(&uri).or_else(|| std::fs::read_to_string(&p).ok()) {
+                if let Some(t) = open_text(&uri).or_else(|| std::fs::read_to_string(p).ok()) {
                     files.push((uri, t));
                 }
             }
@@ -387,5 +375,81 @@ mod tests {
         );
         assert!(locs.iter().any(|l| l.uri.path().ends_with("A.m1scr")));
         assert!(locs.iter().any(|l| l.uri.path().ends_with("B.m1scr")));
+    }
+
+    #[test]
+    fn project_references_span_scripts_without_filename_attributes() {
+        // Real-corpus shape: the `.m1prj` carries no `Filename=` attributes, so
+        // the script set must come from the filesystem, not the symbol table.
+        use crate::project_store::ProjectStore;
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let m1prj = r#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Engine"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Engine.Speed"><Props Type="f32"/></Component>
+  <Component Classname="BuiltIn.MethodUser" Name="Root.Engine.Write"/>
+  <Component Classname="BuiltIn.MethodUser" Name="Root.Engine.Read"/>
+</Project>"#;
+        std::fs::File::create(tmp.path().join("Project.m1prj"))
+            .unwrap()
+            .write_all(m1prj.as_bytes())
+            .unwrap();
+        // Scripts live in a subdirectory (the walk recurses), named by the
+        // path-encoding convention.
+        let scripts = tmp.path().join("Scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        let a_src = "Root.Engine.Speed = 1.0;\n";
+        let b_src = "local x = Root.Engine.Speed;\n";
+        std::fs::write(scripts.join("Engine.Write.m1scr"), a_src).unwrap();
+        std::fs::write(scripts.join("Engine.Read.m1scr"), b_src).unwrap();
+
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+        // Precondition: the symbol-table list is empty (no `Filename=`), so this
+        // only works via the filesystem walk.
+        store.with_project(|p| {
+            assert!(
+                p.unwrap()
+                    .project
+                    .symbols()
+                    .iter()
+                    .all(|s| s.filename.is_none()),
+                "this fixture must have no Filename attributes"
+            );
+        });
+
+        let a_uri = Url::from_file_path(scripts.join("Engine.Write.m1scr")).unwrap();
+        let no_open = |_: &Url| None;
+        let locs = store
+            .with_project(|p| {
+                project_references(
+                    p.unwrap(),
+                    &a_uri,
+                    a_src,
+                    0,
+                    PositionEncoding::Utf16,
+                    &no_open,
+                )
+            })
+            .expect("references across files");
+
+        let files: std::collections::BTreeSet<_> =
+            locs.iter().map(|l| l.uri.path().to_string()).collect();
+        assert_eq!(
+            files.len(),
+            2,
+            "references should span both scripts: {locs:?}"
+        );
+        assert!(
+            locs.iter()
+                .any(|l| l.uri.path().ends_with("Engine.Write.m1scr"))
+        );
+        assert!(
+            locs.iter()
+                .any(|l| l.uri.path().ends_with("Engine.Read.m1scr"))
+        );
     }
 }
