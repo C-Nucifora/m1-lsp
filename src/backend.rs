@@ -565,13 +565,23 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let byte = lindex.offset(tdp.position, &text, self.enc());
+        let enc = self.enc();
+        // With a project loaded, search every `.m1scr` for a project symbol
+        // (#29); locals stay file-local. Open buffers win over on-disk text.
+        let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
+        if let Some(locs) = self.store.with_project(|p| {
+            p.map(|lp| references::project_references(lp, &uri, &text, byte, enc, &open_text))
+        }) {
+            return Ok(locs);
+        }
+        // Project-less mode: single-file references.
         let cst = m1_core::parse(&text);
         Ok(references::references(
             cst.root(),
             byte,
             uri.clone(),
             &lindex,
-            self.enc(),
+            enc,
         ))
     }
 
