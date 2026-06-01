@@ -90,7 +90,9 @@ fn walk(node: Node, scope: &Scope, li: &LineIndex, enc: PositionEncoding, out: &
             push_singleline(node, TT_COMMENT, 0, li, enc, out);
         }
         Kind::BlockComment => {
-            push_singleline(node, TT_COMMENT, 0, li, enc, out);
+            // Block comments may span lines; emit one token per line so a
+            // multi-line `/* … */` is highlighted (push_singleline drops it).
+            push_multiline(node, TT_COMMENT, 0, li, enc, out);
         }
 
         // ── Keywords ─────────────────────────────────────────────────────────
@@ -236,6 +238,37 @@ fn push_singleline(
     });
 }
 
+/// Emit a token for a node that may span multiple lines, one RawToken per line
+/// (LSP semantic tokens cannot cross a line). Encoding-correct: each line
+/// segment's start/length is derived via the line index.
+fn push_multiline(
+    node: Node,
+    tt: u32,
+    tm: u32,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    out: &mut Vec<RawToken>,
+) {
+    let r = node.byte_range();
+    let mut byte = r.start;
+    for line in node.text().split_inclusive('\n') {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let seg_start = li.position(byte, enc);
+        let seg_end = li.position(byte + content.len(), enc);
+        let length = seg_end.character.saturating_sub(seg_start.character);
+        if length > 0 {
+            out.push(RawToken {
+                line: seg_start.line,
+                start: seg_start.character,
+                length,
+                token_type: tt,
+                token_modifiers: tm,
+            });
+        }
+        byte += line.len();
+    }
+}
+
 /// Emit a token; assumes the node is guaranteed to be single-line (keywords,
 /// numbers, identifiers, type annotations).
 fn push(
@@ -285,6 +318,27 @@ mod tests {
         let cst = m1_core::parse(src);
         let li = LineIndex::new(src);
         semantic_tokens(cst.root(), None, None, &li, PositionEncoding::Utf16)
+    }
+
+    #[test]
+    fn multiline_block_comment_gets_a_token_per_line() {
+        // Regression for #34: a multi-line /* … */ used to be dropped entirely.
+        let toks = tokens("/* line one\n   line two */\nx = 1;\n");
+        let comment_lines: Vec<u32> = toks
+            .iter()
+            .scan((0u32, 0u32), |(line, _), t| {
+                if t.delta_line > 0 {
+                    *line += t.delta_line;
+                }
+                Some((*line, t.token_type))
+            })
+            .filter(|(_, tt)| *tt == TT_COMMENT)
+            .map(|(l, _)| l)
+            .collect();
+        assert!(
+            comment_lines.contains(&0) && comment_lines.contains(&1),
+            "expected comment tokens on both line 0 and line 1, got {comment_lines:?}"
+        );
     }
 
     #[test]
