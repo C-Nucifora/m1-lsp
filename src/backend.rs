@@ -173,6 +173,8 @@ impl LanguageServer for Backend {
                         .await;
                 }
             }
+            // Pick up a project-level (or user-global) `.m1lint.toml` (#9).
+            self.lint.reload_config(&root);
         }
 
         Ok(InitializeResult {
@@ -236,6 +238,10 @@ impl LanguageServer for Backend {
                 },
                 FileSystemWatcher {
                     glob_pattern: GlobPattern::String("**/*.m1cfg".into()),
+                    kind: None,
+                },
+                FileSystemWatcher {
+                    glob_pattern: GlobPattern::String("**/.m1lint.toml".into()),
                     kind: None,
                 },
             ];
@@ -617,27 +623,42 @@ impl LanguageServer for Backend {
                 })
                 .unwrap_or(false)
         });
-        if !touches_project {
+        // A `.m1lint.toml` change reloads the lint ruleset, rediscovered from
+        // the file's directory (#9).
+        let lint_change = params.changes.iter().find_map(|c| {
+            let p = c.uri.to_file_path().ok()?;
+            (p.file_name().and_then(|n| n.to_str()) == Some(".m1lint.toml")).then_some(p)
+        });
+        if let Some(p) = &lint_change
+            && let Some(dir) = p.parent()
+        {
+            self.lint.reload_config(dir);
+        }
+        if !touches_project && lint_change.is_none() {
             return;
         }
-        // Reload from the known .m1prj path if any, else rediscover from a changed file's dir.
-        let reloaded = self
-            .store
-            .with_project(|p| p.map(|lp| lp.m1prj_path.clone()));
-        let result = match reloaded {
-            Some(path) => self.store.load_from(&path),
-            None => {
-                // A new project appeared; rediscover from the first changed file's directory.
-                let dir = params
-                    .changes
-                    .first()
-                    .and_then(|c| c.uri.to_file_path().ok())
-                    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-                match dir {
-                    Some(d) => self.store.discover_and_load(&d),
-                    None => Ok(false),
+        // Reload the project from the known .m1prj path if any, else rediscover.
+        let result = if touches_project {
+            let reloaded = self
+                .store
+                .with_project(|p| p.map(|lp| lp.m1prj_path.clone()));
+            match reloaded {
+                Some(path) => self.store.load_from(&path),
+                None => {
+                    // A new project appeared; rediscover from the first changed file's directory.
+                    let dir = params
+                        .changes
+                        .first()
+                        .and_then(|c| c.uri.to_file_path().ok())
+                        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                    match dir {
+                        Some(d) => self.store.discover_and_load(&d),
+                        None => Ok(false),
+                    }
                 }
             }
+        } else {
+            Ok(false)
         };
         if let Err(e) = result {
             self.client
