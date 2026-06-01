@@ -1,13 +1,15 @@
 //! textDocument/references + textDocument/documentHighlight.
 //!
-//! Both answer the same question — "where else in this file is the thing under
-//! the cursor?" — and share one occurrence finder. We work within a single file
-//! only: locals are file-scoped in the type model, and project symbols are
-//! declared in `Project.m1prj` (not the scripts), so cross-file reference search
-//! would need a project-wide index we don't maintain here.
+//! Both share one occurrence finder. `document_highlight` is always file-local
+//! ("where else in *this* file?"). `references` is project-wide for project
+//! symbols (#29): `project_references` searches every `.m1scr` in the workspace
+//! for the dotted path. Locals stay file-scoped (the type model scopes them per
+//! file). The script set comes from the project's function/method symbols, so no
+//! separate index is maintained — it's derived from the loaded model on demand.
 use crate::convert::range;
 use crate::features::locate::{collect_locals, node_at_byte, path_at_byte};
 use crate::line_index::{LineIndex, PositionEncoding};
+use crate::project_store::LoadedProject;
 use m1_core::{Field, Kind, Node};
 use tower_lsp::lsp_types::{DocumentHighlight, DocumentHighlightKind, Location, Url};
 
@@ -139,6 +141,107 @@ pub fn references(
     )
 }
 
+/// What the cursor refers to, for reference search. A `Local` is file-scoped (the
+/// type model scopes locals per file); a `Path` is a project symbol that can be
+/// referenced from any `.m1scr` in the workspace.
+pub enum RefTarget {
+    Local(String),
+    Path(String),
+}
+
+/// Classify the cursor target, mirroring `occurrences`' local-vs-path branching.
+pub fn ref_target(root: Node, byte: usize) -> Option<RefTarget> {
+    let node = node_at_byte(root, byte)?;
+    if node.kind() == Kind::Identifier
+        && !is_member_property(node)
+        && !in_type_annotation(node)
+        && collect_locals(root).contains_key(node.text())
+    {
+        return Some(RefTarget::Local(node.text().to_string()));
+    }
+    let (_, path) = path_at_byte(root, byte)?;
+    Some(RefTarget::Path(path))
+}
+
+/// All Locations of the dotted `path` within one already-parsed file.
+fn path_locations(
+    root: Node,
+    path: &str,
+    uri: &Url,
+    li: &LineIndex,
+    enc: PositionEncoding,
+) -> Vec<Location> {
+    let mut nodes = Vec::new();
+    collect_path_matches(root, path, &mut nodes);
+    nodes
+        .into_iter()
+        .map(|n| Location {
+            uri: uri.clone(),
+            range: range(&n.byte_range(), li, enc),
+        })
+        .collect()
+}
+
+/// The distinct `.m1scr` files referenced by the project's function/method
+/// symbols (relative to the project root).
+fn project_script_files(loaded: &LoadedProject) -> Vec<String> {
+    let mut set = std::collections::BTreeSet::new();
+    for s in loaded.project.symbols().iter() {
+        if let Some(f) = &s.filename
+            && f.ends_with(".m1scr")
+        {
+            set.insert(f.clone());
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// Project-wide references (#29). A local stays file-local; a project symbol is
+/// searched across every `.m1scr` in the workspace. `open_text` supplies the
+/// in-memory buffer for a file when one is open (newer than disk); files not open
+/// are read from disk. The cursor's own file is always included.
+pub fn project_references(
+    loaded: &LoadedProject,
+    cursor_uri: &Url,
+    cursor_text: &str,
+    byte: usize,
+    enc: PositionEncoding,
+    open_text: &dyn Fn(&Url) -> Option<String>,
+) -> Option<Vec<Location>> {
+    let cursor_cst = m1_core::parse(cursor_text);
+    match ref_target(cursor_cst.root(), byte)? {
+        // Locals are file-scoped: reuse the single-file finder.
+        RefTarget::Local(_) => {
+            let li = LineIndex::new(cursor_text);
+            references(cursor_cst.root(), byte, cursor_uri.clone(), &li, enc)
+        }
+        RefTarget::Path(path) => {
+            // Gather (uri, text) for the cursor file first, then every other
+            // project script (deduped by uri), preferring open buffers.
+            let mut files: Vec<(Url, String)> = vec![(cursor_uri.clone(), cursor_text.to_string())];
+            for fname in project_script_files(loaded) {
+                let p = loaded.root.join(&fname);
+                let Ok(uri) = Url::from_file_path(&p) else {
+                    continue;
+                };
+                if files.iter().any(|(u, _)| *u == uri) {
+                    continue;
+                }
+                if let Some(t) = open_text(&uri).or_else(|| std::fs::read_to_string(&p).ok()) {
+                    files.push((uri, t));
+                }
+            }
+            let mut locs = Vec::new();
+            for (uri, text) in &files {
+                let li = LineIndex::new(text);
+                let cst = m1_core::parse(text);
+                locs.extend(path_locations(cst.root(), &path, uri, &li, enc));
+            }
+            (!locs.is_empty()).then_some(locs)
+        }
+    }
+}
+
 pub fn document_highlights(
     root: Node,
     byte: usize,
@@ -230,5 +333,59 @@ mod tests {
             "the decl and the `count =` assignment are writes"
         );
         assert_eq!(reads, 1, "the `count + 1` use is a read");
+    }
+
+    #[test]
+    fn project_references_span_multiple_scripts() {
+        use crate::project_store::ProjectStore;
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let m1prj = r#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Engine"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Engine.Speed"><Props Type="f32"/></Component>
+  <Component Classname="BuiltIn.FuncUser" Name="Root.Engine.Write" Filename="A.m1scr"/>
+  <Component Classname="BuiltIn.FuncUser" Name="Root.Engine.Read" Filename="B.m1scr"/>
+</Project>"#;
+        std::fs::File::create(tmp.path().join("Project.m1prj"))
+            .unwrap()
+            .write_all(m1prj.as_bytes())
+            .unwrap();
+        let a_src = "Root.Engine.Speed = 1.0;\n";
+        let b_src = "local x = Root.Engine.Speed;\n";
+        std::fs::write(tmp.path().join("A.m1scr"), a_src).unwrap();
+        std::fs::write(tmp.path().join("B.m1scr"), b_src).unwrap();
+
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        let a_uri = Url::from_file_path(tmp.path().join("A.m1scr")).unwrap();
+        let byte = 0; // cursor on `Root.Engine.Speed` in A
+        let no_open = |_: &Url| None;
+        let locs = store
+            .with_project(|p| {
+                project_references(
+                    p.unwrap(),
+                    &a_uri,
+                    a_src,
+                    byte,
+                    PositionEncoding::Utf16,
+                    &no_open,
+                )
+            })
+            .expect("references across files");
+
+        // One write site in A, one read site in B.
+        let files: std::collections::BTreeSet<_> =
+            locs.iter().map(|l| l.uri.path().to_string()).collect();
+        assert_eq!(
+            files.len(),
+            2,
+            "references should span both scripts: {locs:?}"
+        );
+        assert!(locs.iter().any(|l| l.uri.path().ends_with("A.m1scr")));
+        assert!(locs.iter().any(|l| l.uri.path().ends_with("B.m1scr")));
     }
 }
