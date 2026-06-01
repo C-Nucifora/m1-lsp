@@ -477,21 +477,25 @@ impl LanguageServer for Backend {
         };
         let byte = lindex.offset(params.position, &text, self.enc());
         let cst = m1_core::parse(&text);
-        Ok(rename::prepare_rename(
-            cst.root(),
-            byte,
-            &lindex,
-            self.enc(),
-        ))
+        let file_name = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let enc = self.enc();
+        Ok(self.store.with_project(|p| {
+            rename::prepare(
+                cst.root(),
+                byte,
+                &lindex,
+                enc,
+                p.map(|lp| &lp.project),
+                file_name.as_deref(),
+            )
+        }))
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
         let new_name = params.new_name;
-        if !rename::is_valid_identifier(&new_name) {
-            return Err(Error::invalid_params(format!(
-                "'{new_name}' is not a valid M1 local name (letters, digits, underscore; no leading digit or spaces)"
-            )));
-        }
         let tdp = params.text_document_position;
         let uri = tdp.text_document.uri;
         let Some((text, lindex)) = self
@@ -503,21 +507,29 @@ impl LanguageServer for Backend {
         };
         let byte = lindex.offset(tdp.position, &text, self.enc());
         let cst = m1_core::parse(&text);
-        match rename::rename(
-            cst.root(),
-            byte,
-            &new_name,
-            uri.clone(),
-            &lindex,
-            self.enc(),
-        ) {
-            Some(edit) => Ok(Some(edit)),
-            // Returning Ok(None) makes the client silently do nothing (it reads
-            // it as "no rename here"); return an error so the user sees why.
-            None => Err(Error::invalid_params(
-                "no renameable symbol here — only `local` variables can be renamed".to_string(),
-            )),
-        }
+        let file_name = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let enc = self.enc();
+        // Open buffers win over on-disk copies so an in-flight edit is seen.
+        let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
+        let result = self.store.with_project(|p| {
+            rename::execute(
+                cst.root(),
+                byte,
+                &new_name,
+                uri.clone(),
+                &lindex,
+                enc,
+                p,
+                file_name.as_deref(),
+                &open_text,
+            )
+        });
+        // An Err is surfaced to the user (Ok(None) would make the client
+        // silently do nothing); a successful edit may span several files.
+        result.map(Some).map_err(Error::invalid_params)
     }
 
     async fn semantic_tokens_full(
