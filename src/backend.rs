@@ -24,6 +24,9 @@ pub struct Backend {
     types: Box<dyn TypeProvider>,
     formatter: Box<dyn Formatter>,
     store: Arc<ProjectStore>,
+    /// Whether the client supports dynamic registration of
+    /// `workspace/didChangeWatchedFiles` (set during `initialize`).
+    watch_dynamic: std::sync::atomic::AtomicBool,
 }
 
 impl Backend {
@@ -36,6 +39,7 @@ impl Backend {
             types: Box::new(NoTypes),
             formatter: Box::new(NoFormat),
             store: Arc::new(ProjectStore::new()),
+            watch_dynamic: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -54,6 +58,7 @@ impl Backend {
             types: Box::new(NoTypes),
             formatter,
             store: Arc::new(ProjectStore::new()),
+            watch_dynamic: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -75,6 +80,7 @@ impl Backend {
             types,
             formatter,
             store,
+            watch_dynamic: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -116,6 +122,18 @@ impl LanguageServer for Backend {
             })
             .unwrap_or((PositionEncoding::Utf16, PositionEncodingKind::UTF16));
         *self.encoding.write().unwrap() = chosen.0;
+
+        // Record whether the client supports dynamic registration of file
+        // watching; we only register the watcher in `initialized` if it does.
+        let supports_watch = params
+            .capabilities
+            .workspace
+            .as_ref()
+            .and_then(|w| w.did_change_watched_files.as_ref())
+            .and_then(|d| d.dynamic_registration)
+            .unwrap_or(false);
+        self.watch_dynamic
+            .store(supports_watch, std::sync::atomic::Ordering::Relaxed);
 
         // Discover the project from root_uri (fall back to first workspace folder).
         let root = params
@@ -192,25 +210,40 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        let watchers = vec![
-            FileSystemWatcher {
-                glob_pattern: GlobPattern::String("**/*.m1prj".into()),
-                kind: None,
-            },
-            FileSystemWatcher {
-                glob_pattern: GlobPattern::String("**/*.m1cfg".into()),
-                kind: None,
-            },
-        ];
-        let reg = Registration {
-            id: "m1-lsp-watch-project".into(),
-            method: "workspace/didChangeWatchedFiles".into(),
-            register_options: Some(
-                serde_json::to_value(DidChangeWatchedFilesRegistrationOptions { watchers })
-                    .unwrap(),
-            ),
-        };
-        let _ = self.client.register_capability(vec![reg]).await;
+        // Only register dynamic file watching if the client advertised support
+        // for it; registering otherwise fails silently on such clients.
+        if self
+            .watch_dynamic
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let watchers = vec![
+                FileSystemWatcher {
+                    glob_pattern: GlobPattern::String("**/*.m1prj".into()),
+                    kind: None,
+                },
+                FileSystemWatcher {
+                    glob_pattern: GlobPattern::String("**/*.m1cfg".into()),
+                    kind: None,
+                },
+            ];
+            let reg = Registration {
+                id: "m1-lsp-watch-project".into(),
+                method: "workspace/didChangeWatchedFiles".into(),
+                register_options: Some(
+                    serde_json::to_value(DidChangeWatchedFilesRegistrationOptions { watchers })
+                        .unwrap(),
+                ),
+            };
+            let _ = self.client.register_capability(vec![reg]).await;
+        } else {
+            self.client
+                .log_message(
+                    MessageType::INFO,
+                    "m1-lsp: client does not support dynamic file-watching; \
+                     .m1prj/.m1cfg auto-reload disabled",
+                )
+                .await;
+        }
         self.client
             .log_message(MessageType::INFO, "m1-lsp ready (v2)")
             .await;
