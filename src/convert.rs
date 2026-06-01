@@ -16,6 +16,11 @@ pub fn code_str(c: Code) -> &'static str {
     match c {
         Code::SyntaxError => "syntax-error",
         Code::MissingToken => "missing-token",
+        // Widened in m1-core for downstream consumers (m1-core#7); kept
+        // exhaustive so a m1-core dep bump doesn't break the build.
+        Code::TypeError => "type-error",
+        Code::LintError => "lint-error",
+        Code::SemanticError => "semantic-error",
     }
 }
 
