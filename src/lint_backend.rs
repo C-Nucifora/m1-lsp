@@ -63,6 +63,12 @@ impl LintProvider for M1Lint {
             *self.runner.write().unwrap() = Runner::new(Registry::from_config(&cfg));
         }
     }
+
+    fn set_lint_config(&self, cfg: &Config) {
+        // Apply a config resolved centrally by the unified `m1-tools.toml` layer
+        // (thresholds + enabled set), replacing any file-discovered one.
+        *self.runner.write().unwrap() = Runner::new(Registry::from_config(cfg));
+    }
 }
 
 #[cfg(test)]

@@ -22,6 +22,11 @@ pub trait Formatter: Send + Sync {
     ) -> Option<(u32, u32, String)> {
         None
     }
+
+    /// Apply formatter options resolved by the unified `m1-tools.toml` layer
+    /// (`[format]` — line width, blank lines). Default: no-op (formatters without
+    /// options).
+    fn set_format_options(&self, _opts: &m1_fmt::FormatOptions) {}
 }
 
 /// Identity formatter: never changes anything. Default until m1-fmt lands.

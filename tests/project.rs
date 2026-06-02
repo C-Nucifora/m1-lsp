@@ -14,7 +14,15 @@ fn type_diagnostics_published_via_analyze() {
     let src = "fGain = 1.0;\nif (fGain == 2.0) {\n}\n";
     let li = LineIndex::new(src);
     let uri = Url::parse("file:///x.m1scr").unwrap();
-    let diags = analyze(&uri, src, &li, PositionEncoding::Utf16, &NoLint, &types);
+    let diags = analyze(
+        &uri,
+        src,
+        &li,
+        PositionEncoding::Utf16,
+        &NoLint,
+        &types,
+        &m1_lsp::config::DiagFilter::default(),
+    );
     assert!(
         diags
             .iter()

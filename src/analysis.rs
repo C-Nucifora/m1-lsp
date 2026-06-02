@@ -1,4 +1,5 @@
 //! The analysis pass: union of m1-core syntax, m1-lint, and m1-typecheck diagnostics.
+use crate::config::DiagFilter;
 use crate::convert;
 use crate::line_index::{LineIndex, PositionEncoding};
 use tower_lsp::lsp_types::{Diagnostic as LspDiag, DiagnosticSeverity, NumberOrString, Url};
@@ -45,6 +46,11 @@ pub trait LintProvider: Send + Sync {
     /// (and the user-global fallback). Called on `initialize` and whenever a
     /// `.m1lint.toml` changes. Default: no-op (providers without config).
     fn reload_config(&self, _root: &std::path::Path) {}
+
+    /// Apply a lint config resolved by the unified `m1-tools.toml` layer. Default:
+    /// no-op (providers without config). Supersedes `reload_config`'s own
+    /// discovery when the backend drives configuration centrally.
+    fn set_lint_config(&self, _cfg: &m1_lint::config::Config) {}
 }
 
 /// A no-op lint provider (syntax diagnostics only).
@@ -85,6 +91,7 @@ pub fn analyze(
     enc: PositionEncoding,
     lint: &dyn LintProvider,
     types: &dyn TypeProvider,
+    filter: &DiagFilter,
 ) -> Vec<LspDiag> {
     let cst = m1_core::parse(src);
     let mut out: Vec<LspDiag> = cst
@@ -102,6 +109,16 @@ pub fn analyze(
     }
     out.extend(lint_diags);
     out.extend(types.types(uri, src, li, enc));
+
+    // Unified cross-source filter (m1-tools.toml `[diagnostics]`): drop ignored
+    // codes / keep only selected ones, across every source above.
+    if !filter.is_empty() {
+        out.retain(|d| match &d.code {
+            Some(NumberOrString::String(c)) => filter.allows(c),
+            Some(NumberOrString::Number(n)) => filter.allows(&n.to_string()),
+            None => true,
+        });
+    }
     out
 }
 
@@ -117,7 +134,15 @@ mod tests {
     fn clean_source_has_no_diagnostics() {
         let src = "local x = 1;\n";
         let li = LineIndex::new(src);
-        let diags = analyze(&uri(), src, &li, PositionEncoding::Utf16, &NoLint, &NoTypes);
+        let diags = analyze(
+            &uri(),
+            src,
+            &li,
+            PositionEncoding::Utf16,
+            &NoLint,
+            &NoTypes,
+            &DiagFilter::default(),
+        );
         assert!(diags.is_empty());
     }
 
@@ -125,7 +150,15 @@ mod tests {
     fn syntax_error_is_reported() {
         let src = "local <Integer> = 1;\n";
         let li = LineIndex::new(src);
-        let diags = analyze(&uri(), src, &li, PositionEncoding::Utf16, &NoLint, &NoTypes);
+        let diags = analyze(
+            &uri(),
+            src,
+            &li,
+            PositionEncoding::Utf16,
+            &NoLint,
+            &NoTypes,
+            &DiagFilter::default(),
+        );
         assert!(!diags.is_empty());
         assert!(diags.iter().all(|d| d.source.as_deref() == Some("m1-core")));
     }
@@ -174,6 +207,7 @@ mod tests {
             PositionEncoding::Utf16,
             &L006Only,
             &ProjLoaded,
+            &DiagFilter::default(),
         );
         assert!(!diags.iter().any(is_l006), "L006 must be dropped");
         assert!(
@@ -198,6 +232,7 @@ mod tests {
             PositionEncoding::Utf16,
             &L006Only,
             &NoTypes,
+            &DiagFilter::default(),
         );
         assert!(
             diags.iter().any(is_l006),
@@ -209,7 +244,15 @@ mod tests {
     fn flags_unsupported_c_tokens() {
         let src = "x = a == b and c;\n"; // == is a C token; 'and' is fine
         let li = LineIndex::new(src);
-        let diags = analyze(&uri(), src, &li, PositionEncoding::Utf16, &NoLint, &NoTypes);
+        let diags = analyze(
+            &uri(),
+            src,
+            &li,
+            PositionEncoding::Utf16,
+            &NoLint,
+            &NoTypes,
+            &DiagFilter::default(),
+        );
         assert!(
             diags.iter().any(|d| d.code
                 == Some(tower_lsp::lsp_types::NumberOrString::String(
@@ -217,5 +260,32 @@ mod tests {
                 ))),
             "expected an unsupported-c-token diagnostic for `==`"
         );
+    }
+
+    #[test]
+    fn unified_filter_drops_ignored_codes_across_sources() {
+        // The filter applies to every source: it drops an ignored lint L-code and
+        // an ignored intrinsic check, regardless of which backend produced them.
+        let src = "x = a == b and c;\n"; // emits an unsupported-c-token for `==`
+        let li = LineIndex::new(src);
+        let mut filter = DiagFilter::default();
+        filter.ignore.insert("unsupported-c-token".into());
+        filter.ignore.insert("L004".into());
+        let diags = analyze(
+            &uri(),
+            src,
+            &li,
+            PositionEncoding::Utf16,
+            &L006Only, // emits L006 + L004
+            &NoTypes,
+            &filter,
+        );
+        assert!(
+            !diags.iter().any(|d| matches!(&d.code,
+                Some(NumberOrString::String(c)) if c == "unsupported-c-token" || c == "L004")),
+            "ignored codes from any source must be dropped: {diags:?}"
+        );
+        // A non-ignored code (L006, no project) survives.
+        assert!(diags.iter().any(is_l006), "non-ignored L006 must survive");
     }
 }

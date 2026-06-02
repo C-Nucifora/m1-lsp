@@ -2,6 +2,7 @@
 //! logic lives here so it can be unit- and integration-tested.
 pub mod analysis;
 pub mod backend;
+pub mod config;
 pub mod convert;
 pub mod document;
 pub mod features;
