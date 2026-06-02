@@ -57,11 +57,40 @@ pub fn semantic_tokens(
     li: &LineIndex,
     enc: PositionEncoding,
 ) -> Vec<SemanticToken> {
+    delta_encode(raw_tokens(root, project, file_name, li, enc))
+}
+
+/// Like [`semantic_tokens`] but only the tokens whose line falls in the 0-based
+/// inclusive `[start_line, end_line]` range (`textDocument/semanticTokens/range`).
+/// The full set is computed and filtered; the delta encoding is then relative to
+/// the first emitted token, as the protocol expects for a range result.
+pub fn semantic_tokens_range(
+    root: Node,
+    project: Option<&Project>,
+    file_name: Option<&str>,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    start_line: u32,
+    end_line: u32,
+) -> Vec<SemanticToken> {
+    let mut raw = raw_tokens(root, project, file_name, li, enc);
+    raw.retain(|t| t.line >= start_line && t.line <= end_line);
+    delta_encode(raw)
+}
+
+/// The sorted absolute-position token list (pre delta-encoding).
+fn raw_tokens(
+    root: Node,
+    project: Option<&Project>,
+    file_name: Option<&str>,
+    li: &LineIndex,
+    enc: PositionEncoding,
+) -> Vec<RawToken> {
     let scope = build_scope(root, project, file_name);
     let mut raw: Vec<RawToken> = Vec::new();
     walk(root, &scope, li, enc, &mut raw);
     raw.sort_by(|a, b| a.line.cmp(&b.line).then(a.start.cmp(&b.start)));
-    delta_encode(raw)
+    raw
 }
 
 // ── Internal types ────────────────────────────────────────────────────────────
@@ -318,6 +347,26 @@ mod tests {
         let cst = m1_core::parse(src);
         let li = LineIndex::new(src);
         semantic_tokens(cst.root(), None, None, &li, PositionEncoding::Utf16)
+    }
+
+    #[test]
+    fn range_mode_returns_only_tokens_in_the_requested_lines() {
+        let src = "local a = 1;\nlocal b = 2;\nlocal c = 3;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        // Restrict to line 1 only.
+        let ranged =
+            semantic_tokens_range(cst.root(), None, None, &li, PositionEncoding::Utf16, 1, 1);
+        assert!(!ranged.is_empty(), "expected tokens on line 1");
+        // The first token's delta_line is absolute (relative to line 0); every
+        // subsequent token in the slice stays on the same line (delta_line == 0).
+        assert_eq!(ranged[0].delta_line, 1, "first token anchored at line 1");
+        assert!(
+            ranged[1..].iter().all(|t| t.delta_line == 0),
+            "all ranged tokens should be on the single requested line"
+        );
+        // And it is a strict subset of the full token stream.
+        assert!(ranged.len() < tokens(src).len());
     }
 
     #[test]
