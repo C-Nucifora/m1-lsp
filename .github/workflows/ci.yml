@@ -11,6 +11,10 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Least-privilege default for the whole workflow; jobs opt into more as needed.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Test
@@ -52,6 +56,9 @@ jobs:
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write # audit-check posts results as a check run
     steps:
       - uses: actions/checkout@v6
       - uses: rustsec/audit-check@v2
