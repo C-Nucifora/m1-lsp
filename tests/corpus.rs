@@ -29,7 +29,15 @@ fn analyze_never_panics_on_corpus() {
         let src = std::fs::read_to_string(&path).expect("read script");
         let li = LineIndex::new(&src);
         let uri = Url::from_file_path(&path).unwrap();
-        let _ = analyze(&uri, &src, &li, PositionEncoding::Utf16, &NoLint, &NoTypes);
+        let _ = analyze(
+            &uri,
+            &src,
+            &li,
+            PositionEncoding::Utf16,
+            &NoLint,
+            &NoTypes,
+            &m1_lsp::config::DiagFilter::default(),
+        );
         // locate smoke pass: path_at_byte at strided offsets must not panic.
         let cst = m1_core::parse(&src);
         for off in (0..src.len()).step_by(64) {

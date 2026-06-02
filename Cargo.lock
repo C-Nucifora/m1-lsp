@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "m1-lsp"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "dashmap 6.2.1",
  "m1-core",
@@ -608,16 +608,18 @@ dependencies = [
  "m1-lint",
  "m1-typecheck",
  "m1-workspace",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "toml",
  "tower-lsp",
 ]
 
 [[package]]
 name = "m1-typecheck"
-version = "0.10.0"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.10.0#9f49acd41d251abf84b2a72e9110bfd03c600ce2"
+version = "0.11.0"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.11.0#fab2808c4e666743cef396b3316e2acba9c7aafd"
 dependencies = [
  "clap",
  "m1-core",

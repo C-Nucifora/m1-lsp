@@ -7,6 +7,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 use crate::analysis::{LintProvider, NoLint, NoTypes, TypeProvider, analyze};
+use crate::config::M1Config;
 use crate::document::Document;
 use crate::features::{
     code_action, completion, document_symbols, folding, goto, hover, inlay, references, rename,
@@ -27,6 +28,16 @@ pub struct Backend {
     /// Whether the client supports dynamic registration of
     /// `workspace/didChangeWatchedFiles` (set during `initialize`).
     watch_dynamic: std::sync::atomic::AtomicBool,
+    /// The resolved unified config (lint/format/diagnostics) currently applied to
+    /// the backends. Re-resolved on root discovery, `m1-tools.toml` change, and
+    /// `didChangeConfiguration`; its `diagnostics` filter is read on every publish.
+    config: std::sync::RwLock<M1Config>,
+    /// The last editor settings (`initializationOptions` / `didChangeConfiguration`),
+    /// the middle precedence layer beneath `m1-tools.toml`.
+    editor_settings: std::sync::RwLock<Option<serde_json::Value>>,
+    /// The project root last used to resolve config, so `didChangeConfiguration`
+    /// can re-resolve against the same workspace.
+    config_root: std::sync::RwLock<Option<std::path::PathBuf>>,
 }
 
 impl Backend {
@@ -40,6 +51,9 @@ impl Backend {
             formatter: Box::new(NoFormat),
             store: Arc::new(ProjectStore::new()),
             watch_dynamic: std::sync::atomic::AtomicBool::new(false),
+            config: std::sync::RwLock::new(M1Config::default()),
+            editor_settings: std::sync::RwLock::new(None),
+            config_root: std::sync::RwLock::new(None),
         }
     }
 
@@ -62,6 +76,31 @@ impl Backend {
             formatter,
             store,
             watch_dynamic: std::sync::atomic::AtomicBool::new(false),
+            config: std::sync::RwLock::new(M1Config::default()),
+            editor_settings: std::sync::RwLock::new(None),
+            config_root: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// Resolve the unified config for `root` (editor settings layered under any
+    /// `m1-tools.toml`) and apply it: lint thresholds/rules, formatter options,
+    /// and the cross-source diagnostic filter. Records `root` so a later
+    /// `didChangeConfiguration` can re-resolve against the same workspace.
+    fn apply_config(&self, root: &std::path::Path) {
+        let editor = self.editor_settings.read().unwrap().clone();
+        let cfg = M1Config::resolve(editor.as_ref(), root);
+        self.lint.set_lint_config(&cfg.lint);
+        self.formatter.set_format_options(&cfg.format);
+        *self.config.write().unwrap() = cfg;
+        *self.config_root.write().unwrap() = Some(root.to_path_buf());
+    }
+
+    /// Re-resolve config against the last known root (used by
+    /// `didChangeConfiguration`, which carries new editor settings but no root).
+    fn reapply_config(&self) {
+        let root = self.config_root.read().unwrap().clone();
+        if let Some(root) = root {
+            self.apply_config(&root);
         }
     }
 
@@ -94,8 +133,8 @@ impl Backend {
                         "m1-lsp: project loaded (didOpen fallback)",
                     )
                     .await;
-                // Pick up a project-level `.m1lint.toml` now that we have a root.
-                self.lint.reload_config(&dir);
+                // Resolve the unified config now that we have a workspace root.
+                self.apply_config(&dir);
             }
             Ok(false) => { /* no project found from this file; stay project-less */ }
             Err(e) => {
@@ -136,6 +175,7 @@ impl Backend {
             self.enc(),
             self.lint.as_ref(),
             self.types.as_ref(),
+            &self.config.read().unwrap().diagnostics,
         );
         self.client
             .publish_diagnostics(uri, diags, Some(version))
@@ -146,6 +186,15 @@ impl Backend {
 /// True when `uri` points at a `Project.m1prj` (or any `.m1prj`) project file.
 fn is_m1prj(uri: &Url) -> bool {
     uri.path().ends_with(".m1prj")
+}
+
+/// Extract the M1 settings object from a client `initializationOptions` /
+/// `didChangeConfiguration` payload: the `settings` sub-object if present (the
+/// shape the extensions send), else the value itself (a bare
+/// `{ lint, format, diagnostics }`). The result is deserialized by
+/// [`crate::config::M1Config::resolve`].
+fn editor_settings(v: serde_json::Value) -> serde_json::Value {
+    v.get("settings").cloned().unwrap_or(v)
 }
 
 #[tower_lsp::async_trait]
@@ -184,6 +233,13 @@ impl LanguageServer for Backend {
         self.watch_dynamic
             .store(supports_watch, std::sync::atomic::Ordering::Relaxed);
 
+        // Capture editor settings (the middle config layer, beneath `m1-tools.toml`).
+        // The client sends `{ "settings": { lint, format, diagnostics } }`; accept a
+        // bare `{ lint, … }` object too.
+        if let Some(opts) = params.initialization_options {
+            *self.editor_settings.write().unwrap() = Some(editor_settings(opts));
+        }
+
         // Discover the project from root_uri (fall back to first workspace folder).
         let root = params
             .root_uri
@@ -209,8 +265,9 @@ impl LanguageServer for Backend {
                         .await;
                 }
             }
-            // Pick up a project-level (or user-global) `.m1lint.toml` (#9).
-            self.lint.reload_config(&root);
+            // Resolve the unified config (editor settings + `m1-tools.toml`,
+            // legacy `.m1lint.toml` fallback).
+            self.apply_config(&root);
         }
 
         Ok(InitializeResult {
@@ -280,6 +337,10 @@ impl LanguageServer for Backend {
                 },
                 FileSystemWatcher {
                     glob_pattern: GlobPattern::String("**/.m1lint.toml".into()),
+                    kind: None,
+                },
+                FileSystemWatcher {
+                    glob_pattern: GlobPattern::String("**/m1-tools.toml".into()),
                     kind: None,
                 },
                 // Script create/delete changes the workspace script set that
@@ -767,16 +828,17 @@ impl LanguageServer for Backend {
                 })
                 .unwrap_or(false)
         });
-        // A `.m1lint.toml` change reloads the lint ruleset, rediscovered from
-        // the file's directory (#9).
-        let lint_change = params.changes.iter().find_map(|c| {
+        // An `m1-tools.toml` (or legacy `.m1lint.toml`) change re-resolves the
+        // unified config from the file's directory.
+        let config_change = params.changes.iter().find_map(|c| {
             let p = c.uri.to_file_path().ok()?;
-            (p.file_name().and_then(|n| n.to_str()) == Some(".m1lint.toml")).then_some(p)
+            let name = p.file_name().and_then(|n| n.to_str())?;
+            matches!(name, ".m1lint.toml" | "m1-tools.toml").then_some(p)
         });
-        if let Some(p) = &lint_change
+        if let Some(p) = &config_change
             && let Some(dir) = p.parent()
         {
-            self.lint.reload_config(dir);
+            self.apply_config(dir);
         }
         // A created/deleted `.m1scr` changes the cached workspace script set
         // (an edit to an existing one doesn't); refresh it cheaply, no reparse.
@@ -790,7 +852,7 @@ impl LanguageServer for Backend {
         if scripts_changed {
             self.store.refresh_scripts();
         }
-        if !touches_project && lint_change.is_none() {
+        if !touches_project && config_change.is_none() {
             return;
         }
         // Reload the project from the known .m1prj path if any, else rediscover.
@@ -822,6 +884,17 @@ impl LanguageServer for Backend {
                 .await;
         }
         // Re-publish for all open docs so T001 refreshes.
+        let uris: Vec<Url> = self.docs.iter().map(|e| e.key().clone()).collect();
+        for uri in uris {
+            self.publish(uri).await;
+        }
+    }
+
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        // New editor settings (the middle config layer). Re-resolve against the
+        // current workspace root and re-publish so the change takes effect live.
+        *self.editor_settings.write().unwrap() = Some(editor_settings(params.settings));
+        self.reapply_config();
         let uris: Vec<Url> = self.docs.iter().map(|e| e.key().clone()).collect();
         for uri in uris {
             self.publish(uri).await;

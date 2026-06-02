@@ -183,6 +183,14 @@ fn analyze_reports_syntax_error() {
     let src = "local <Integer> = 1;\n";
     let li = LineIndex::new(src);
     let uri = Url::parse("file:///x.m1scr").unwrap();
-    let diags = analyze(&uri, src, &li, PositionEncoding::Utf16, &NoLint, &NoTypes);
+    let diags = analyze(
+        &uri,
+        src,
+        &li,
+        PositionEncoding::Utf16,
+        &NoLint,
+        &NoTypes,
+        &m1_lsp::config::DiagFilter::default(),
+    );
     assert!(!diags.is_empty());
 }
