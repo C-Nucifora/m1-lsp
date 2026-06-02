@@ -9,3 +9,7 @@ updates:
         patterns:
           - "tree-sitter-m1"
           - "m1-*"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
