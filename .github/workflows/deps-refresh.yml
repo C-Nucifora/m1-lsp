@@ -1,0 +1,56 @@
+name: Refresh m1 dependencies
+
+# Bumps the pinned commits of the in-house m1 git dependencies (declared as
+# `branch = "main"`) in Cargo.lock to their latest main, then builds + tests
+# against them. If everything is green and the lockfile changed, opens a PR.
+#
+# Why: consumers pin their git deps via the committed Cargo.lock, so a merge to
+# a dependency's main is invisible here until the lock is bumped. This automates
+# that bump and gives an early signal — a red run means this crate no longer
+# builds/tests against the latest main of a dependency.
+#
+# Note: PRs opened with GITHUB_TOKEN don't themselves trigger CI, so this job
+# runs the full build/clippy/test as the merge gate; the PR is a review
+# checkpoint. (No org PAT is configured for these repos.)
+
+on:
+  schedule:
+    - cron: "0 5 * * *" # daily 05:00 UTC (after leaf consumers)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Bump m1 deps to latest main
+        run: cargo update -p m1-core -p m1-fmt -p m1-lint -p m1-typecheck
+
+      - name: Build, clippy and test against latest dep main
+        run: |
+          cargo build --all-targets --locked
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+
+      - name: Open a PR if the lockfile changed
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          add-paths: Cargo.lock
+          branch: deps/refresh-m1
+          delete-branch: true
+          commit-message: "chore(deps): bump m1 git deps to latest main"
+          title: "chore(deps): bump m1 git deps to latest main"
+          body: |
+            Automated lockfile refresh: bumped the pinned commits of the in-house
+            m1 git dependencies to their latest `main`. Verified with build +
+            clippy + test in the refresh job before opening this PR.
+
+            Review and merge to keep this crate building against current upstream.
