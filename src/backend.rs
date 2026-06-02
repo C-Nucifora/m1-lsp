@@ -119,6 +119,16 @@ impl Backend {
         else {
             return;
         };
+        // The `.m1prj` is XML, not an M1 script — don't run the script analysis
+        // on it (it would emit bogus syntax diagnostics). It can still be opened
+        // as a document so a channel/parameter can be renamed from its
+        // declaration; just publish no diagnostics for it.
+        if is_m1prj(&uri) {
+            self.client
+                .publish_diagnostics(uri, vec![], Some(version))
+                .await;
+            return;
+        }
         let diags = analyze(
             &uri,
             &text,
@@ -131,6 +141,11 @@ impl Backend {
             .publish_diagnostics(uri, diags, Some(version))
             .await;
     }
+}
+
+/// True when `uri` points at a `Project.m1prj` (or any `.m1prj`) project file.
+fn is_m1prj(uri: &Url) -> bool {
+    uri.path().ends_with(".m1prj")
 }
 
 #[tower_lsp::async_trait]
@@ -507,12 +522,18 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let byte = lindex.offset(params.position, &text, self.enc());
+        let enc = self.enc();
+        // The `.m1prj` is XML, not a script: offer rename on a component's Name.
+        if is_m1prj(&uri) {
+            return Ok(self.store.with_project(|p| {
+                rename::prepare_m1prj(&text, byte, enc, p.map(|lp| &lp.project))
+            }));
+        }
         let cst = m1_core::parse(&text);
         let file_name = uri
             .to_file_path()
             .ok()
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
-        let enc = self.enc();
         Ok(self.store.with_project(|p| {
             rename::prepare(
                 cst.root(),
@@ -537,14 +558,24 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let byte = lindex.offset(tdp.position, &text, self.enc());
+        let enc = self.enc();
+        // Open buffers win over on-disk copies so an in-flight edit is seen.
+        let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
+        // Renaming from within the project file (XML), not a script.
+        if is_m1prj(&uri) {
+            let result = self.store.with_project(|p| match p {
+                Some(lp) => {
+                    rename::execute_m1prj(&text, byte, &new_name, uri.clone(), enc, lp, &open_text)
+                }
+                None => Err("no project is loaded".to_string()),
+            });
+            return result.map(Some).map_err(Error::invalid_params);
+        }
         let cst = m1_core::parse(&text);
         let file_name = uri
             .to_file_path()
             .ok()
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
-        let enc = self.enc();
-        // Open buffers win over on-disk copies so an in-flight edit is seen.
-        let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
         let result = self.store.with_project(|p| {
             rename::execute(
                 cst.root(),
