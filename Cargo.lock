@@ -571,8 +571,8 @@ dependencies = [
 
 [[package]]
 name = "m1-core"
-version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-core.git?branch=main#750b00802a7c5c11d2cf4c8e328addde103e795f"
+version = "0.3.0"
+source = "git+https://github.com/C-Nucifora/m1-core.git?tag=v0.3.0#0922d9105246156f3c346ee9f34f3a46c51e5305"
 dependencies = [
  "tree-sitter",
  "tree-sitter-m1",
@@ -580,8 +580,8 @@ dependencies = [
 
 [[package]]
 name = "m1-fmt"
-version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-fmt.git?branch=main#a36c6854efb0aedb0cf930df085386d29e86b9d3"
+version = "0.3.1"
+source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.3.1#49aa9cead5562ba7d54d61ce743f35e3e4000e0b"
 dependencies = [
  "clap",
  "m1-core",
@@ -590,8 +590,8 @@ dependencies = [
 
 [[package]]
 name = "m1-lint"
-version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-lint.git?branch=main#7c2fcdef632585b44305f13282a5ba91e67d6674"
+version = "0.3.1"
+source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.3.1#67bdbe415187f63c9345fca306bd06ab8d8a8400"
 dependencies = [
  "glob",
  "m1-core",
@@ -615,8 +615,8 @@ dependencies = [
 
 [[package]]
 name = "m1-typecheck"
-version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?branch=main#deaf449c815b0af3c5d349a933fa641f143fdc57"
+version = "0.3.1"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.3.1#108904e91bc64fa41a736645db9a229ea6ce362d"
 dependencies = [
  "clap",
  "m1-core",
@@ -1185,8 +1185,8 @@ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 
 [[package]]
 name = "tree-sitter-m1"
-version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/tree-sitter-m1.git?branch=main#f5e531243b79add09aa46bc3a3bdf30408acfc48"
+version = "0.3.0"
+source = "git+https://github.com/C-Nucifora/tree-sitter-m1.git?branch=main#59560be1f0fe9217aa0949d4cce2202900265edb"
 dependencies = [
  "cc",
  "tree-sitter-language",
