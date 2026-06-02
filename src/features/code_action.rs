@@ -1,14 +1,15 @@
-//! textDocument/codeAction: quick-fixes for the mechanically-fixable
-//! `unsupported-c-token` diagnostics — the C operators that have a direct M1
-//! keyword replacement (`==`→`eq`, `!=`→`neq`, `&&`→`and`, `||`→`or`, `!`→`not`).
-//!
-//! `while` / `for` / `do` are *not* offered: there is no local rewrite (M1 has no
-//! iteration), so their diagnostics stay informational-only.
+//! textDocument/codeAction. Quick-fixes for:
+//! - `unsupported-c-token` C operators with a direct M1 keyword replacement
+//!   (`==`→`eq`, `!=`→`neq`, `&&`→`and`, `||`→`or`, `!`→`not`), and the equivalent
+//!   lint diagnostics L004/L005;
+//! - L002 trailing-whitespace (delete the span);
+//! - `while`/`for`/`do`, which have no mechanical rewrite (M1 has no iteration) but
+//!   get a `WhenStatement` skeleton inserted above them as a starting point (#83).
 use crate::line_index::{LineIndex, PositionEncoding};
 use std::collections::HashMap;
 use tower_lsp::lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic, NumberOrString, TextEdit, Url,
-    WorkspaceEdit,
+    CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic, NumberOrString, Position, Range,
+    TextEdit, Url, WorkspaceEdit,
 };
 
 /// The M1 keyword that replaces a C operator, for the ones with a clean swap.
@@ -117,6 +118,32 @@ pub fn code_actions(
         ));
     }
 
+    // `while` / `for` / `do`: no mechanical transform (M1 has no iteration), but
+    // offer a WhenStatement skeleton inserted above the construct (#83).
+    for d in diagnostics.iter() {
+        let Some(kw) = loop_keyword(text, li, enc, d) else {
+            continue;
+        };
+        let line = d.range.start.line;
+        let indent = line_indent(text, li, enc, line);
+        let stub = format!(
+            "{indent}-- TODO: `{kw}` is not supported in M1 — rewrite as a WhenStatement\n\
+             {indent}When State.Phase {{\n\
+             {indent}    Is Phase.Init: -- …\n\
+             {indent}}}\n"
+        );
+        let pos = Position::new(line, 0);
+        out.push(quickfix(
+            "Insert WhenStatement template".to_string(),
+            uri,
+            vec![TextEdit {
+                range: Range::new(pos, pos),
+                new_text: stub,
+            }],
+            Some(d),
+        ));
+    }
+
     // Bulk "fix all <code> in file" for the operator lints, when >1 occurs.
     for code in ["L004", "L005"] {
         let edits: Vec<TextEdit> = diagnostics
@@ -156,6 +183,36 @@ fn operator_edit(
         new_text: padded(text, start, end, keyword),
     };
     Some((op.to_string(), keyword, edit))
+}
+
+/// `Some("while"|"for"|"do")` if the diagnostic is an unsupported-C-token whose
+/// span is one of the loop keywords (which have no operator replacement).
+fn loop_keyword(
+    text: &str,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    d: &Diagnostic,
+) -> Option<&'static str> {
+    if !is_unsupported_c_token(d) {
+        return None;
+    }
+    let start = li.offset(d.range.start, text, enc);
+    let end = li.offset(d.range.end, text, enc);
+    match text.get(start..end)? {
+        "while" => Some("while"),
+        "for" => Some("for"),
+        "do" => Some("do"),
+        _ => None,
+    }
+}
+
+/// The leading whitespace (indentation) of `line`.
+fn line_indent(text: &str, li: &LineIndex, enc: PositionEncoding, line: u32) -> String {
+    let line_start = li.offset(Position::new(line, 0), text, enc);
+    text[line_start..]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect()
 }
 
 #[cfg(test)]
@@ -296,16 +353,55 @@ mod tests {
     }
 
     #[test]
+    fn loop_keyword_offers_whenstatement_template() {
+        let src = "    for i = 0 to 9 {\n";
+        let li = LineIndex::new(src);
+        let enc = PositionEncoding::Utf16;
+        let d = diag_for(src, "for", &li); // unsupported-c-token on `for`
+        let actions = code_actions(src, &li, enc, &uri(), &[d]);
+        let CodeActionOrCommand::CodeAction(a) = actions.into_iter().next().unwrap() else {
+            panic!("expected a code action");
+        };
+        assert_eq!(a.title, "Insert WhenStatement template");
+        let edit = a
+            .edit
+            .unwrap()
+            .changes
+            .unwrap()
+            .into_values()
+            .next()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(edit.new_text.contains("When State.Phase"));
+        assert!(edit.new_text.contains("not supported in M1"));
+        // Indentation of the construct is preserved on the inserted stub.
+        assert!(
+            edit.new_text.starts_with("    --"),
+            "got: {:?}",
+            edit.new_text
+        );
+    }
+
+    #[test]
     fn bang_becomes_not() {
         assert_eq!(fix("x = !flag;\n", "!").unwrap(), "x = not flag;\n");
     }
 
     #[test]
-    fn no_fix_for_while() {
+    fn while_offers_only_the_whenstatement_template() {
+        // `while` has no operator replacement, but now offers the WhenStatement
+        // skeleton (#83) — and nothing else.
         let src = "while (1) {}\n";
         let li = LineIndex::new(src);
         let d = diag_for(src, "while", &li);
-        assert!(code_actions(src, &li, PositionEncoding::Utf16, &uri(), &[d]).is_empty());
+        let actions = code_actions(src, &li, PositionEncoding::Utf16, &uri(), &[d]);
+        assert_eq!(actions.len(), 1);
+        let CodeActionOrCommand::CodeAction(a) = &actions[0] else {
+            panic!("expected a code action");
+        };
+        assert_eq!(a.title, "Insert WhenStatement template");
     }
 
     #[test]
