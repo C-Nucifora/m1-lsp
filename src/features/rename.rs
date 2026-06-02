@@ -17,10 +17,20 @@
 //!    text, so relative references are caught and unrelated same-named symbols in
 //!    other groups are left untouched.
 //!
-//! Out of scope (refused with a message, never a silent partial edit): groups /
-//! objects / tables; functions and methods and DBC signals (file-backed —
-//! renaming them means renaming their backing file); and compound symbols that
-//! have children (would require a cascading rename of every descendant path).
+//!  * **Groups / objects** (#72) — a compound container. Renamed by a
+//!    **cascade**: the group segment is rewritten in the `.m1prj` for the group
+//!    *and every descendant* `Name="…"`, in every resolving reference across the
+//!    scripts (only references that textually spell the group segment — relative
+//!    and `This.`/`Parent.`-anchored ones stay valid once the file is renamed),
+//!    and the convention-named backing scripts of method/func descendants are
+//!    renamed via bundled `RenameFile` operations. Refused (the whole op) only
+//!    when a backing script can't be located — never a silent partial edit. The
+//!    edit is emitted as `document_changes` so it can carry the file renames.
+//!
+//! Out of scope (refused with a message): file-backed symbols (functions,
+//! methods, DBC signals — renaming them means renaming their own backing file);
+//! and a value-bearing channel/parameter that itself has children (rename its
+//! leaf members individually).
 use crate::convert::range as to_range;
 use crate::features::locate::{build_scope, collect_locals, node_at_byte, path_at_byte};
 use crate::line_index::{LineIndex, PositionEncoding};
@@ -30,7 +40,10 @@ use m1_typecheck::project::Project;
 use m1_typecheck::resolve::{Resolution, Scope, resolve};
 use m1_typecheck::symbols::{Symbol, SymbolKind, SymbolTable};
 use std::collections::{HashMap, HashSet};
-use tower_lsp::lsp_types::{PrepareRenameResponse, TextEdit, Url, WorkspaceEdit};
+use tower_lsp::lsp_types::{
+    DocumentChangeOperation, DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier,
+    PrepareRenameResponse, RenameFile, ResourceOp, TextDocumentEdit, TextEdit, Url, WorkspaceEdit,
+};
 
 // ---------------------------------------------------------------------------
 // Locals (file-scoped) — unchanged behaviour.
@@ -336,46 +349,357 @@ fn file_name_of(uri: &Url) -> Option<String> {
         .map(|s| s.to_string_lossy().into_owned())
 }
 
-/// The eligible project leaf symbol the cursor resolves to, with the project's
-/// resolution scope for the cursor file. `Err` carries the user-facing reason a
-/// resolved symbol is *not* renameable; `Ok(None)` means "not a project symbol"
-/// (the caller falls back to / has already tried the local path).
-fn cursor_leaf<'p>(
-    root: Node,
-    byte: usize,
-    project: &'p Project,
-    file_name: Option<&str>,
-) -> Result<Option<&'p Symbol>, String> {
-    let Some((_, path)) = path_at_byte(root, byte) else {
-        return Ok(None);
-    };
-    let scope = scope_for(root, project, file_name);
-    let Some((sym, _)) = resolve_prefix(&path, &scope) else {
-        return Ok(None);
-    };
+/// What the cursor is renaming. The *segment the cursor sits on* decides: the
+/// prefix up to that segment resolves either to a childless leaf (ordinary
+/// semantic rename) or to a group/object container (cascading rename of the
+/// segment across the group and all its descendants, plus backing-file renames).
+enum Target<'p> {
+    Leaf(&'p Symbol),
+    Group(&'p Symbol),
+}
+
+/// Index of the dotted-path segment whose text span contains `byte`.
+fn segment_at_byte(top: Node, byte: usize) -> Option<usize> {
+    segment_nodes(top).iter().position(|s| {
+        let r = s.byte_range();
+        byte >= r.start && byte <= r.end
+    })
+}
+
+/// Decide renameability of `sym` (independent of which entry point found it).
+/// `Ok(None)` is never returned here — callers map "no symbol" themselves; this
+/// returns the [`Target`] or the user-facing reason it can't be renamed.
+fn classify<'p>(project: &'p Project, sym: &'p Symbol) -> Result<Target<'p>, String> {
     if sym.filename.is_some() {
         return Err(format!(
             "‘{}’ is defined in its own file; renaming file-backed symbols (functions, methods, DBC signals) is not supported",
             sym.path
         ));
     }
-    if !matches!(
-        sym.kind,
-        SymbolKind::Channel | SymbolKind::Parameter | SymbolKind::Constant | SymbolKind::Reference
-    ) {
-        return Err(format!(
-            "‘{}’ is a {:?}; only channels, parameters, constants and references can be renamed",
-            sym.path, sym.kind
-        ));
-    }
     let children = project.symbols().immediate_children(&sym.path).len();
-    if children > 0 {
-        return Err(format!(
-            "‘{}’ has {children} child component(s); renaming a compound symbol would require a cascading rename (not yet supported) — rename its leaf members individually",
+    match sym.kind {
+        // A group/object container cascades: the segment is renamed across every
+        // descendant path and the convention-named backing scripts.
+        SymbolKind::Group | SymbolKind::Object if children > 0 => Ok(Target::Group(sym)),
+        SymbolKind::Channel
+        | SymbolKind::Parameter
+        | SymbolKind::Constant
+        | SymbolKind::Reference
+            if children == 0 =>
+        {
+            Ok(Target::Leaf(sym))
+        }
+        // A value-bearing channel/parameter that itself has children is the
+        // residual case the cascade can't safely fold in — refuse explicitly.
+        _ if children > 0 => Err(format!(
+            "‘{}’ has {children} child component(s); rename its leaf members individually",
             sym.path
+        )),
+        _ => Err(format!(
+            "‘{}’ is a {:?}; only channels, parameters, constants, references and groups can be renamed",
+            sym.path, sym.kind
+        )),
+    }
+}
+
+/// The rename target under `byte`: resolve the path prefix *up to the segment the
+/// cursor is on* (so the cursor on `Engine` in `Engine.Speed` targets the group,
+/// while the cursor on `Speed` targets the leaf), then classify it. `Ok(None)`
+/// means "no project symbol here" (the caller falls back to the local path).
+fn cursor_target<'p>(
+    root: Node,
+    byte: usize,
+    project: &'p Project,
+    file_name: Option<&str>,
+) -> Result<Option<Target<'p>>, String> {
+    let Some((top, _)) = path_at_byte(root, byte) else {
+        return Ok(None);
+    };
+    let scope = scope_for(root, project, file_name);
+    let segs = segment_nodes(top);
+    let i = segment_at_byte(top, byte).unwrap_or(segs.len().saturating_sub(1));
+    let prefix = segs[..=i.min(segs.len().saturating_sub(1))]
+        .iter()
+        .map(|n| n.text())
+        .collect::<Vec<_>>()
+        .join(".");
+    let Some((sym, _)) = resolve_prefix(&prefix, &scope) else {
+        return Ok(None);
+    };
+    classify(project, sym).map(Some)
+}
+
+// ---------------------------------------------------------------------------
+// Group / compound cascade (#72).
+// ---------------------------------------------------------------------------
+
+/// One `TextDocumentEdit` (unversioned) for a file's edits, for `document_changes`.
+fn text_doc_edit(uri: Url, edits: Vec<TextEdit>) -> DocumentChangeOperation {
+    DocumentChangeOperation::Edit(TextDocumentEdit {
+        text_document: OptionalVersionedTextDocumentIdentifier { uri, version: None },
+        edits: edits.into_iter().map(OneOf::Left).collect(),
+    })
+}
+
+/// The new absolute path for a descendant `path` of `group_path` when the group's
+/// leaf is renamed to `new_name` (`Root.Engine.Speed` + `Root.Engine`→`Motor` ⇒
+/// `Root.Motor.Speed`). The group leaf is the only segment that changes.
+fn rename_group_segment(path: &str, group_path: &str, old_leaf: &str, new_name: &str) -> String {
+    let head_len = group_path.len() - old_leaf.len(); // up to and including the trailing `.`
+    format!(
+        "{}{}{}",
+        &path[..head_len],
+        new_name,
+        &path[group_path.len()..]
+    )
+}
+
+/// `.m1prj` edits renaming the group segment in the group's own `Name="…"` and in
+/// every descendant `Name="…<group>.…"`. Scans the `Name="` attribute text
+/// directly (the LSP carries no XML dependency), editing only the group segment.
+fn m1prj_group_edits(
+    prj_text: &str,
+    group_path: &str,
+    old_leaf: &str,
+    new_name: &str,
+    enc: PositionEncoding,
+) -> Vec<TextEdit> {
+    let li = LineIndex::new(prj_text);
+    let prefix = format!("{group_path}.");
+    let head = group_path.len() - old_leaf.len();
+    const NEEDLE: &str = "Name=\"";
+    let mut out = Vec::new();
+    let mut search = 0;
+    while let Some(rel) = prj_text[search..].find(NEEDLE) {
+        let val_start = search + rel + NEEDLE.len();
+        let Some(qrel) = prj_text[val_start..].find('"') else {
+            break;
+        };
+        let val_end = val_start + qrel;
+        let val = &prj_text[val_start..val_end];
+        if val == group_path || val.starts_with(&prefix) {
+            let seg_start = val_start + head;
+            let seg_end = seg_start + old_leaf.len();
+            out.push(TextEdit {
+                range: to_range(&(seg_start..seg_end), &li, enc),
+                new_text: new_name.to_string(),
+            });
+        }
+        search = val_end + 1;
+    }
+    out
+}
+
+/// Script edits rewriting every reference that resolves to the group *or any
+/// descendant*, changing only the group segment. The renamed segment is the one
+/// at the group's depth within the reference; relative/anchored references that
+/// don't spell the group segment are left untouched (their resolution stays valid
+/// once the backing file is renamed). The text guard (`== old_leaf`) makes this
+/// safe regardless of the index arithmetic.
+fn collect_group_ref_edits(
+    root: Node,
+    group_path: &str,
+    old_leaf: &str,
+    new_name: &str,
+    scope: &Scope,
+    li: &LineIndex,
+    enc: PositionEncoding,
+) -> Vec<TextEdit> {
+    let group_depth = group_path.split('.').count() - 1;
+    let prefix = format!("{group_path}.");
+    #[allow(clippy::too_many_arguments)]
+    fn walk(
+        n: Node,
+        group_path: &str,
+        prefix: &str,
+        old_leaf: &str,
+        new_name: &str,
+        group_depth: usize,
+        scope: &Scope,
+        li: &LineIndex,
+        enc: PositionEncoding,
+        out: &mut Vec<TextEdit>,
+    ) {
+        if is_top_path(n)
+            && let Some((sym, k)) = resolve_prefix(n.text(), scope)
+            && (sym.path == group_path || sym.path.starts_with(prefix))
+        {
+            let sym_last = sym.path.split('.').count() - 1;
+            let j = sym_last - group_depth; // segments from the leaf up to the group
+            if let Some(idx) = (k.checked_sub(1)).and_then(|kk| kk.checked_sub(j))
+                && let Some(seg) = segment_nodes(n).get(idx)
+                && seg.text() == old_leaf
+            {
+                out.push(TextEdit {
+                    range: to_range(&seg.byte_range(), li, enc),
+                    new_text: new_name.to_string(),
+                });
+            }
+        }
+        for c in n.children() {
+            walk(
+                c,
+                group_path,
+                prefix,
+                old_leaf,
+                new_name,
+                group_depth,
+                scope,
+                li,
+                enc,
+                out,
+            );
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        root,
+        group_path,
+        &prefix,
+        old_leaf,
+        new_name,
+        group_depth,
+        scope,
+        li,
+        enc,
+        &mut out,
+    );
+    out
+}
+
+/// `RenameFile` operations for the convention-named (no explicit `Filename=`)
+/// method/func scripts under the group, whose derived filename embeds the group
+/// segment. Refuses (the whole rename) if any such script can't be located on
+/// disk — renaming the group without renaming its file would silently break the
+/// script's group-relative references, which we never do.
+fn group_file_renames(
+    loaded: &LoadedProject,
+    project: &Project,
+    group_path: &str,
+    old_leaf: &str,
+    new_name: &str,
+) -> Result<Vec<RenameFile>, String> {
+    let prefix = format!("{group_path}.");
+    let mut out = Vec::new();
+    for sym in project.symbols().iter() {
+        if !matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) {
+            continue;
+        }
+        if !sym.path.starts_with(&prefix) {
+            continue;
+        }
+        // An explicit Filename doesn't encode the group, so it needs no rename.
+        if sym.filename.is_some() {
+            continue;
+        }
+        // Derived basename convention: the path minus the `Root.` prefix + `.m1scr`.
+        let rel = sym.path.strip_prefix("Root.").unwrap_or(&sym.path);
+        let old_base = format!("{rel}.m1scr");
+        let new_path = rename_group_segment(&sym.path, group_path, old_leaf, new_name);
+        let new_rel = new_path.strip_prefix("Root.").unwrap_or(&new_path);
+        let new_base = format!("{new_rel}.m1scr");
+        let Some(disk) = loaded.script_files.iter().find(|p| {
+            p.file_name()
+                .map(|f| f == old_base.as_str())
+                .unwrap_or(false)
+        }) else {
+            return Err(format!(
+                "‘{}’ has no locatable backing script ({old_base}); rename that file before renaming the group so references aren't silently broken",
+                sym.path
+            ));
+        };
+        let (Ok(old_uri), Ok(new_uri)) = (
+            Url::from_file_path(disk),
+            Url::from_file_path(disk.with_file_name(&new_base)),
+        ) else {
+            continue;
+        };
+        out.push(RenameFile {
+            old_uri,
+            new_uri,
+            options: None,
+            annotation_id: None,
+        });
+    }
+    Ok(out)
+}
+
+/// Execute a group/compound cascade rename: the group segment in the `.m1prj`
+/// (group + every descendant declaration), every resolving reference across all
+/// scripts, and `RenameFile` ops for the convention-named backing scripts.
+fn execute_group(
+    group: &Symbol,
+    new_name: &str,
+    cursor_uri: &Url,
+    enc: PositionEncoding,
+    loaded: &LoadedProject,
+    open_text: &dyn Fn(&Url) -> Option<String>,
+) -> Result<WorkspaceEdit, String> {
+    let project = &loaded.project;
+    let group_path = group.path.clone();
+    let (parent, old_leaf) = split_leaf(&group_path);
+    if new_name == old_leaf {
+        return Err("the new name is the same as the current name".to_string());
+    }
+    let new_full = match parent {
+        Some(p) => format!("{p}.{new_name}"),
+        None => new_name.to_string(),
+    };
+    if project.symbols().get(&new_full).is_some() {
+        return Err(format!(
+            "a symbol named ‘{new_name}’ already exists at ‘{new_full}’"
         ));
     }
-    Ok(Some(sym))
+
+    // Backing-file renames first: this is the step that can refuse the whole op.
+    let renames = group_file_renames(loaded, project, &group_path, old_leaf, new_name)?;
+
+    let mut ops: Vec<DocumentChangeOperation> = Vec::new();
+
+    // 1) `.m1prj`: the group + descendant declarations.
+    let prj_uri = Url::from_file_path(&loaded.m1prj_path)
+        .map_err(|_| "cannot form a URL for the project file".to_string())?;
+    let prj_text = open_text(&prj_uri)
+        .or_else(|| std::fs::read_to_string(&loaded.m1prj_path).ok())
+        .ok_or_else(|| "cannot read the project file".to_string())?;
+    let prj_edits = m1prj_group_edits(&prj_text, &group_path, old_leaf, new_name, enc);
+    if prj_edits.is_empty() {
+        return Err(format!(
+            "could not locate the declaration of ‘{group_path}’ in the project file"
+        ));
+    }
+    ops.push(text_doc_edit(prj_uri, prj_edits));
+
+    // 2) References across every script (text edits use the current URIs).
+    for (su, stext) in project_scripts(loaded, cursor_uri, open_text) {
+        let scst = m1_core::parse(&stext);
+        let sli = LineIndex::new(&stext);
+        let sfname = file_name_of(&su);
+        let sscope = scope_for(scst.root(), project, sfname.as_deref());
+        let edits = collect_group_ref_edits(
+            scst.root(),
+            &group_path,
+            old_leaf,
+            new_name,
+            &sscope,
+            &sli,
+            enc,
+        );
+        if !edits.is_empty() {
+            ops.push(text_doc_edit(su, edits));
+        }
+    }
+
+    // 3) Then the file renames (applied after the text edits above).
+    for rf in renames {
+        ops.push(DocumentChangeOperation::Op(ResourceOp::Rename(rf)));
+    }
+
+    Ok(WorkspaceEdit {
+        changes: None,
+        document_changes: Some(DocumentChanges::Operations(ops)),
+        change_annotations: None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -402,11 +726,19 @@ pub fn prepare(
     }
     let project = project?;
     // Only offer a range when the symbol is actually renameable.
-    cursor_leaf(root, byte, project, file_name).ok()??;
+    let target = cursor_target(root, byte, project, file_name).ok()??;
     let (top, path) = path_at_byte(root, byte)?;
-    let scope = scope_for(root, project, file_name);
-    let (_, k) = resolve_prefix(&path, &scope)?;
-    let seg = segment_nodes(top).into_iter().nth(k - 1)?;
+    // The editable segment: the leaf's resolving segment, or — for a group — the
+    // group segment the cursor is on.
+    let seg_idx = match target {
+        Target::Group(_) => segment_at_byte(top, byte)?,
+        Target::Leaf(_) => {
+            let scope = scope_for(root, project, file_name);
+            let (_, k) = resolve_prefix(&path, &scope)?;
+            k - 1
+        }
+    };
+    let seg = segment_nodes(top).into_iter().nth(seg_idx)?;
     Some(PrepareRenameResponse::Range(to_range(
         &seg.byte_range(),
         li,
@@ -455,11 +787,14 @@ pub fn execute(
         );
     };
     let project = &loaded.project;
-    let Some(sym) = cursor_leaf(root, byte, project, file_name)? else {
-        return Err(
-            "no renameable symbol here — place the cursor on a local, channel, parameter, constant or reference"
-                .to_string(),
-        );
+    let target = match cursor_target(root, byte, project, file_name)? {
+        Some(t) => t,
+        None => {
+            return Err(
+                "no renameable symbol here — place the cursor on a local, channel, parameter, constant, reference or group"
+                    .to_string(),
+            );
+        }
     };
 
     let new_name = new_name.trim();
@@ -468,6 +803,12 @@ pub fn execute(
             "‘{new_name}’ is not a valid M1 symbol name (letters, digits, spaces, underscore; no dots or quotes)"
         ));
     }
+
+    // A group/object container cascades across the workspace + backing files.
+    let sym = match target {
+        Target::Group(g) => return execute_group(g, new_name, &uri, enc, loaded, open_text),
+        Target::Leaf(s) => s,
+    };
     let target_path = sym.path.clone();
     let (parent, old_leaf) = split_leaf(&target_path);
     let new_full = match parent {
@@ -1003,6 +1344,234 @@ mod tests {
                 on_compound.is_none(),
                 "the compound channel is not renameable"
             );
+        });
+    }
+
+    // ---- group / compound cascade (#72) ----------------------------------
+
+    /// Pull the `RenameFile` ops out of a `document_changes` workspace edit.
+    fn rename_files(we: &WorkspaceEdit) -> Vec<(String, String)> {
+        match we.document_changes.as_ref() {
+            Some(DocumentChanges::Operations(ops)) => ops
+                .iter()
+                .filter_map(|op| match op {
+                    DocumentChangeOperation::Op(ResourceOp::Rename(rf)) => Some((
+                        rf.old_uri.path().rsplit('/').next().unwrap().to_string(),
+                        rf.new_uri.path().rsplit('/').next().unwrap().to_string(),
+                    )),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Text edits for the file whose URI ends with `ends_with`, from a
+    /// `document_changes` edit.
+    fn doc_edits_for(we: &WorkspaceEdit, ends_with: &str) -> Vec<TextEdit> {
+        match we.document_changes.as_ref() {
+            Some(DocumentChanges::Operations(ops)) => ops
+                .iter()
+                .find_map(|op| match op {
+                    DocumentChangeOperation::Edit(e)
+                        if e.text_document.uri.path().ends_with(ends_with) =>
+                    {
+                        Some(
+                            e.edits
+                                .iter()
+                                .map(|x| match x {
+                                    OneOf::Left(te) => te.clone(),
+                                    OneOf::Right(ate) => ate.text_edit.clone(),
+                                })
+                                .collect(),
+                        )
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn renames_group_across_prj_scripts_and_backing_files() {
+        let (tmp, store) = setup();
+        // Engine.Update.m1scr (owned by Root.Engine.Update, derived name): mixes an
+        // absolute ref, a group-relative ref, and a `This.`-anchored ref.
+        let engine =
+            "Engine.Threshold = 1.0;\nlocal a = Root.Engine.Speed;\nlocal b = This.Threshold;\n";
+        // A consumer in another group references Engine absolutely.
+        let dash = "local d = Root.Engine.Threshold;\nlocal e = Engine.Speed;\n";
+        std::fs::write(tmp.path().join("Engine.Update.m1scr"), engine).unwrap();
+        std::fs::write(tmp.path().join("Other.Update.m1scr"), dash).unwrap();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        let uri = Url::from_file_path(tmp.path().join("Other.Update.m1scr")).unwrap();
+        let cst = m1_core::parse(dash);
+        let li = LineIndex::new(dash);
+        // Cursor on `Engine` in `Root.Engine.Threshold` (the group segment).
+        let byte = dash.find("Engine").unwrap();
+        let no_open = |_: &Url| None;
+
+        let we = store
+            .with_project(|p| {
+                let loaded = p.unwrap();
+                execute(
+                    cst.root(),
+                    byte,
+                    "Motor",
+                    uri.clone(),
+                    &li,
+                    PositionEncoding::Utf16,
+                    Some(loaded),
+                    Some("Other.Update.m1scr"),
+                    &no_open,
+                )
+            })
+            .expect("group rename should succeed");
+
+        // .m1prj: the group + every descendant Name segment renamed. Descendants:
+        // Root.Engine itself, .Threshold, .Speed, .Speed.Value, .Update = 5.
+        let prj = doc_edits_for(&we, "Project.m1prj");
+        assert_eq!(prj.len(), 5, "group + 4 descendants: {prj:?}");
+        assert!(prj.iter().all(|e| e.new_text == "Motor"));
+
+        // Other.Update.m1scr: both the absolute and group-relative Engine segments.
+        let other = doc_edits_for(&we, "Other.Update.m1scr");
+        assert_eq!(other.len(), 2, "Root.Engine.* and Engine.Speed: {other:?}");
+
+        // Engine.Update.m1scr: the absolute refs spell `Engine`; the `This.`-anchored
+        // and the bare relative refs do not, so only the two absolute segments edit.
+        let eng = doc_edits_for(&we, "Engine.Update.m1scr");
+        assert_eq!(
+            eng.len(),
+            2,
+            "Engine.Threshold + Root.Engine.Speed: {eng:?}"
+        );
+
+        // The convention-named backing script is renamed to match the new group.
+        let files = rename_files(&we);
+        assert_eq!(
+            files,
+            vec![(
+                "Engine.Update.m1scr".to_string(),
+                "Motor.Update.m1scr".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn group_rename_rewrites_references_to_descendant_methods() {
+        // Renaming the group must also fix call sites of its *method* descendants
+        // in other scripts (e.g. `Engine.Update()` → `Motor.Update()`), not just
+        // channel references — the method is a descendant like any other.
+        let (tmp, store) = setup();
+        std::fs::write(
+            tmp.path().join("Engine.Update.m1scr"),
+            "Engine.Threshold = 1.0;\n",
+        )
+        .unwrap();
+        let caller = "Root.Engine.Update();\nEngine.Update();\n";
+        std::fs::write(tmp.path().join("Other.Update.m1scr"), caller).unwrap();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        let uri = Url::from_file_path(tmp.path().join("Other.Update.m1scr")).unwrap();
+        let cst = m1_core::parse(caller);
+        let li = LineIndex::new(caller);
+        let byte = caller.find("Engine").unwrap(); // group segment of Root.Engine.Update
+        let no_open = |_: &Url| None;
+
+        let we = store
+            .with_project(|p| {
+                execute(
+                    cst.root(),
+                    byte,
+                    "Motor",
+                    uri.clone(),
+                    &li,
+                    PositionEncoding::Utf16,
+                    p,
+                    Some("Other.Update.m1scr"),
+                    &no_open,
+                )
+            })
+            .expect("group rename should succeed");
+
+        // Both call sites of the method have their `Engine` segment rewritten.
+        let calls = doc_edits_for(&we, "Other.Update.m1scr");
+        assert_eq!(
+            calls.len(),
+            2,
+            "Root.Engine.Update() and Engine.Update() call sites: {calls:?}"
+        );
+        assert!(calls.iter().all(|e| e.new_text == "Motor"));
+        // And the method's own backing file is renamed.
+        assert_eq!(
+            rename_files(&we),
+            vec![(
+                "Engine.Update.m1scr".to_string(),
+                "Motor.Update.m1scr".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn group_rename_refuses_when_backing_file_missing() {
+        let (tmp, store) = setup();
+        // Engine.Update has no backing file on disk → cascade can't keep its
+        // group-relative refs consistent, so the whole rename is refused.
+        let src = "local d = Root.Engine.Threshold;\n";
+        std::fs::write(tmp.path().join("Other.Update.m1scr"), src).unwrap();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        let uri = Url::from_file_path(tmp.path().join("Other.Update.m1scr")).unwrap();
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find("Engine").unwrap();
+        let no_open = |_: &Url| None;
+        let res = store.with_project(|p| {
+            execute(
+                cst.root(),
+                byte,
+                "Motor",
+                uri.clone(),
+                &li,
+                PositionEncoding::Utf16,
+                p,
+                Some("Other.Update.m1scr"),
+                &no_open,
+            )
+        });
+        let err = res.unwrap_err();
+        assert!(err.contains("backing script"), "got: {err}");
+    }
+
+    #[test]
+    fn prepare_offers_group_segment() {
+        let (tmp, store) = setup();
+        // Backing file present so the group is renameable.
+        std::fs::write(
+            tmp.path().join("Engine.Update.m1scr"),
+            "Engine.Threshold = 1.0;\n",
+        )
+        .unwrap();
+        store.discover_and_load(tmp.path()).unwrap();
+        let src = "local d = Root.Engine.Threshold;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let enc = PositionEncoding::Utf16;
+        store.with_project(|p| {
+            let project = p.map(|lp| &lp.project);
+            // Cursor on `Engine` (the group segment) → offered.
+            let on_group = prepare(
+                cst.root(),
+                src.find("Engine").unwrap(),
+                &li,
+                enc,
+                project,
+                Some("Other.Update.m1scr"),
+            );
+            assert!(on_group.is_some(), "group segment is renameable");
         });
     }
 
