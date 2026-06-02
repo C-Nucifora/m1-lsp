@@ -18,8 +18,13 @@ pub struct M1Lint {
 
 impl M1Lint {
     pub fn new() -> Self {
+        // Seed with the full default rule set (all codes at default thresholds),
+        // matching what the `m1-lint` CLI reports. `reload_config` later swaps in
+        // a project-specific `.m1lint.toml` if one is discovered. Seeding with the
+        // reduced v1 set here meant single-file / no-workspace-root sessions
+        // silently dropped L010–L012 until a project root was set.
         Self {
-            runner: RwLock::new(Runner::new(Registry::default_v1())),
+            runner: RwLock::new(Runner::new(Registry::from_config(&Config::default()))),
         }
     }
 }
@@ -71,6 +76,28 @@ mod tests {
         let li = LineIndex::new(src);
         let diags = M1Lint::new().lint(src, &li, PositionEncoding::Utf16);
         assert!(diags.iter().any(|d| d.source.as_deref() == Some("m1-lint")));
+    }
+
+    #[test]
+    fn default_seed_includes_rules_beyond_the_v1_set() {
+        // Regression: a freshly-constructed backend (no project, no
+        // reload_config) must report the same rules as the `m1-lint` CLI
+        // default, including codes above L009. The old v1 seed dropped
+        // L010–L012 until a workspace root was discovered. L010
+        // (tab-for-indentation) is purely textual, so it is a stable probe.
+        let src = "\tx = 1;\n";
+        let li = LineIndex::new(src);
+        let diags = M1Lint::new().lint(src, &li, PositionEncoding::Utf16);
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(&d.code, Some(NumberOrString::String(s)) if s == "L010")),
+            "default seed should surface L010 without reload_config; got {:?}",
+            diags
+                .iter()
+                .filter_map(|d| d.code.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

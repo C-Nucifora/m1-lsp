@@ -43,29 +43,10 @@ impl Backend {
         }
     }
 
-    /// v1 constructor (lint + formatter); defaults the type provider to NoTypes
-    /// and a fresh project store. Kept for back-compat.
+    /// Inject lint, type provider, formatter, and a shared project store (the
+    /// same `Arc` the type provider holds, so reloads are visible to both
+    /// diagnostics and the read features).
     pub fn with_backends(
-        client: Client,
-        lint: Box<dyn LintProvider>,
-        formatter: Box<dyn Formatter>,
-    ) -> Self {
-        Self {
-            client,
-            docs: DashMap::new(),
-            encoding: std::sync::RwLock::new(PositionEncoding::Utf16),
-            lint,
-            types: Box::new(NoTypes),
-            formatter,
-            store: Arc::new(ProjectStore::new()),
-            watch_dynamic: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-
-    /// v2 constructor: inject lint, type provider, formatter, and a shared
-    /// project store (the same `Arc` the type provider holds, so reloads are
-    /// visible to both diagnostics and the read features).
-    pub fn with_backends_v2(
         client: Client,
         lint: Box<dyn LintProvider>,
         types: Box<dyn TypeProvider>,
