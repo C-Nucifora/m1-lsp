@@ -607,6 +607,7 @@ dependencies = [
  "m1-fmt",
  "m1-lint",
  "m1-typecheck",
+ "m1-workspace",
  "serde_json",
  "tempfile",
  "tokio",
@@ -624,6 +625,11 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "m1-workspace"
+version = "0.1.0"
+source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.1.0#640d1d52b75f5a08df272c8081d3cf8cab30dce2"
 
 [[package]]
 name = "memchr"

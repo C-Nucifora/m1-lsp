@@ -90,68 +90,11 @@ impl ProjectStore {
         f(guard.as_ref())
     }
 
-    /// Find `Project.m1prj` at `start` or any ancestor; return its path.
-    pub fn find_m1prj(start: &Path) -> Option<PathBuf> {
-        let mut dir = Some(start);
-        while let Some(d) = dir {
-            let cand = d.join("Project.m1prj");
-            if cand.is_file() {
-                return Some(cand);
-            }
-            dir = d.parent();
-        }
-        None
-    }
-
-    /// First `*.m1cfg` in `root` or any ancestor (nearest wins), if any. Real
-    /// projects keep `parameters.m1cfg` at the repository root while the
-    /// `Project.m1prj` is nested several directories deeper, so we walk up from
-    /// `root` — mirroring [`find_m1prj`](Self::find_m1prj) — rather than reading
-    /// only the project's own directory.
-    fn find_m1cfg(root: &Path) -> Option<PathBuf> {
-        let mut dir = Some(root);
-        while let Some(d) = dir {
-            let cfg = std::fs::read_dir(d).ok().and_then(|entries| {
-                entries.flatten().find_map(|e| {
-                    let p = e.path();
-                    (p.extension().and_then(|x| x.to_str()) == Some("m1cfg")).then_some(p)
-                })
-            });
-            if cfg.is_some() {
-                return cfg;
-            }
-            dir = d.parent();
-        }
-        None
-    }
-
-    /// All `*.m1dbc` files under the project root (recursively; typically in a
-    /// `dbc/` subdirectory). Sorted for deterministic load order.
-    fn find_m1dbc(root: &Path) -> Vec<PathBuf> {
-        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
-            };
-            for e in entries.flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    walk(&p, out);
-                } else if p.extension().and_then(|x| x.to_str()) == Some("m1dbc") {
-                    out.push(p);
-                }
-            }
-        }
-        let mut out = Vec::new();
-        walk(root, &mut out);
-        out.sort();
-        out
-    }
-
     /// Discover + load from `start_dir`, replacing any cached project. Returns
     /// `Ok(true)` if a project was loaded, `Ok(false)` if none was found, and
     /// `Err(msg)` if a found project failed to load (store is left empty).
     pub fn discover_and_load(&self, start_dir: &Path) -> Result<bool, String> {
-        let Some(m1prj_path) = Self::find_m1prj(start_dir) else {
+        let Some(m1prj_path) = m1_workspace::find_project_file(start_dir) else {
             *self.inner.write().unwrap() = None;
             return Ok(false);
         };
@@ -161,8 +104,8 @@ impl ProjectStore {
     /// Load a specific `Project.m1prj` (used by discovery and the `project_file` option).
     pub fn load_from(&self, m1prj_path: &Path) -> Result<bool, String> {
         let root = m1prj_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let m1cfg_path = Self::find_m1cfg(&root);
-        let dbc_paths = Self::find_m1dbc(&root);
+        let m1cfg_path = m1_workspace::find_config_file(&root);
+        let dbc_paths = m1_workspace::find_dbc_files(&root);
         // Build the full project first; if ANY step (.m1prj/.m1cfg/.m1dbc) fails,
         // clear the store so we don't keep serving a stale/partial project.
         let build = || -> Result<Project, String> {
@@ -335,15 +278,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn find_m1prj_walks_ancestors() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_project(tmp.path());
-        let nested = tmp.path().join("a/b");
-        std::fs::create_dir_all(&nested).unwrap();
-        assert!(ProjectStore::find_m1prj(&nested).is_some());
-    }
-
     // A parameter-bearing .m1prj plus a matching .m1cfg, used to verify that the
     // .m1cfg is discovered and applied (it augments the parameter's value type
     // and unit). Authored from scratch — not derived from any vehicle corpus.
@@ -386,17 +320,5 @@ mod tests {
             assert_eq!(sym.value_type, m1_typecheck::ValueType::Unsigned);
             assert_eq!(sym.unit.as_deref(), Some("ratio"));
         });
-    }
-
-    #[test]
-    fn find_m1cfg_prefers_nearest_ancestor() {
-        // A cfg in the project dir wins over one further up the tree.
-        let tmp = tempfile::tempdir().unwrap();
-        let nested = tmp.path().join("nested");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(tmp.path().join("far.m1cfg"), M1CFG_PARAM).unwrap();
-        std::fs::write(nested.join("near.m1cfg"), M1CFG_PARAM).unwrap();
-        let found = ProjectStore::find_m1cfg(&nested).expect("a cfg should be found");
-        assert_eq!(found, nested.join("near.m1cfg"));
     }
 }
