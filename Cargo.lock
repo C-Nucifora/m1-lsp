@@ -616,11 +616,12 @@ dependencies = [
 
 [[package]]
 name = "m1-typecheck"
-version = "0.3.1"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.3.1#108904e91bc64fa41a736645db9a229ea6ce362d"
+version = "0.4.0"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.4.0#6a58a3f593c364937ab58939d8b4a98d46b005a0"
 dependencies = [
  "clap",
  "m1-core",
+ "m1-workspace",
  "roxmltree",
  "serde",
  "serde_json",
@@ -1192,7 +1193,7 @@ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 [[package]]
 name = "tree-sitter-m1"
 version = "0.3.0"
-source = "git+https://github.com/C-Nucifora/tree-sitter-m1.git?branch=main#59560be1f0fe9217aa0949d4cce2202900265edb"
+source = "git+https://github.com/C-Nucifora/tree-sitter-m1.git?branch=main#72c240c41823857f97050e7f6511504a05e38b51"
 dependencies = [
  "cc",
  "tree-sitter-language",
