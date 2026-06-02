@@ -120,7 +120,8 @@ fn dbc_signal_markdown(sym: &Symbol, project: Option<&Project>) -> Option<String
         lines.push(format!("Range: `{} – {}`", fmt_num(lo), fmt_num(hi)));
     }
     if let (Some(m), Some(o)) = (can.multiplier, can.offset) {
-        lines.push(format!("Scale: `{}`  ·  Offset: `{}`", fmt_num(m), fmt_num(o)));
+        let (m, o) = (fmt_num(m), fmt_num(o));
+        lines.push(format!("Scale: `{m}`  ·  Offset: `{o}`"));
     }
     // Parent message frame: strip the signal leaf, look the message up by path.
     if let Some((parent, _)) = sym.path.rsplit_once('.') {
@@ -314,7 +315,8 @@ mod tests {
             .unwrap()
             .with_dbc(&dbc, "Bus.m1dbc")
             .unwrap();
-        let sig = project.symbols().get("Bus.BMS Status.Battery Voltage").unwrap();
+        let key = "Bus.BMS Status.Battery Voltage";
+        let sig = project.symbols().get(key).unwrap();
         let md = symbol_markdown(sig, Some(&project));
         assert!(md.contains("Message: `BMS Status` (0x123, 8 bytes)"), "got: {md}");
         assert!(md.contains("Scale: `0.01`"), "got: {md}");
