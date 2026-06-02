@@ -105,6 +105,75 @@ async fn position_encoding_respects_client_preference_order() {
     );
 }
 
+// Read messages until the response with `id` arrives, skipping the server's
+// notifications (logMessage, publishDiagnostics, …) that interleave on the wire.
+async fn read_response(stream: &mut DuplexStream, id: i64) -> Value {
+    loop {
+        let msg = read_msg(stream).await;
+        if msg.get("id").and_then(|v| v.as_i64()) == Some(id) {
+            return msg;
+        }
+    }
+}
+
+// #73: a client that opens a file without sending `rootUri`/workspace folders at
+// `initialize` leaves the server project-less. Opening a `.m1scr` should then
+// discover the project from the file itself. We prove it via `prepareRename` on a
+// project leaf symbol: it reads the project store, so a non-null range means the
+// project was loaded by the didOpen fallback (it would be null otherwise).
+#[tokio::test]
+async fn did_open_discovers_project_without_root_uri() {
+    use std::io::Write;
+    use tower_lsp::lsp_types::Url;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let prj = r#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Engine"/>
+  <Component Classname="BuiltIn.Parameter" Name="Root.Engine.Threshold"><Props Type="f32"/></Component>
+</Project>"#;
+    std::fs::File::create(tmp.path().join("Project.m1prj"))
+        .unwrap()
+        .write_all(prj.as_bytes())
+        .unwrap();
+    let script_uri = Url::from_file_path(tmp.path().join("Test.m1scr")).unwrap();
+    let src = "Engine.Threshold = 1.0;\n";
+
+    let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+
+    // initialize with NO rootUri and NO workspace folders -> project-less.
+    write_msg(&mut client, &initialize_msg(1)).await;
+    let _ = read_response(&mut client, 1).await;
+
+    // didOpen the script (notification).
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":script_uri,"languageId":"m1","version":1,"text":src}}}),
+    )
+    .await;
+
+    // prepareRename on `Threshold` (line 0, char 8).
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":2,"method":"textDocument/prepareRename","params":{
+            "textDocument":{"uri":script_uri},
+            "position":{"line":0,"character":8}}}),
+    )
+    .await;
+    let resp = read_response(&mut client, 2).await;
+    assert!(
+        !resp["result"].is_null(),
+        "prepareRename returned null — project was not loaded via the didOpen fallback: {resp}"
+    );
+}
+
 // Direct-call tests of the pure analysis path (no transport needed).
 #[test]
 fn analyze_reports_syntax_error() {
