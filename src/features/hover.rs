@@ -88,6 +88,10 @@ fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
     if let Some(security) = &sym.security {
         s.push_str(&format!("  ·  security: `{security}`"));
     }
+    // Execution rate of a script/function, from its event trigger (#76).
+    if let Some(hz) = sym.call_rate_hz {
+        s.push_str(&format!("  ·  call rate: `{} Hz`", fmt_num(hz)));
+    }
     if let Some(values) = enum_values {
         s.push_str(&format!("\n\nvalues: {values}"));
     }
@@ -246,9 +250,31 @@ mod tests {
             def_line: None,
             dbc_range: None,
             can: None,
+            call_rate_hz: None,
         };
         let md = symbol_markdown(&sym, None);
         assert!(md.contains("security: `Protected`"), "got: {md}");
+    }
+
+    #[test]
+    fn hover_shows_script_call_rate() {
+        let sym = Symbol {
+            path: "Root.Engine.Control".into(),
+            kind: SymbolKind::Method,
+            value_type: ValueType::Unknown,
+            declared_type: None,
+            unit: None,
+            security: None,
+            filename: None,
+            enum_assoc: None,
+            class: None,
+            def_line: None,
+            dbc_range: None,
+            can: None,
+            call_rate_hz: Some(100.0),
+        };
+        let md = symbol_markdown(&sym, None);
+        assert!(md.contains("call rate: `100 Hz`"), "got: {md}");
     }
 
     #[test]
@@ -274,6 +300,7 @@ mod tests {
                 multiplier: Some(0.1),
                 offset: Some(0.0),
             }),
+            call_rate_hz: None,
         };
         let md = symbol_markdown(&sym, None);
         assert!(md.contains("CAN Signal"), "got: {md}");
