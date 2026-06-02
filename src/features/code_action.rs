@@ -27,6 +27,43 @@ fn is_unsupported_c_token(d: &Diagnostic) -> bool {
     matches!(&d.code, Some(NumberOrString::String(s)) if s == "unsupported-c-token")
 }
 
+/// The lint rule code (`"L004"`, …) of a diagnostic, if it carries one.
+fn lint_code(d: &Diagnostic) -> Option<&str> {
+    match &d.code {
+        Some(NumberOrString::String(s)) if s.starts_with('L') => Some(s),
+        _ => None,
+    }
+}
+
+/// True for diagnostics whose fix is an operator→keyword swap: the syntax-level
+/// `unsupported-c-token`, and the lint-level L004 (`eq`-operator) / L005 (spelled
+/// logical operator), whose ranges also cover the operator.
+fn is_operator_fix(d: &Diagnostic) -> bool {
+    is_unsupported_c_token(d) || matches!(lint_code(d), Some("L004" | "L005"))
+}
+
+fn quickfix(
+    title: String,
+    uri: &Url,
+    edits: Vec<TextEdit>,
+    diag: Option<&Diagnostic>,
+) -> CodeActionOrCommand {
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), edits);
+    CodeActionOrCommand::CodeAction(CodeAction {
+        title,
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: diag.map(|d| vec![d.clone()]),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        }),
+        is_preferred: Some(diag.is_some()),
+        ..Default::default()
+    })
+}
+
 /// Pad the replacement keyword with spaces only where the operator currently
 /// abuts an adjacent token, so `a==b` becomes `a eq b` while `a == b` stays
 /// single-spaced. `(` / `)` count as natural boundaries.
@@ -54,38 +91,71 @@ pub fn code_actions(
     diagnostics: &[Diagnostic],
 ) -> Vec<CodeActionOrCommand> {
     let mut out = Vec::new();
-    for d in diagnostics.iter().filter(|d| is_unsupported_c_token(d)) {
-        let start = li.offset(d.range.start, text, enc);
-        let end = li.offset(d.range.end, text, enc);
-        // Use get() instead of indexing: if the diagnostic's range was produced
-        // under a different position encoding, start/end may not land on char
-        // boundaries — skip rather than panic.
-        let Some(op) = text.get(start..end).filter(|s| !s.is_empty()) else {
-            continue;
-        };
-        let Some(keyword) = replacement(op) else {
-            continue; // while / for / do: no mechanical fix
-        };
-        let edit = TextEdit {
-            range: d.range,
-            new_text: padded(text, start, end, keyword),
-        };
-        let mut changes = HashMap::new();
-        changes.insert(uri.clone(), vec![edit]);
-        out.push(CodeActionOrCommand::CodeAction(CodeAction {
-            title: format!("Replace `{op}` with `{keyword}`"),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: Some(vec![d.clone()]),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                document_changes: None,
-                change_annotations: None,
-            }),
-            is_preferred: Some(true),
-            ..Default::default()
-        }));
+
+    // Per-diagnostic operator quick-fix: syntax `unsupported-c-token` + L004/L005.
+    for d in diagnostics.iter().filter(|d| is_operator_fix(d)) {
+        if let Some((op, keyword, edit)) = operator_edit(text, li, enc, d) {
+            out.push(quickfix(
+                format!("Replace `{op}` with `{keyword}`"),
+                uri,
+                vec![edit],
+                Some(d),
+            ));
+        }
     }
+
+    // L002 trailing-whitespace: delete the flagged span.
+    for d in diagnostics.iter().filter(|d| lint_code(d) == Some("L002")) {
+        out.push(quickfix(
+            "Remove trailing whitespace".to_string(),
+            uri,
+            vec![TextEdit {
+                range: d.range,
+                new_text: String::new(),
+            }],
+            Some(d),
+        ));
+    }
+
+    // Bulk "fix all <code> in file" for the operator lints, when >1 occurs.
+    for code in ["L004", "L005"] {
+        let edits: Vec<TextEdit> = diagnostics
+            .iter()
+            .filter(|d| lint_code(d) == Some(code))
+            .filter_map(|d| operator_edit(text, li, enc, d).map(|(_, _, e)| e))
+            .collect();
+        if edits.len() > 1 {
+            out.push(quickfix(
+                format!("Fix all {code} in file"),
+                uri,
+                edits,
+                None,
+            ));
+        }
+    }
+
     out
+}
+
+/// The operator→keyword replacement edit for an operator-fix diagnostic, or
+/// `None` if its range doesn't cover a replaceable operator (e.g. `while`/`for`).
+fn operator_edit(
+    text: &str,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    d: &Diagnostic,
+) -> Option<(String, &'static str, TextEdit)> {
+    let start = li.offset(d.range.start, text, enc);
+    let end = li.offset(d.range.end, text, enc);
+    // get() (not indexing): a range produced under a different position encoding
+    // may not land on a char boundary — skip rather than panic.
+    let op = text.get(start..end).filter(|s| !s.is_empty())?;
+    let keyword = replacement(op)?;
+    let edit = TextEdit {
+        range: d.range,
+        new_text: padded(text, start, end, keyword),
+    };
+    Some((op.to_string(), keyword, edit))
 }
 
 #[cfg(test)]
@@ -135,6 +205,94 @@ mod tests {
     #[test]
     fn keeps_existing_spacing() {
         assert_eq!(fix("x = a && b;\n", "&&").unwrap(), "x = a and b;\n");
+    }
+
+    fn lint_diag(src: &str, substr: &str, code: &str, li: &LineIndex) -> Diagnostic {
+        let start = src.find(substr).unwrap();
+        let enc = PositionEncoding::Utf16;
+        Diagnostic {
+            range: Range::new(
+                li.position(start, enc),
+                li.position(start + substr.len(), enc),
+            ),
+            severity: Some(DiagnosticSeverity::WARNING),
+            code: Some(NumberOrString::String(code.into())),
+            message: "lint".into(),
+            ..Default::default()
+        }
+    }
+
+    fn titles(src: &str, diags: &[Diagnostic]) -> Vec<String> {
+        let li = LineIndex::new(src);
+        code_actions(src, &li, PositionEncoding::Utf16, &uri(), diags)
+            .into_iter()
+            .filter_map(|a| match a {
+                CodeActionOrCommand::CodeAction(a) => Some(a.title),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn l004_lint_diagnostic_offers_operator_fix() {
+        let src = "x = a == b;\n";
+        let li = LineIndex::new(src);
+        let d = lint_diag(src, "==", "L004", &li);
+        assert!(
+            titles(src, &[d])
+                .iter()
+                .any(|t| t == "Replace `==` with `eq`"),
+            "L004 should offer the eq fix"
+        );
+    }
+
+    #[test]
+    fn l002_offers_and_applies_trailing_whitespace_removal() {
+        let src = "x = 1;  \n"; // two trailing spaces
+        let li = LineIndex::new(src);
+        let d = lint_diag(src, "  ", "L002", &li);
+        let enc = PositionEncoding::Utf16;
+        let actions = code_actions(src, &li, enc, &uri(), &[d]);
+        let CodeActionOrCommand::CodeAction(a) = actions.into_iter().next().unwrap() else {
+            panic!("expected an action");
+        };
+        assert_eq!(a.title, "Remove trailing whitespace");
+        let edit = a
+            .edit
+            .unwrap()
+            .changes
+            .unwrap()
+            .into_values()
+            .next()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let start = li.offset(edit.range.start, src, enc);
+        let end = li.offset(edit.range.end, src, enc);
+        let mut s = src.to_string();
+        s.replace_range(start..end, &edit.new_text);
+        assert_eq!(s, "x = 1;\n");
+    }
+
+    #[test]
+    fn bulk_fix_all_offered_for_multiple_l004() {
+        let src = "x = a == b;\ny = c == d;\n";
+        let li = LineIndex::new(src);
+        let enc = PositionEncoding::Utf16;
+        // Two L004 diagnostics, one per `==`.
+        let first = src.find("==").unwrap();
+        let second = src[first + 2..].find("==").unwrap() + first + 2;
+        let mk = |at: usize| Diagnostic {
+            range: Range::new(li.position(at, enc), li.position(at + 2, enc)),
+            code: Some(NumberOrString::String("L004".into())),
+            ..Default::default()
+        };
+        let ts = titles(src, &[mk(first), mk(second)]);
+        assert!(
+            ts.iter().any(|t| t == "Fix all L004 in file"),
+            "expected a bulk fix, got {ts:?}"
+        );
     }
 
     #[test]
