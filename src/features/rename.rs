@@ -690,6 +690,62 @@ mod tests {
         assert_eq!(be.len(), 1, "only the absolute Root.Engine.Threshold ref");
     }
 
+    // #74: renaming from a *reference* (read) site must also rewrite the
+    // *definition* (write/assignment-target) site and the `.m1prj` declaration —
+    // otherwise the editor looks correct but M1-Build, which re-reads from disk
+    // and the component list, sees the old name. The leaf rename matches by
+    // resolved identity, so a write target and a read of the same symbol are both
+    // rewritten.
+    #[test]
+    fn rename_from_reference_also_rewrites_definition_and_m1prj() {
+        let (tmp, store) = setup();
+        // Line 0 is a WRITE (assignment target = the definition for M1-Build);
+        // line 1 is a READ. Cursor is placed on the READ.
+        let src = "Engine.Threshold = 1.0;\nlocal x = Engine.Threshold;\n";
+        std::fs::write(tmp.path().join("Engine.Update.m1scr"), src).unwrap();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        let uri = Url::from_file_path(tmp.path().join("Engine.Update.m1scr")).unwrap();
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        // Cursor on the second occurrence (the read), not the definition.
+        let byte = src.rfind("Threshold").unwrap();
+        let no_open = |_: &Url| None;
+
+        let we = store
+            .with_project(|p| {
+                execute(
+                    cst.root(),
+                    byte,
+                    "Trip Point",
+                    uri.clone(),
+                    &li,
+                    PositionEncoding::Utf16,
+                    p,
+                    Some("Engine.Update.m1scr"),
+                    &no_open,
+                )
+            })
+            .expect("rename should succeed");
+
+        // Both occurrences in the script are rewritten — including the write on
+        // line 0 (the definition M1-Build compiles from).
+        let edits = changes_for(&we, "Engine.Update.m1scr");
+        assert_eq!(
+            edits.len(),
+            2,
+            "the write (definition) and the read must both be rewritten: {edits:?}"
+        );
+        assert!(edits.iter().all(|e| e.new_text == "Trip Point"));
+        assert!(
+            edits.iter().any(|e| e.range.start.line == 0),
+            "the definition/write site on line 0 must be in the edit: {edits:?}"
+        );
+        // And the `.m1prj` component declaration is updated too.
+        let prj = changes_for(&we, "Project.m1prj");
+        assert_eq!(prj.len(), 1, "the .m1prj declaration is renamed: {prj:?}");
+    }
+
     #[test]
     fn refuses_compound_with_children() {
         let (tmp, store) = setup();
