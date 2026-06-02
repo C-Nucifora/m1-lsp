@@ -318,7 +318,10 @@ mod tests {
         let key = "Bus.BMS Status.Battery Voltage";
         let sig = project.symbols().get(key).unwrap();
         let md = symbol_markdown(sig, Some(&project));
-        assert!(md.contains("Message: `BMS Status` (0x123, 8 bytes)"), "got: {md}");
+        assert!(
+            md.contains("Message: `BMS Status` (0x123, 8 bytes)"),
+            "got: {md}"
+        );
         assert!(md.contains("Scale: `0.01`"), "got: {md}");
         assert!(md.contains("Bit pos: `16`"), "got: {md}");
         assert!(md.contains("unit: `V`"), "got: {md}");
