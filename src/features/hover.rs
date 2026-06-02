@@ -4,7 +4,7 @@ use crate::features::locate::{build_scope, path_at_byte};
 use crate::line_index::{LineIndex, PositionEncoding};
 use m1_typecheck::project::Project;
 use m1_typecheck::resolve::{Resolution, resolve};
-use m1_typecheck::symbols::{Symbol, SymbolKind};
+use m1_typecheck::symbols::{Symbol, SymbolKind, TableMeta};
 use m1_typecheck::types::ValueType;
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 
@@ -50,6 +50,14 @@ fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
             s.push_str(&format!("\n\nCAN id: `0x{id:X}`  ·  `{dlc}` bytes"));
         }
         return s;
+    }
+    // A table's own hover shows its shape (from the `.m1cfg`), not a value type —
+    // the table object isn't value-bearing; its interpolated result is the
+    // separate `.Value` channel (#25).
+    if sym.kind == SymbolKind::Table
+        && let Some(meta) = &sym.table_meta
+    {
+        return format!("{s}{}", table_markdown(meta));
     }
     // Name the concrete enum type when known (e.g. `Enum (Drive State)`), and
     // collect its valid values to list below.
@@ -107,6 +115,40 @@ fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
 fn fmt_num(x: f64) -> String {
     let s = format!("{x:.6}");
     s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Render a table's shape for hover (#25): dimensionality and breakpoint counts
+/// (`2-D table · shape: 11 × 7`), the per-axis units when declared, and the
+/// interpolated output unit. The output *type* shows on the table's `.Value`
+/// channel, not here.
+fn table_markdown(meta: &TableMeta) -> String {
+    let shape = meta
+        .axes
+        .iter()
+        .map(|a| a.size.to_string())
+        .collect::<Vec<_>>()
+        .join(" × ");
+    let mut s = if shape.is_empty() {
+        "\n\ntable".to_string()
+    } else {
+        format!("\n\n{}-D table  ·  shape: `{shape}`", meta.axes.len())
+    };
+    let axis_units: Vec<String> = meta
+        .axes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, a)| {
+            let label = ["X", "Y", "Z"].get(i).copied().unwrap_or("?");
+            a.unit.as_ref().map(|u| format!("{label} `{u}`"))
+        })
+        .collect();
+    if !axis_units.is_empty() {
+        s.push_str(&format!("\n\naxes: {}", axis_units.join(", ")));
+    }
+    if let Some(u) = &meta.output_unit {
+        s.push_str(&format!("\n\noutput: `{u}`"));
+    }
+    s
 }
 
 /// Layout detail for a CAN signal channel (#80): physical range, scale/offset,
@@ -251,6 +293,7 @@ mod tests {
             dbc_range: None,
             can: None,
             call_rate_hz: None,
+            table_meta: None,
         };
         let md = symbol_markdown(&sym, None);
         assert!(md.contains("security: `Protected`"), "got: {md}");
@@ -272,9 +315,48 @@ mod tests {
             dbc_range: None,
             can: None,
             call_rate_hz: Some(100.0),
+            table_meta: None,
         };
         let md = symbol_markdown(&sym, None);
         assert!(md.contains("call rate: `100 Hz`"), "got: {md}");
+    }
+
+    #[test]
+    fn hover_shows_table_shape() {
+        use m1_typecheck::symbols::TableAxis;
+        let sym = Symbol {
+            path: "Root.Control.Limiting.Torque".into(),
+            kind: SymbolKind::Table,
+            value_type: ValueType::Unknown,
+            declared_type: None,
+            unit: None,
+            security: None,
+            filename: None,
+            enum_assoc: None,
+            class: None,
+            def_line: None,
+            dbc_range: None,
+            can: None,
+            call_rate_hz: None,
+            table_meta: Some(TableMeta {
+                axes: vec![
+                    TableAxis {
+                        size: 11,
+                        unit: Some("A".into()),
+                    },
+                    TableAxis {
+                        size: 7,
+                        unit: Some("rpm".into()),
+                    },
+                ],
+                output_unit: Some("N.m".into()),
+            }),
+        };
+        let md = symbol_markdown(&sym, None);
+        assert!(md.contains("2-D table"), "got: {md}");
+        assert!(md.contains("shape: `11 × 7`"), "got: {md}");
+        assert!(md.contains("X `A`"), "got: {md}");
+        assert!(md.contains("output: `N.m`"), "got: {md}");
     }
 
     #[test]
@@ -301,6 +383,7 @@ mod tests {
                 offset: Some(0.0),
             }),
             call_rate_hz: None,
+            table_meta: None,
         };
         let md = symbol_markdown(&sym, None);
         assert!(md.contains("CAN Signal"), "got: {md}");
