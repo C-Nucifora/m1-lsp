@@ -69,6 +69,46 @@ impl Backend {
         *self.encoding.read().unwrap()
     }
 
+    /// Fallback project discovery (#73). `initialize` loads the project from the
+    /// client's `rootUri`/workspace folder, but some clients (or certain
+    /// single-file open flows) never send one, leaving the store empty — so
+    /// hover/definition/rename silently degrade. When a `.m1scr` is opened and no
+    /// project is loaded yet, walk up from that file to find `Project.m1prj` and
+    /// load it. A no-op once a project is loaded, and harmless when none exists.
+    async fn ensure_project_loaded(&self, uri: &Url) {
+        if self.store.project_loaded() {
+            return;
+        }
+        let Some(dir) = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        else {
+            return;
+        };
+        match self.store.discover_and_load(&dir) {
+            Ok(true) => {
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        "m1-lsp: project loaded (didOpen fallback)",
+                    )
+                    .await;
+                // Pick up a project-level `.m1lint.toml` now that we have a root.
+                self.lint.reload_config(&dir);
+            }
+            Ok(false) => { /* no project found from this file; stay project-less */ }
+            Err(e) => {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("m1-lsp: project load failed (didOpen fallback): {e}"),
+                    )
+                    .await;
+            }
+        }
+    }
+
     async fn publish(&self, uri: Url) {
         // Snapshot the doc and drop the shard guard before parsing, so a
         // concurrent did_change on the same shard isn't blocked for the parse.
@@ -261,6 +301,10 @@ impl LanguageServer for Backend {
         let d = params.text_document;
         self.docs
             .insert(d.uri.clone(), Document::new(d.text, d.version));
+        // Some clients open a file without ever sending a `rootUri`/workspace
+        // folder at `initialize`, leaving the server project-less. Fall back to
+        // discovering the project from the opened file itself (#73).
+        self.ensure_project_loaded(&d.uri).await;
         self.publish(d.uri).await;
     }
 
