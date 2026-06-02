@@ -11,9 +11,11 @@ stdio and works with any LSP client (VS Code, Helix, Emacs `eglot`, etc.).
 ## Workspace layout
 
 `m1-lsp` sits at the **top** of the M1 toolchain, which lives in **six separate
-repositories** coupled through Cargo **path** dependencies. They are not published
-to crates.io, so this crate does **not** build from a standalone clone — check out
-the whole set as siblings under one parent directory:
+repositories**. They are not published to crates.io; instead each crate pins its
+upstreams as **versioned git-tag Cargo dependencies**, so this crate **does**
+build from a standalone clone — Cargo fetches every upstream from its tagged
+release. Checking the whole set out as siblings under one parent directory is
+handy for cross-repo work, but is not required to build:
 
 ```
 <parent>/
@@ -26,16 +28,16 @@ the whole set as siblings under one parent directory:
 ```
 
 **`m1-lsp` depends on all four upstream crates** —
-`m1-core`, `m1-lint`, `m1-fmt`, and `m1-typecheck` (each `{ path = "../<crate>" }`),
-plus `tree-sitter-m1` transitively — so the entire set must be checked out
-alongside it. A clean build of `m1-lsp` against its real siblings is the
-toolchain's end-to-end integration check.
+`m1-core`, `m1-lint`, `m1-fmt`, and `m1-typecheck` (each a git-tag dep), plus
+`tree-sitter-m1` and `m1-workspace` — so a clean build of `m1-lsp` against the
+pinned upstream tags is the toolchain's end-to-end integration check.
 
-Because the repos are independent on GitHub, this coupling is **not visible
-there**: each repo's CI and PRs see only itself, and there is no cross-repo PR
-link. Build/merge ordering across the stack is a manual, local-workspace concern.
-The `m1-example` example project (used by the corpus smoke test) is an optional further
-sibling.
+Because every dependency is pinned by tag, the coupling **is** visible on
+GitHub — each `Cargo.toml` names its upstreams and their versions, and Dependabot
+opens bump PRs as new upstream tags ship. Cutting a new upstream release and
+bumping `tag = "vX.Y.Z"` in each consumer is what propagates a change across the
+stack. The `m1-example` example project (used by the corpus smoke test) is an
+optional sibling checkout.
 
 ## Features
 
