@@ -590,8 +590,8 @@ dependencies = [
 
 [[package]]
 name = "m1-lint"
-version = "0.3.2"
-source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.3.2#29502d929dc12a5ffe873135d15cfda8d6794ce0"
+version = "0.4.0"
+source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.4.0#c3e8befea2d008745683a07b3916cd2d750bbb21"
 dependencies = [
  "glob",
  "m1-core",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "m1-lsp"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "dashmap 6.2.1",
  "m1-core",
@@ -616,8 +616,8 @@ dependencies = [
 
 [[package]]
 name = "m1-typecheck"
-version = "0.4.1"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.4.1#5a1949be6a6ce77e24b13218c5ff5aa9ab21d72f"
+version = "0.5.0"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.5.0#d1465c087e402aa5de3e9243cd7784289412b706"
 dependencies = [
  "clap",
  "m1-core",
