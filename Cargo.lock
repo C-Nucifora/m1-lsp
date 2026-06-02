@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "m1-lsp"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "dashmap 6.2.1",
  "m1-core",
@@ -616,8 +616,8 @@ dependencies = [
 
 [[package]]
 name = "m1-typecheck"
-version = "0.7.0"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.7.0#38f51ee8e8469d9b48083d55a3f255a6a8d341e1"
+version = "0.8.0"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.8.0#15f8b7a810916728cb9ed21baaf15509408ccb11"
 dependencies = [
  "clap",
  "m1-core",
