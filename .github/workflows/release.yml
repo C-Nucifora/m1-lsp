@@ -27,9 +27,24 @@ jobs:
         run: |
           VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Release when the tag is absent OR the existing release is missing any
+          # of the per-platform binaries. Keying only on "release exists" meant a
+          # release tagged before its binaries uploaded (or created by hand) could
+          # never self-heal — the bundled-server consumers were left with a 404.
+          required="m1-lsp-x86_64-unknown-linux-gnu m1-lsp-aarch64-apple-darwin m1-lsp-x86_64-pc-windows-msvc.exe"
           if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            echo "Release v$VERSION already exists — nothing to do."
+            assets=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
+            missing=
+            for a in $required; do
+              grep -qxF "$a" <<<"$assets" || missing="$missing $a"
+            done
+            if [ -n "$missing" ]; then
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+              echo "Release v$VERSION exists but is missing binaries:$missing — will (re)build and upload."
+            else
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              echo "Release v$VERSION already has all binaries — nothing to do."
+            fi
           else
             echo "should_release=true" >> "$GITHUB_OUTPUT"
             echo "Will release v$VERSION."
@@ -85,8 +100,16 @@ jobs:
       - name: Publish release v${{ needs.check.outputs.version }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.check.outputs.version }}
         run: |
-          gh release create "v${{ needs.check.outputs.version }}" out/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "m1-lsp v${{ needs.check.outputs.version }}" \
-            --notes "Prebuilt m1-lsp server binaries (Linux/macOS/Windows). Consumed by the m1-vscode extension."
+          # Create the release if absent, otherwise upload the binaries to the
+          # existing one (--clobber overwrites any partial uploads). This repairs
+          # a release that exists but is missing its binaries.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" out/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "m1-lsp $TAG" \
+              --notes "Prebuilt m1-lsp server binaries (Linux/macOS/Windows). Consumed by the m1-vscode extension."
+          fi
