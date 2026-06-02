@@ -1461,6 +1461,61 @@ mod tests {
     }
 
     #[test]
+    fn group_rename_rewrites_references_to_descendant_methods() {
+        // Renaming the group must also fix call sites of its *method* descendants
+        // in other scripts (e.g. `Engine.Update()` → `Motor.Update()`), not just
+        // channel references — the method is a descendant like any other.
+        let (tmp, store) = setup();
+        std::fs::write(
+            tmp.path().join("Engine.Update.m1scr"),
+            "Engine.Threshold = 1.0;\n",
+        )
+        .unwrap();
+        let caller = "Root.Engine.Update();\nEngine.Update();\n";
+        std::fs::write(tmp.path().join("Other.Update.m1scr"), caller).unwrap();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        let uri = Url::from_file_path(tmp.path().join("Other.Update.m1scr")).unwrap();
+        let cst = m1_core::parse(caller);
+        let li = LineIndex::new(caller);
+        let byte = caller.find("Engine").unwrap(); // group segment of Root.Engine.Update
+        let no_open = |_: &Url| None;
+
+        let we = store
+            .with_project(|p| {
+                execute(
+                    cst.root(),
+                    byte,
+                    "Motor",
+                    uri.clone(),
+                    &li,
+                    PositionEncoding::Utf16,
+                    p,
+                    Some("Other.Update.m1scr"),
+                    &no_open,
+                )
+            })
+            .expect("group rename should succeed");
+
+        // Both call sites of the method have their `Engine` segment rewritten.
+        let calls = doc_edits_for(&we, "Other.Update.m1scr");
+        assert_eq!(
+            calls.len(),
+            2,
+            "Root.Engine.Update() and Engine.Update() call sites: {calls:?}"
+        );
+        assert!(calls.iter().all(|e| e.new_text == "Motor"));
+        // And the method's own backing file is renamed.
+        assert_eq!(
+            rename_files(&we),
+            vec![(
+                "Engine.Update.m1scr".to_string(),
+                "Motor.Update.m1scr".to_string()
+            )]
+        );
+    }
+
+    #[test]
     fn group_rename_refuses_when_backing_file_missing() {
         let (tmp, store) = setup();
         // Engine.Update has no backing file on disk → cascade can't keep its
