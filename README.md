@@ -92,8 +92,8 @@ sibling.
   `didSave` / `didClose`), plus `workspace/didChangeWatchedFiles` for
   `.m1prj` / `.m1cfg` reloads.
 
-The project model auto-discovers a `parameters.m1cfg` sibling of the
-`Project.m1prj` and loads it via `m1-typecheck`; this is what gives parameters
+The project model auto-discovers a `parameters.m1cfg` in the project directory
+or an ancestor (nearest wins) and loads it via `m1-typecheck`; this is what gives parameters
 their concrete **value types and units** (the `.m1prj` mostly just names them).
 Those types flow into hover, completion detail, inlay hints, and assignment
 type-checking, and the server reloads them when the `.m1cfg` changes.
