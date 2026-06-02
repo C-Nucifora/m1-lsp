@@ -50,6 +50,51 @@ fn type_unit_detail(sym: &m1_typecheck::symbols::Symbol, project: &Project) -> O
     Some(detail)
 }
 
+/// If `byte` sits on the right-hand side of an `lhs = …` on the current line,
+/// the trimmed `lhs` text; else `None`. Text-based (consistent with the after-`.`
+/// member detection) — comparison operators (`==`, `<=`, `>=`, `!=`) are excluded.
+fn assignment_lhs(text: &str, byte: usize) -> Option<String> {
+    let line_start = text[..byte].rfind('\n').map_or(0, |i| i + 1);
+    let before = &text[line_start..byte];
+    let eq = before.rfind('=')?;
+    // Reject `==`, `<=`, `>=`, `!=` (a comparison, not an assignment).
+    if before[eq + 1..].starts_with('=')
+        || matches!(
+            before[..eq].trim_end().chars().last(),
+            Some('=' | '<' | '>' | '!')
+        )
+    {
+        return None;
+    }
+    let lhs = before[..eq].trim();
+    (!lhs.is_empty()).then(|| lhs.to_string())
+}
+
+/// Enum-member completions for an enum-typed LHS symbol, e.g. `GearState.Neutral`
+/// with detail `= 0`. `None` when `lhs` doesn't resolve to an enum-typed symbol.
+fn enum_member_completions(lhs: &str, lp: &LoadedProject) -> Option<Vec<CompletionItem>> {
+    use m1_typecheck::types::ValueType;
+    let table = lp.project.symbols();
+    let sym = table
+        .get(lhs)
+        .or_else(|| table.get(m1_workspace::qualify_root(lhs).as_ref()))?;
+    let ValueType::Enum(id) = sym.value_type else {
+        return None;
+    };
+    let et = table.enum_type(id);
+    Some(
+        et.members
+            .iter()
+            .map(|(name, value)| CompletionItem {
+                label: format!("{}.{}", et.name, name),
+                kind: Some(CompletionItemKind::ENUM_MEMBER),
+                detail: Some(format!("= {value}")),
+                ..Default::default()
+            })
+            .collect(),
+    )
+}
+
 /// The dotted parent path immediately before the cursor's `.`, e.g. with the
 /// cursor after `Calculate.` -> `Some("Calculate")`. Library object names have
 /// no spaces, so we scan back over an identifier/dot run.
@@ -94,6 +139,16 @@ pub fn completions(
                 ..Default::default()
             })
             .collect();
+    }
+
+    // On the RHS of `enumChannel = <cursor>`: offer that channel's enum members
+    // (e.g. `GearState.Neutral` … with their integer values) instead of generic
+    // symbols (#79).
+    if let Some(lp) = loaded
+        && let Some(lhs) = assignment_lhs(text, byte)
+        && let Some(items) = enum_member_completions(&lhs, lp)
+    {
+        return items;
     }
 
     let mut items: Vec<CompletionItem> = Vec::new();
@@ -200,6 +255,37 @@ mod tests {
 <Configuration><Group Name="">
   <Parameter Name="Root.Foo.Gain.Value"><Cell Type="u16" Unit="ratio"><![CDATA[1]]></Cell></Parameter>
 </Group></Configuration>"#;
+
+    const M1PRJ_ENUM: &str = r#"<?xml version="1.0"?>
+<Project>
+  <DataTypes>
+    <Type Name="Gear State" Storage="enum" Default="Neutral">
+      <Enum Name="Neutral" ContainerOrder="0"/>
+      <Enum Name="First" ContainerOrder="1"/>
+    </Type>
+  </DataTypes>
+  <Component Classname="BuiltIn.Channel" Name="Root.Transmission.Gear"><Props Type="::This.Gear State"/></Component>
+</Project>"#;
+
+    #[test]
+    fn offers_enum_members_on_assignment_rhs() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Project.m1prj"), M1PRJ_ENUM).unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        let src = "Root.Transmission.Gear = \n";
+        let byte = src.find('\n').unwrap(); // cursor just after `= `
+        let cst = m1_core::parse(src);
+        store.with_project(|p| {
+            let items = completions(cst.root(), p, Some("X.m1scr"), src, byte);
+            let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(labels.contains(&"Gear State.Neutral"), "got {labels:?}");
+            assert!(labels.contains(&"Gear State.First"));
+            // Enum members replace the generic completion list here.
+            assert!(!labels.contains(&"if"), "should not offer keywords");
+        });
+    }
 
     #[test]
     fn parameter_completion_shows_type_and_unit_from_cfg() {
