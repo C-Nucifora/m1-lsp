@@ -1,6 +1,6 @@
 [package]
 name = "m1-lsp"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "Language server for the MoTeC M1 script language (.m1scr)"
@@ -20,9 +20,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "io-std", "macros"] }
 dashmap = "6"
 serde_json = "1"
 m1-core = { git = "https://github.com/C-Nucifora/m1-core.git", tag = "v0.3.1" }
-m1-lint = { git = "https://github.com/C-Nucifora/m1-lint.git", tag = "v0.3.2" }
+m1-lint = { git = "https://github.com/C-Nucifora/m1-lint.git", tag = "v0.4.0" }
 m1-fmt = { git = "https://github.com/C-Nucifora/m1-fmt.git", tag = "v0.3.2" }
-m1-typecheck = { git = "https://github.com/C-Nucifora/m1-typecheck.git", tag = "v0.4.1" }
+m1-typecheck = { git = "https://github.com/C-Nucifora/m1-typecheck.git", tag = "v0.5.0" }
 m1-workspace = { git = "https://github.com/nedlane/m1-workspace.git", tag = "v0.1.0" }
 
 [dev-dependencies]
