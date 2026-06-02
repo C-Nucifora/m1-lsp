@@ -1,12 +1,22 @@
-//! textDocument/signatureHelp for library function calls: show the overload
-//! signature(s) and highlight the active argument as you type inside `( … )`.
+//! textDocument/signatureHelp: show the signature(s) of the call the cursor is
+//! inside and highlight the active argument as you type within `( … )`.
+//!
+//! Two sources of signatures:
+//!  * **Library functions** — the intrinsics' overload set (parameter names,
+//!    types, return type, doc).
+//!  * **User-defined functions / methods** (#30) — M1 user functions declare no
+//!    parameters in the project model or the script grammar (they read/write
+//!    channels directly), so their signature is `Name() -> ReturnType`: there
+//!    are simply no parameters to list, but the callable is no longer silent.
 use crate::features::locate::{build_scope, node_at_byte};
 use m1_core::{Field, Kind, Node};
 use m1_typecheck::intrinsics::Overload;
 use m1_typecheck::project::Project;
 use m1_typecheck::resolve::{Resolution, resolve};
+use m1_typecheck::symbols::{Symbol, SymbolKind};
+use m1_typecheck::types::ValueType;
 use tower_lsp::lsp_types::{
-    ParameterInformation, ParameterLabel, SignatureHelp, SignatureInformation,
+    Documentation, ParameterInformation, ParameterLabel, SignatureHelp, SignatureInformation,
 };
 
 /// The nearest enclosing call whose argument list contains `byte`.
@@ -90,19 +100,68 @@ pub fn signature_help(
     let call = enclosing_call(root, byte)?;
     let path = call.child_by_field(Field::Function)?.text().to_string();
     let scope = build_scope(root, project, file_name);
-    let Resolution::BuiltinFn(overloads) = resolve(&path, &scope) else {
-        return None; // v1: signature help only for the library functions
+    match resolve(&path, &scope) {
+        // Library functions: full overload set, active argument tracked.
+        Resolution::BuiltinFn(overloads) => {
+            let active = call
+                .child_by_field(Field::Arguments)
+                .map(|args| active_arg(args, byte))
+                .unwrap_or(0);
+            let signatures = overloads.iter().map(|ov| sig_info(&path, ov)).collect();
+            Some(SignatureHelp {
+                signatures,
+                active_signature: Some(pick_by_arity(&overloads, active) as u32),
+                active_parameter: Some(active as u32),
+            })
+        }
+        // User-defined functions/methods: name + return type, no parameters (#30).
+        Resolution::Symbol(sym)
+            if matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) =>
+        {
+            Some(user_fn_help(sym))
+        }
+        _ => None,
+    }
+}
+
+/// The displayed return type for a known value type, or `None` when unknown (so
+/// the signature reads `Name()` rather than `Name() -> Unknown`).
+fn return_type_str(t: ValueType) -> Option<&'static str> {
+    match t {
+        ValueType::Boolean => Some("Boolean"),
+        ValueType::Integer => Some("Integer"),
+        ValueType::Unsigned => Some("Unsigned"),
+        ValueType::Float => Some("Float"),
+        ValueType::Enum(_) => Some("Enum"),
+        ValueType::String => Some("String"),
+        ValueType::Unknown => None,
+    }
+}
+
+/// Signature help for a user-defined function/method. M1 user functions take no
+/// declared parameters, so this surfaces the name and (when known) return type.
+fn user_fn_help(sym: &Symbol) -> SignatureHelp {
+    let kind_word = if sym.kind == SymbolKind::Method {
+        "method"
+    } else {
+        "function"
     };
-    let active = call
-        .child_by_field(Field::Arguments)
-        .map(|args| active_arg(args, byte))
-        .unwrap_or(0);
-    let signatures = overloads.iter().map(|ov| sig_info(&path, ov)).collect();
-    Some(SignatureHelp {
-        signatures,
-        active_signature: Some(pick_by_arity(&overloads, active) as u32),
-        active_parameter: Some(active as u32),
-    })
+    let label = match return_type_str(sym.value_type) {
+        Some(ret) => format!("{}() -> {ret}", sym.path),
+        None => format!("{}()", sym.path),
+    };
+    SignatureHelp {
+        signatures: vec![SignatureInformation {
+            label,
+            documentation: Some(Documentation::String(format!(
+                "user-defined {kind_word} — M1 user functions take no declared parameters"
+            ))),
+            parameters: Some(vec![]),
+            active_parameter: None,
+        }],
+        active_signature: Some(0),
+        active_parameter: None,
+    }
 }
 
 #[cfg(test)]
@@ -134,5 +193,38 @@ mod tests {
     #[test]
     fn no_help_outside_a_library_call() {
         assert!(help("local x = 1;\n", "local x =").is_none());
+    }
+
+    #[test]
+    fn user_function_call_shows_name_with_no_parameters() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.CAN"/>
+  <Component Classname="BuiltIn.FuncUser" Name="Root.CAN.Transcieve" Filename="CAN.Transcieve.m1scr"/>
+</Project>"#,
+            )
+            .unwrap();
+        let project = m1_typecheck::Project::load(&prj).unwrap();
+
+        let src = "x = Root.CAN.Transcieve();\n";
+        let cst = m1_core::parse(src);
+        let byte = src.find('(').unwrap() + 1; // inside the (empty) argument list
+        let h = signature_help(cst.root(), byte, Some(&project), Some("Other.m1scr")).unwrap();
+        assert_eq!(h.signatures.len(), 1);
+        assert!(
+            h.signatures[0].label.contains("Root.CAN.Transcieve("),
+            "got: {}",
+            h.signatures[0].label
+        );
+        // No parameters, and none is "active".
+        assert_eq!(h.signatures[0].parameters.as_ref().unwrap().len(), 0);
+        assert_eq!(h.active_parameter, None);
     }
 }
