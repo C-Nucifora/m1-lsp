@@ -10,7 +10,7 @@ pub struct LoadedProject {
     pub project: Project,
     pub root: PathBuf,
     pub m1prj_path: PathBuf,
-    pub m1cfg_path: Option <PathBuf>,
+    pub m1cfg_path: Option<PathBuf>,
     /// `.m1dbc` files merged into the project (watched for reload).
     pub dbc_paths: Vec<PathBuf>,
     /// Every `*.m1scr` under the root, found once at load (see `walk_scripts`).
