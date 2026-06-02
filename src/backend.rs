@@ -252,7 +252,7 @@ impl LanguageServer for Backend {
                         SemanticTokensOptions {
                             legend: semantic_tokens::legend(),
                             full: Some(SemanticTokensFullOptions::Bool(true)),
-                            range: None,
+                            range: Some(true),
                             work_done_progress_options: Default::default(),
                         },
                     ),
@@ -623,6 +623,42 @@ impl LanguageServer for Backend {
             )
         });
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: tokens,
+        })))
+    }
+
+    async fn semantic_tokens_range(
+        &self,
+        params: SemanticTokensRangeParams,
+    ) -> Result<Option<SemanticTokensRangeResult>> {
+        let uri = params.text_document.uri;
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
+            return Ok(None);
+        };
+        let cst = m1_core::parse(&text);
+        let file_name = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let li = &lindex;
+        let enc = self.enc();
+        let tokens = self.store.with_project(|p| {
+            semantic_tokens::semantic_tokens_range(
+                cst.root(),
+                p.map(|lp| &lp.project),
+                file_name.as_deref(),
+                li,
+                enc,
+                params.range.start.line,
+                params.range.end.line,
+            )
+        });
+        Ok(Some(SemanticTokensRangeResult::Tokens(SemanticTokens {
             result_id: None,
             data: tokens,
         })))
