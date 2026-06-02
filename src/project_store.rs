@@ -103,12 +103,26 @@ impl ProjectStore {
         None
     }
 
-    /// First `*.m1cfg` sibling of the `.m1prj`, if any.
+    /// First `*.m1cfg` in `root` or any ancestor (nearest wins), if any. Real
+    /// projects keep `parameters.m1cfg` at the repository root while the
+    /// `Project.m1prj` is nested several directories deeper, so we walk up from
+    /// `root` — mirroring [`find_m1prj`](Self::find_m1prj) — rather than reading
+    /// only the project's own directory.
     fn find_m1cfg(root: &Path) -> Option<PathBuf> {
-        std::fs::read_dir(root).ok()?.flatten().find_map(|e| {
-            let p = e.path();
-            (p.extension().and_then(|x| x.to_str()) == Some("m1cfg")).then_some(p)
-        })
+        let mut dir = Some(root);
+        while let Some(d) = dir {
+            let cfg = std::fs::read_dir(d).ok().and_then(|entries| {
+                entries.flatten().find_map(|e| {
+                    let p = e.path();
+                    (p.extension().and_then(|x| x.to_str()) == Some("m1cfg")).then_some(p)
+                })
+            });
+            if cfg.is_some() {
+                return cfg;
+            }
+            dir = d.parent();
+        }
+        None
     }
 
     /// All `*.m1dbc` files under the project root (recursively; typically in a
@@ -328,5 +342,61 @@ mod tests {
         let nested = tmp.path().join("a/b");
         std::fs::create_dir_all(&nested).unwrap();
         assert!(ProjectStore::find_m1prj(&nested).is_some());
+    }
+
+    // A parameter-bearing .m1prj plus a matching .m1cfg, used to verify that the
+    // .m1cfg is discovered and applied (it augments the parameter's value type
+    // and unit). Authored from scratch — not derived from any vehicle corpus.
+    const M1PRJ_PARAM: &str = r#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Foo"/>
+  <Component Classname="BuiltIn.Parameter" Name="Root.Foo.Gain.Value"><Props/></Component>
+</Project>"#;
+    const M1CFG_PARAM: &str = r#"<?xml version="1.0"?>
+<Configuration><Group Name="">
+  <Parameter Name="Root.Foo.Gain.Value"><Cell Type="u16" Unit="ratio"><![CDATA[1]]></Cell></Parameter>
+</Group></Configuration>"#;
+
+    #[test]
+    fn find_m1cfg_walks_ancestors_and_is_loaded() {
+        // Repo root holds parameters.m1cfg; the Project.m1prj lives several
+        // directories deeper. The cfg must still be discovered by walking up.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("parameters.m1cfg"), M1CFG_PARAM).unwrap();
+        let nested = tmp.path().join("UQR-EV/01.00/Project");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("Project.m1prj"), M1PRJ_PARAM).unwrap();
+
+        let store = ProjectStore::new();
+        assert_eq!(store.discover_and_load(&nested), Ok(true));
+        store.with_project(|p| {
+            let lp = p.unwrap();
+            // The recorded cfg path points at the ancestor file.
+            assert_eq!(
+                lp.m1cfg_path.as_deref(),
+                Some(tmp.path().join("parameters.m1cfg").as_path()),
+                "m1cfg_path should point at the ancestor cfg"
+            );
+            // And it was actually applied: the parameter gained type + unit.
+            let sym = lp
+                .project
+                .symbols()
+                .get("Root.Foo.Gain.Value")
+                .expect("parameter symbol");
+            assert_eq!(sym.value_type, m1_typecheck::ValueType::Unsigned);
+            assert_eq!(sym.unit.as_deref(), Some("ratio"));
+        });
+    }
+
+    #[test]
+    fn find_m1cfg_prefers_nearest_ancestor() {
+        // A cfg in the project dir wins over one further up the tree.
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(tmp.path().join("far.m1cfg"), M1CFG_PARAM).unwrap();
+        std::fs::write(nested.join("near.m1cfg"), M1CFG_PARAM).unwrap();
+        let found = ProjectStore::find_m1cfg(&nested).expect("a cfg should be found");
+        assert_eq!(found, nested.join("near.m1cfg"));
     }
 }
