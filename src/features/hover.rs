@@ -78,6 +78,10 @@ fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
     if let Some(unit) = &sym.unit {
         s.push_str(&format!("  ·  unit: `{unit}`"));
     }
+    // Security / access level from the `.m1prj` `<Props Security>` (#77).
+    if let Some(security) = &sym.security {
+        s.push_str(&format!("  ·  security: `{security}`"));
+    }
     if let Some(values) = enum_values {
         s.push_str(&format!("\n\nvalues: {values}"));
     }
@@ -170,6 +174,25 @@ mod tests {
         } else {
             panic!("expected markup");
         }
+    }
+
+    #[test]
+    fn hover_shows_security_level() {
+        let sym = Symbol {
+            path: "Root.Engine.Throttle".into(),
+            kind: SymbolKind::Channel,
+            value_type: ValueType::Float,
+            declared_type: None,
+            unit: Some("%".into()),
+            security: Some("Protected".into()),
+            filename: None,
+            enum_assoc: None,
+            class: None,
+            def_line: None,
+            dbc_range: None,
+        };
+        let md = symbol_markdown(&sym, None);
+        assert!(md.contains("security: `Protected`"), "got: {md}");
     }
 
     #[test]

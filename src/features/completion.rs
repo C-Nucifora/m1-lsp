@@ -39,10 +39,15 @@ fn type_unit_detail(sym: &m1_typecheck::symbols::Symbol, project: &Project) -> O
         other if other.is_known() => super::hover::value_type_str(other).to_string(),
         _ => return None,
     };
-    Some(match &sym.unit {
+    let mut detail = match &sym.unit {
         Some(u) => format!("{ty} · {u}"),
         None => ty,
-    })
+    };
+    // Security / access level from the `.m1prj` `<Props Security>` (#77).
+    if let Some(sec) = &sym.security {
+        detail.push_str(&format!(" · {sec}"));
+    }
+    Some(detail)
 }
 
 /// The dotted parent path immediately before the cursor's `.`, e.g. with the
