@@ -8,7 +8,7 @@ use m1_typecheck::symbols::{Symbol, SymbolKind};
 use m1_typecheck::types::ValueType;
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 
-fn value_type_str(t: ValueType) -> &'static str {
+pub(crate) fn value_type_str(t: ValueType) -> &'static str {
     match t {
         ValueType::Boolean => "Boolean",
         ValueType::Integer => "Integer",

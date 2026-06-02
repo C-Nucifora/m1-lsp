@@ -3,6 +3,7 @@
 use crate::features::locate::collect_locals;
 use crate::project_store::LoadedProject;
 use m1_core::Node;
+use m1_typecheck::project::Project;
 use std::collections::HashSet;
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Documentation, InsertTextFormat};
 
@@ -25,6 +26,23 @@ fn call_snippet(name: &str, params: &[m1_typecheck::intrinsics::Param]) -> Strin
 fn signature_detail(params: &[m1_typecheck::intrinsics::Param], returns: &str) -> String {
     let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
     format!("({}) -> {returns}", names.join(", "))
+}
+
+/// The value type (and unit) of a project symbol, for the completion `detail`,
+/// e.g. `Unsigned · ratio` or `Enum (Drive State)`. Most of this comes from the
+/// project's `parameters.m1cfg`; returns `None` when the type is unknown (groups,
+/// untyped names) so we don't show noise like `Unknown`.
+fn type_unit_detail(sym: &m1_typecheck::symbols::Symbol, project: &Project) -> Option<String> {
+    use m1_typecheck::types::ValueType;
+    let ty = match sym.value_type {
+        ValueType::Enum(id) => format!("Enum ({})", project.symbols().enum_type(id).name),
+        other if other.is_known() => super::hover::value_type_str(other).to_string(),
+        _ => return None,
+    };
+    Some(match &sym.unit {
+        Some(u) => format!("{ty} · {u}"),
+        None => ty,
+    })
 }
 
 /// The dotted parent path immediately before the cursor's `.`, e.g. with the
@@ -107,18 +125,26 @@ pub fn completions(
     if let Some(lp) = loaded {
         let group = file_name.and_then(|f| lp.project.group_for_script(f));
         for sym in lp.project.symbols().iter() {
+            let ty = type_unit_detail(sym, &lp.project);
             items.push(CompletionItem {
                 label: sym.path.clone(),
                 kind: Some(CompletionItemKind::FIELD),
+                detail: ty.clone(),
                 ..Default::default()
             });
             if let Some(g) = &group
                 && let Some(tail) = sym.path.strip_prefix(&format!("{g}."))
             {
+                // The short tail hides the full path, so put the path in the
+                // detail, plus the type/unit when known.
+                let detail = match &ty {
+                    Some(t) => format!("{}  ·  {t}", sym.path),
+                    None => sym.path.clone(),
+                };
                 items.push(CompletionItem {
                     label: tail.to_string(),
                     kind: Some(CompletionItemKind::FIELD),
-                    detail: Some(sym.path.clone()),
+                    detail: Some(detail),
                     ..Default::default()
                 });
             }
@@ -157,6 +183,40 @@ mod tests {
             let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
             assert!(labels.contains(&"fGain"));
             assert!(labels.iter().any(|l| l.contains("Speed Glonk")));
+        });
+    }
+
+    const M1PRJ_PARAM: &str = r#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Foo"/>
+  <Component Classname="BuiltIn.Parameter" Name="Root.Foo.Gain.Value"><Props/></Component>
+</Project>"#;
+    const M1CFG_PARAM: &str = r#"<?xml version="1.0"?>
+<Configuration><Group Name="">
+  <Parameter Name="Root.Foo.Gain.Value"><Cell Type="u16" Unit="ratio"><![CDATA[1]]></Cell></Parameter>
+</Group></Configuration>"#;
+
+    #[test]
+    fn parameter_completion_shows_type_and_unit_from_cfg() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Project.m1prj"), M1PRJ_PARAM).unwrap();
+        std::fs::write(tmp.path().join("parameters.m1cfg"), M1CFG_PARAM).unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        let src = "\n";
+        let cst = m1_core::parse(src);
+        store.with_project(|p| {
+            let items = completions(cst.root(), p, Some("X.m1scr"), src, src.len());
+            let item = items
+                .iter()
+                .find(|i| i.label == "Root.Foo.Gain.Value")
+                .expect("parameter should be offered");
+            let detail = item.detail.as_deref().unwrap_or("");
+            assert!(
+                detail.contains("Unsigned") && detail.contains("ratio"),
+                "completion detail should carry the cfg type + unit, got: {detail:?}"
+            );
         });
     }
 

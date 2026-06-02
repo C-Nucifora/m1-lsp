@@ -72,7 +72,8 @@ sibling.
   assignment targets.
 - **Completion** (`textDocument/completion`): in-scope locals, project symbols,
   library objects and keywords; after a library object `.` (a trigger
-  character), that object's methods.
+  character), that object's methods. Project symbols carry their value type and
+  unit in the completion `detail` (e.g. `Unsigned · ratio`, `Enum (Drive State)`).
 - **Signature help** (`textDocument/signatureHelp`): library-function overloads
   with the active argument highlighted, triggered on `(` and `,`.
 - **Inlay hints** (`textDocument/inlayHint`): an inline `: Type` after each
@@ -90,6 +91,12 @@ sibling.
 - **Document lifecycle**: full-document sync (`didOpen` / `didChange` /
   `didSave` / `didClose`), plus `workspace/didChangeWatchedFiles` for
   `.m1prj` / `.m1cfg` reloads.
+
+The project model auto-discovers a `parameters.m1cfg` sibling of the
+`Project.m1prj` and loads it via `m1-typecheck`; this is what gives parameters
+their concrete **value types and units** (the `.m1prj` mostly just names them).
+Those types flow into hover, completion detail, inlay hints, and assignment
+type-checking, and the server reloads them when the `.m1cfg` changes.
 
 ## Build
 
