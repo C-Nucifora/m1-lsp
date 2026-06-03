@@ -62,7 +62,7 @@ pub struct CallGraph {
 /// The conventional backing-file basename of a script symbol: its explicit
 /// `Filename`, else the path-encoding convention (`Root.Engine.Update` →
 /// `Engine.Update.m1scr`). Mirrors `project_store`/`m1prj` script matching.
-fn backing_file(sym: &Symbol) -> String {
+pub(crate) fn backing_file(sym: &Symbol) -> String {
     sym.filename.clone().unwrap_or_else(|| {
         format!(
             "{}.m1scr",
@@ -73,7 +73,7 @@ fn backing_file(sym: &Symbol) -> String {
 
 /// The Function/Method symbol backing a given script file, if any — the source of
 /// the script's call rate and group label.
-fn script_symbol<'a>(loaded: &'a LoadedProject, file_name: &str) -> Option<&'a Symbol> {
+pub(crate) fn script_symbol<'a>(loaded: &'a LoadedProject, file_name: &str) -> Option<&'a Symbol> {
     loaded.project.symbols().iter().find(|s| {
         matches!(s.kind, SymbolKind::Function | SymbolKind::Method) && backing_file(s) == file_name
     })
