@@ -84,6 +84,12 @@ optional sibling checkout.
   `local` (project symbols are declared in `.m1prj` and are not renamed here).
 - **Folding** (`textDocument/foldingRange`): `{ … }` blocks and multi-line block
   comments.
+- **Code lens** (`textDocument/codeLens`): a `⚡ N Hz` lens at the top of each
+  `.m1scr` naming the script's execution rate, derived from its `.m1prj`
+  `SelectedTrigger` clock (#86, view half). Shown only when the rate is
+  statically known; startup-only and `$(…)`-templated triggers carry no lens.
+  Changing the rate writes to `Project.m1prj` and lives in the editor/CLI layer,
+  not the server.
 - **Semantic tokens** (`textDocument/semanticTokens/full`): full-document token
   classification (variables, functions, keywords, numbers, strings, comments,
   types, parameters, namespaces; `definition` / `readonly` modifiers).

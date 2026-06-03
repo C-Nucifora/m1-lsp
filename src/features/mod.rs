@@ -3,6 +3,7 @@
 //! code-action quick-fixes.
 pub mod call_hierarchy;
 pub mod code_action;
+pub mod code_lens;
 pub mod completion;
 pub mod document_symbols;
 pub mod folding;

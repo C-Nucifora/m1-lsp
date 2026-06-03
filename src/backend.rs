@@ -10,8 +10,8 @@ use crate::analysis::{LintProvider, NoLint, NoTypes, TypeProvider, analyze};
 use crate::config::M1Config;
 use crate::document::Document;
 use crate::features::{
-    call_hierarchy, code_action, completion, document_symbols, folding, goto, hover, inlay,
-    references, rename, semantic_tokens, signature_help, workspace_symbol,
+    call_hierarchy, code_action, code_lens, completion, document_symbols, folding, goto, hover,
+    inlay, references, rename, semantic_tokens, signature_help, workspace_symbol,
 };
 use crate::format::{Formatter, NoFormat, format_edits, range_format_edits};
 use crate::line_index::PositionEncoding;
@@ -300,6 +300,9 @@ impl LanguageServer for Backend {
                     work_done_progress_options: Default::default(),
                 }),
                 inlay_hint_provider: Some(OneOf::Left(true)),
+                code_lens_provider: Some(CodeLensOptions {
+                    resolve_provider: Some(false),
+                }),
                 call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
@@ -569,6 +572,13 @@ impl LanguageServer for Backend {
         let cst = m1_core::parse(&text);
         let hints = inlay::inlay_hints(cst.root(), params.range, &lindex, self.enc());
         Ok(Some(hints))
+    }
+
+    async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        let uri = params.text_document.uri;
+        Ok(self
+            .store
+            .with_project(|p| p.map(|lp| code_lens::code_lens(lp, &uri))))
     }
 
     async fn prepare_call_hierarchy(
