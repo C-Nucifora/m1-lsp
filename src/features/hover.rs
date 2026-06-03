@@ -226,6 +226,11 @@ fn builtin_fn_markdown(path: &str, overloads: &[&Overload]) -> String {
         if first.deprecated {
             s.push_str("\n⚠ **deprecated**");
         }
+        if first.calibration_only {
+            s.push_str(
+                "\n⚠ **calibration-only** — usable only in M1 Tune calibration methods, not in ECU `.m1scr` scripts.",
+            );
+        }
     }
     s
 }
@@ -532,6 +537,27 @@ mod tests {
             assert!(m.value.contains("library function"), "{}", m.value);
             assert!(m.value.contains("Calculate.Max"), "{}", m.value);
             assert!(m.value.contains("->"), "{}", m.value);
+        } else {
+            panic!("expected markup");
+        }
+    }
+
+    #[test]
+    fn calibration_only_function_hover_is_labelled() {
+        // Math.* are calibration-method-only; hover should resolve them but flag
+        // that they're not valid in ECU scripts.
+        let src = "x = Math.Sqrt(a);\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find("Sqrt").unwrap();
+        let h = hover(cst.root(), byte, None, None, &li, PositionEncoding::Utf16).unwrap();
+        if let HoverContents::Markup(m) = h.contents {
+            assert!(m.value.contains("Math.Sqrt"), "{}", m.value);
+            assert!(
+                m.value.to_lowercase().contains("calibration"),
+                "should label calibration-only: {}",
+                m.value
+            );
         } else {
             panic!("expected markup");
         }
