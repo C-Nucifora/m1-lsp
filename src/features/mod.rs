@@ -1,6 +1,7 @@
 //! Symbol-model-powered LSP features (v2): hover, goto, document symbols,
 //! completion, inlay type-hints, rename, references/highlights, folding, and
 //! code-action quick-fixes.
+pub mod call_hierarchy;
 pub mod code_action;
 pub mod completion;
 pub mod document_symbols;

@@ -120,6 +120,29 @@ fn is_write(n: Node) -> bool {
     }
 }
 
+/// Every top-level dotted-path occurrence in `root`, as `(path, byte_range,
+/// is_write)`. A "write" is an assignment target or a `local` declaration name;
+/// everything else is a read. Skips type-annotation names. Powers the
+/// call-hierarchy channel↔script read/write index ([`super::call_hierarchy`]).
+pub(crate) fn path_occurrences(root: Node) -> Vec<(String, std::ops::Range<usize>, bool)> {
+    fn walk(n: Node, out: &mut Vec<(String, std::ops::Range<usize>, bool)>) {
+        let is_path = matches!(n.kind(), Kind::Identifier | Kind::MemberExpression);
+        let is_top = n
+            .parent()
+            .map(|p| p.kind() != Kind::MemberExpression)
+            .unwrap_or(true);
+        if is_path && is_top && !in_type_annotation(n) {
+            out.push((n.text().to_string(), n.byte_range(), is_write(n)));
+        }
+        for c in n.children() {
+            walk(c, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out
+}
+
 pub fn references(
     root: Node,
     byte: usize,

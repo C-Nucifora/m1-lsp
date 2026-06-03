@@ -87,6 +87,15 @@ optional sibling checkout.
 - **Semantic tokens** (`textDocument/semanticTokens/full`): full-document token
   classification (variables, functions, keywords, numbers, strings, comments,
   types, parameters, namespaces; `definition` / `readonly` modifiers).
+- **Call hierarchy** (`textDocument/prepareCallHierarchy` +
+  `callHierarchy/incomingCalls` / `outgoingCalls`): the cross-script channel
+  *data-flow* graph (#84). An item is a channel or a `.m1scr` script. From a
+  channel, **incoming** lists the scripts that read it and **outgoing** the
+  scripts that write (produce) it; from a script, **outgoing** lists the channels
+  it writes and **incoming** the scripts that read a channel it writes. Channel
+  references are resolved through each script's group scope, so the same channel
+  written/read under different group-relative spellings collapses onto one node.
+  Script items show their call rate (e.g. `Engine.Control @ 100 Hz`).
 - **Position encoding**: byte offsets from `m1-core` are converted to LSP
   positions in UTF-16 code units by default, or UTF-8 when the client negotiates
   it.
