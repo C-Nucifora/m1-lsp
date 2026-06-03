@@ -128,6 +128,9 @@ pub fn completions(
         return obj
             .functions
             .iter()
+            // Calibration-only functions (Math.*, UI.*, System.StrCat) are valid
+            // only in M1 Tune calibration methods, never in ECU .m1scr scripts.
+            .filter(|f| !f.calibration_only)
             .filter(|f| seen.insert(f.name.clone()))
             .map(|f| CompletionItem {
                 label: f.name.clone(),
@@ -154,7 +157,12 @@ pub fn completions(
     let mut items: Vec<CompletionItem> = Vec::new();
 
     // Library objects (Calculate, CanComms, …) and keywords are always offered.
-    for name in intr.library.keys() {
+    // Skip calibration-only objects (Math, UI) whose every function is valid only
+    // in M1 Tune calibration methods, not in ECU .m1scr scripts.
+    for (name, obj) in intr.library.iter() {
+        if !obj.functions.is_empty() && obj.functions.iter().all(|f| f.calibration_only) {
+            continue;
+        }
         items.push(CompletionItem {
             label: name.clone(),
             kind: Some(CompletionItemKind::MODULE),
@@ -309,6 +317,46 @@ mod tests {
                 "completion detail should carry the cfg type + unit, got: {detail:?}"
             );
         });
+    }
+
+    #[test]
+    fn calibration_only_objects_not_offered_in_completion() {
+        // Math / UI are calibration-method-only objects; they must not be offered
+        // in ECU .m1scr completion. ECU objects (Calculate, System) still are.
+        let src = "\n";
+        let cst = m1_core::parse(src);
+        let items = completions(cst.root(), None, Some("X.m1scr"), src, 0);
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"Calculate"),
+            "ECU object offered: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"System"),
+            "System offered (has ECU functions)"
+        );
+        assert!(!labels.contains(&"Math"), "Math is calibration-only");
+        assert!(!labels.contains(&"UI"), "UI is calibration-only");
+    }
+
+    #[test]
+    fn calibration_only_methods_filtered_after_dot() {
+        // System carries ECU functions plus the calibration-only StrCat; only the
+        // ECU functions are offered after `System.`. (Debug is an ECU function.)
+        let src = "x = System.\n";
+        let cst = m1_core::parse(src);
+        let byte = src.find("System.").unwrap() + "System.".len();
+        let items = completions(cst.root(), None, None, src, byte);
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"Preserve"),
+            "ECU System.Preserve offered: {labels:?}"
+        );
+        assert!(labels.contains(&"Debug"), "ECU System.Debug offered");
+        assert!(
+            !labels.contains(&"StrCat"),
+            "StrCat is calibration-only: {labels:?}"
+        );
     }
 
     #[test]
