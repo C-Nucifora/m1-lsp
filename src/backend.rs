@@ -10,8 +10,8 @@ use crate::analysis::{LintProvider, NoLint, NoTypes, TypeProvider, analyze};
 use crate::config::M1Config;
 use crate::document::Document;
 use crate::features::{
-    code_action, completion, document_symbols, folding, goto, hover, inlay, references, rename,
-    semantic_tokens, signature_help, workspace_symbol,
+    call_hierarchy, code_action, completion, document_symbols, folding, goto, hover, inlay,
+    references, rename, semantic_tokens, signature_help, workspace_symbol,
 };
 use crate::format::{Formatter, NoFormat, format_edits, range_format_edits};
 use crate::line_index::PositionEncoding;
@@ -300,6 +300,7 @@ impl LanguageServer for Backend {
                     work_done_progress_options: Default::default(),
                 }),
                 inlay_hint_provider: Some(OneOf::Left(true)),
+                call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
                     work_done_progress_options: Default::default(),
@@ -568,6 +569,52 @@ impl LanguageServer for Backend {
         let cst = m1_core::parse(&text);
         let hints = inlay::inlay_hints(cst.root(), params.range, &lindex, self.enc());
         Ok(Some(hints))
+    }
+
+    async fn prepare_call_hierarchy(
+        &self,
+        params: CallHierarchyPrepareParams,
+    ) -> Result<Option<Vec<CallHierarchyItem>>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
+            return Ok(None);
+        };
+        let byte = lindex.offset(
+            params.text_document_position_params.position,
+            &text,
+            self.enc(),
+        );
+        let enc = self.enc();
+        let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
+        Ok(self.store.with_project(|p| {
+            p.and_then(|lp| call_hierarchy::prepare(lp, &uri, &text, byte, enc, &open_text))
+        }))
+    }
+
+    async fn incoming_calls(
+        &self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        let enc = self.enc();
+        let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
+        Ok(self.store.with_project(|p| {
+            p.and_then(|lp| call_hierarchy::incoming(lp, &params.item, enc, &open_text))
+        }))
+    }
+
+    async fn outgoing_calls(
+        &self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        let enc = self.enc();
+        let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
+        Ok(self.store.with_project(|p| {
+            p.and_then(|lp| call_hierarchy::outgoing(lp, &params.item, enc, &open_text))
+        }))
     }
 
     async fn prepare_rename(
