@@ -571,8 +571,8 @@ dependencies = [
 
 [[package]]
 name = "m1-core"
-version = "0.4.0"
-source = "git+https://github.com/C-Nucifora/m1-core.git?tag=v0.4.0#95653cc52108aeddb4596a32cc93cd030d3ea9d6"
+version = "0.4.1"
+source = "git+https://github.com/C-Nucifora/m1-core.git?tag=v0.4.1#dc0fcd93a6cc1cda118a30ad9b1af60864af2894"
 dependencies = [
  "tree-sitter",
  "tree-sitter-m1",
@@ -580,8 +580,8 @@ dependencies = [
 
 [[package]]
 name = "m1-fmt"
-version = "0.4.0"
-source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.4.0#432a84eed6a130bb09e3a0b0e2912a0b740b379f"
+version = "0.4.1"
+source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.4.1#1a3c1b000146f3dfbf531b2460b7745a8207d223"
 dependencies = [
  "clap",
  "m1-core",
@@ -590,8 +590,8 @@ dependencies = [
 
 [[package]]
 name = "m1-lint"
-version = "0.5.0"
-source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.5.0#f496d62f8511a1b65af6ea7966eecbc5a354f2bc"
+version = "0.5.1"
+source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.5.1#5a9207aa1d173d842d533e91ab0627cc7dc766de"
 dependencies = [
  "glob",
  "m1-core",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "m1-lsp"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "dashmap 6.2.1",
  "m1-core",
@@ -618,8 +618,8 @@ dependencies = [
 
 [[package]]
 name = "m1-typecheck"
-version = "0.13.0"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.13.0#3f8cdb9781d2fae3f6fbae3eeb673ee8303d9642"
+version = "0.13.1"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.13.1#0b72348546f6dc95bf26c3814237c811961d27a3"
 dependencies = [
  "clap",
  "m1-core",

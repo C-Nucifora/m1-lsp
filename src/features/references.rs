@@ -253,6 +253,81 @@ pub fn project_references(
     }
 }
 
+/// Locations of the dotted `path` within one file that are **writes** (an
+/// assignment target) — the producer sites that back go-to-implementation.
+fn path_write_locations(
+    root: Node,
+    path: &str,
+    uri: &Url,
+    li: &LineIndex,
+    enc: PositionEncoding,
+) -> Vec<Location> {
+    let mut nodes = Vec::new();
+    collect_path_matches(root, path, &mut nodes);
+    nodes
+        .into_iter()
+        .filter(|n| is_write(*n))
+        .map(|n| Location {
+            uri: uri.clone(),
+            range: range(&n.byte_range(), li, enc),
+        })
+        .collect()
+}
+
+/// textDocument/implementation: jump to where the symbol under the cursor is
+/// **written** (produced). For an M1 channel that is the assignment statement(s)
+/// across the project that compute its value — distinct from go-to-definition,
+/// which resolves the declaration in `Project.m1prj`. For a local it is the
+/// declaration / assignment sites within the file. Mirrors
+/// [`project_references`] but keeps only write occurrences.
+pub fn project_implementations(
+    loaded: &LoadedProject,
+    cursor_uri: &Url,
+    cursor_text: &str,
+    byte: usize,
+    enc: PositionEncoding,
+    open_text: &dyn Fn(&Url) -> Option<String>,
+) -> Option<Vec<Location>> {
+    let cursor_cst = m1_core::parse(cursor_text);
+    match ref_target(cursor_cst.root(), byte)? {
+        RefTarget::Local(name) => {
+            let li = LineIndex::new(cursor_text);
+            let mut nodes = Vec::new();
+            collect_local_idents(cursor_cst.root(), &name, &mut nodes);
+            let locs: Vec<Location> = nodes
+                .into_iter()
+                .filter(|n| is_write(*n))
+                .map(|n| Location {
+                    uri: cursor_uri.clone(),
+                    range: range(&n.byte_range(), &li, enc),
+                })
+                .collect();
+            (!locs.is_empty()).then_some(locs)
+        }
+        RefTarget::Path(path) => {
+            let mut files: Vec<(Url, String)> = vec![(cursor_uri.clone(), cursor_text.to_string())];
+            for p in &loaded.script_files {
+                let Ok(uri) = Url::from_file_path(p) else {
+                    continue;
+                };
+                if files.iter().any(|(u, _)| *u == uri) {
+                    continue;
+                }
+                if let Some(t) = open_text(&uri).or_else(|| std::fs::read_to_string(p).ok()) {
+                    files.push((uri, t));
+                }
+            }
+            let mut locs = Vec::new();
+            for (uri, text) in &files {
+                let li = LineIndex::new(text);
+                let cst = m1_core::parse(text);
+                locs.extend(path_write_locations(cst.root(), &path, uri, &li, enc));
+            }
+            (!locs.is_empty()).then_some(locs)
+        }
+    }
+}
+
 pub fn document_highlights(
     root: Node,
     byte: usize,
@@ -398,6 +473,57 @@ mod tests {
         );
         assert!(locs.iter().any(|l| l.uri.path().ends_with("A.m1scr")));
         assert!(locs.iter().any(|l| l.uri.path().ends_with("B.m1scr")));
+    }
+
+    #[test]
+    fn project_implementations_resolve_to_the_write_site() {
+        use crate::project_store::ProjectStore;
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let m1prj = r#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Engine"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Engine.Speed"><Props Type="f32"/></Component>
+  <Component Classname="BuiltIn.FuncUser" Name="Root.Engine.Write" Filename="A.m1scr"/>
+  <Component Classname="BuiltIn.FuncUser" Name="Root.Engine.Read" Filename="B.m1scr"/>
+</Project>"#;
+        std::fs::File::create(tmp.path().join("Project.m1prj"))
+            .unwrap()
+            .write_all(m1prj.as_bytes())
+            .unwrap();
+        let a_src = "Root.Engine.Speed = 1.0;\n"; // writes (the implementation)
+        let b_src = "local x = Root.Engine.Speed;\n"; // reads
+        std::fs::write(tmp.path().join("A.m1scr"), a_src).unwrap();
+        std::fs::write(tmp.path().join("B.m1scr"), b_src).unwrap();
+
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        // Cursor on the READ of Root.Engine.Speed in B → implementation jumps to
+        // the producer (write) site in A, and only that — not the read itself.
+        let b_uri = Url::from_file_path(tmp.path().join("B.m1scr")).unwrap();
+        let byte = b_src.find("Root").unwrap();
+        let no_open = |_: &Url| None;
+        let locs = store
+            .with_project(|p| {
+                project_implementations(
+                    p.unwrap(),
+                    &b_uri,
+                    b_src,
+                    byte,
+                    PositionEncoding::Utf16,
+                    &no_open,
+                )
+            })
+            .expect("implementation resolves to the producer site");
+
+        assert_eq!(locs.len(), 1, "exactly one write site: {locs:?}");
+        assert!(
+            locs[0].uri.path().ends_with("A.m1scr"),
+            "implementation is the write in A, got {locs:?}"
+        );
     }
 
     #[test]

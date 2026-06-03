@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use tower_lsp::jsonrpc::{Error, Result};
+use tower_lsp::lsp_types::request::{GotoImplementationParams, GotoImplementationResponse};
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
@@ -285,6 +286,7 @@ impl LanguageServer for Backend {
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
@@ -493,6 +495,32 @@ impl LanguageServer for Backend {
             p.and_then(|lp| goto::goto(cst.root(), byte, lp, file_name.as_deref()))
                 .map(GotoDefinitionResponse::Scalar)
         }))
+    }
+
+    async fn goto_implementation(
+        &self,
+        params: GotoImplementationParams,
+    ) -> Result<Option<GotoImplementationResponse>> {
+        let tdp = params.text_document_position_params;
+        let uri = tdp.text_document.uri;
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
+            return Ok(None);
+        };
+        let byte = lindex.offset(tdp.position, &text, self.enc());
+        let enc = self.enc();
+        // "Implementation" of a channel = where it is written (produced). With a
+        // project loaded, search every `.m1scr`; open buffers win over disk.
+        let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
+        let locs = self.store.with_project(|p| {
+            p.and_then(|lp| {
+                references::project_implementations(lp, &uri, &text, byte, enc, &open_text)
+            })
+        });
+        Ok(locs.map(GotoDefinitionResponse::Array))
     }
 
     async fn document_symbol(
