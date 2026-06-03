@@ -90,8 +90,10 @@ mod tests {
         // reload_config) must report the same rules as the `m1-lint` CLI
         // default, including codes above L009. The old v1 seed dropped
         // L010–L012 until a workspace root was discovered. L010
-        // (tab-for-indentation) is purely textual, so it is a stable probe.
-        let src = "\tx = 1;\n";
+        // (indentation style) is purely textual, so it is a stable probe.
+        // Since m1-lint v0.5.0 the default flags *space* indentation (the
+        // manual mandates tabs), so the probe uses a space-indented line.
+        let src = "    x = 1;\n";
         let li = LineIndex::new(src);
         let diags = M1Lint::new().lint(src, &li, PositionEncoding::Utf16);
         assert!(
