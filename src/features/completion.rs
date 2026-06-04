@@ -72,12 +72,28 @@ fn assignment_lhs(text: &str, byte: usize) -> Option<String> {
 
 /// Enum-member completions for an enum-typed LHS symbol, e.g. `GearState.Neutral`
 /// with detail `= 0`. `None` when `lhs` doesn't resolve to an enum-typed symbol.
-fn enum_member_completions(lhs: &str, lp: &LoadedProject) -> Option<Vec<CompletionItem>> {
+///
+/// Resolution goes through `m1_typecheck::resolve`, which tries the LHS absolute,
+/// `Root.`-prefixed, *and* group-relatively (walking the enclosing `group` up to
+/// Root). This is what makes the universal real pattern `<bare channel> = …` work
+/// — `Value` in the `Root.Control` group resolves to `Root.Control.Value` (#126);
+/// a fully-qualified LHS still resolves via the absolute step.
+fn enum_member_completions(
+    lhs: &str,
+    group: Option<String>,
+    lp: &LoadedProject,
+) -> Option<Vec<CompletionItem>> {
+    use m1_typecheck::resolve::{Resolution, Scope, resolve};
     use m1_typecheck::types::ValueType;
     let table = lp.project.symbols();
-    let sym = table
-        .get(lhs)
-        .or_else(|| table.get(m1_workspace::qualify_root(lhs).as_ref()))?;
+    let scope = Scope {
+        locals: std::collections::HashMap::new(),
+        group,
+        project: Some(&lp.project),
+    };
+    let Resolution::Symbol(sym) = resolve(lhs, &scope) else {
+        return None;
+    };
     let ValueType::Enum(id) = sym.value_type else {
         return None;
     };
@@ -149,7 +165,11 @@ pub fn completions(
     // symbols (#79).
     if let Some(lp) = loaded
         && let Some(lhs) = assignment_lhs(text, byte)
-        && let Some(items) = enum_member_completions(&lhs, lp)
+        && let Some(items) = enum_member_completions(
+            &lhs,
+            file_name.and_then(|f| lp.project.group_for_script(f)),
+            lp,
+        )
     {
         return items;
     }
@@ -292,6 +312,52 @@ mod tests {
             assert!(labels.contains(&"Gear State.First"));
             // Enum members replace the generic completion list here.
             assert!(!labels.contains(&"if"), "should not offer keywords");
+        });
+    }
+
+    /// The universal real pattern: the LHS is a *bare in-group* channel name
+    /// (`Drive State = …` inside the `Root.Control` group), not a fully-qualified
+    /// path. Completion must still resolve it group-relatively and offer the enum's
+    /// members — not fall through to the 2000-item global dump (#126).
+    const M1PRJ_ENUM_GROUP: &str = r#"<?xml version="1.0"?>
+<Project>
+  <DataTypes>
+    <Type Name="Drive State" Storage="enum" Default="Idle">
+      <Enum Name="Idle" ContainerOrder="0"/>
+      <Enum Name="Latching Fault" ContainerOrder="1"/>
+    </Type>
+  </DataTypes>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Control"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Control.Value"><Props Type="::This.Drive State"/></Component>
+  <Component Classname="BuiltIn.MethodUser" Name="Root.Control.Update"/>
+</Project>"#;
+
+    #[test]
+    fn offers_enum_members_for_bare_in_group_lhs() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Project.m1prj"), M1PRJ_ENUM_GROUP).unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        // `Value` is `Root.Control.Value`; the script lives in the `Root.Control`
+        // group, so the bare name must resolve group-relatively.
+        let src = "Value = \n";
+        let byte = src.find('\n').unwrap();
+        let cst = m1_core::parse(src);
+        store.with_project(|p| {
+            let items = completions(cst.root(), p, Some("Control.Update.m1scr"), src, byte);
+            let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(
+                labels.contains(&"Drive State.Idle"),
+                "bare in-group LHS should offer enum members, got {labels:?}"
+            );
+            assert!(labels.contains(&"Drive State.Latching Fault"));
+            // The enum members replace the generic dump — no keyword fallback.
+            assert!(
+                !labels.contains(&"if"),
+                "should not fall back to the global dump"
+            );
         });
     }
 
