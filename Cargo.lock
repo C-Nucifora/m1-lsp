@@ -600,14 +600,14 @@ dependencies = [
 
 [[package]]
 name = "m1-lsp"
-version = "0.22.2"
+version = "0.22.3"
 dependencies = [
  "dashmap 6.2.1",
  "m1-core",
  "m1-fmt",
  "m1-lint",
  "m1-typecheck",
- "m1-workspace",
+ "m1-workspace 0.2.0",
  "serde",
  "serde_json",
  "tempfile",
@@ -623,7 +623,7 @@ source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.16.2#a995fec
 dependencies = [
  "clap",
  "m1-core",
- "m1-workspace",
+ "m1-workspace 0.1.0",
  "roxmltree",
  "serde",
  "serde_json",
@@ -633,6 +633,11 @@ dependencies = [
 name = "m1-workspace"
 version = "0.1.0"
 source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.1.0#640d1d52b75f5a08df272c8081d3cf8cab30dce2"
+
+[[package]]
+name = "m1-workspace"
+version = "0.2.0"
+source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.2.0#4e5d55fdd0d950b1a79d673418f21ccf00c2e6fb"
 
 [[package]]
 name = "memchr"

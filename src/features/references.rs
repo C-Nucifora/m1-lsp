@@ -238,7 +238,7 @@ pub fn project_references(
                 if files.iter().any(|(u, _)| *u == uri) {
                     continue;
                 }
-                if let Some(t) = open_text(&uri).or_else(|| std::fs::read_to_string(p).ok()) {
+                if let Some(t) = open_text(&uri).or_else(|| crate::disk_read::read_disk(p)) {
                     files.push((uri, t));
                 }
             }
@@ -313,7 +313,7 @@ pub fn project_implementations(
                 if files.iter().any(|(u, _)| *u == uri) {
                     continue;
                 }
-                if let Some(t) = open_text(&uri).or_else(|| std::fs::read_to_string(p).ok()) {
+                if let Some(t) = open_text(&uri).or_else(|| crate::disk_read::read_disk(p)) {
                     files.push((uri, t));
                 }
             }

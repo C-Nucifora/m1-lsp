@@ -106,7 +106,7 @@ impl CallGraph {
             let Ok(uri) = Url::from_file_path(p) else {
                 continue;
             };
-            let Some(text) = open_text(&uri).or_else(|| std::fs::read_to_string(p).ok()) else {
+            let Some(text) = open_text(&uri).or_else(|| crate::disk_read::read_disk(p)) else {
                 continue;
             };
             let file_name = p

@@ -4,6 +4,7 @@ pub mod analysis;
 pub mod backend;
 pub mod config;
 pub mod convert;
+pub mod disk_read;
 pub mod document;
 pub mod features;
 pub mod fmt_backend;

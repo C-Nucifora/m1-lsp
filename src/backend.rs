@@ -170,7 +170,7 @@ impl Backend {
             .docs
             .get(&prj_uri)
             .map(|d| d.text.clone())
-            .or_else(|| std::fs::read_to_string(&prj_path).ok());
+            .or_else(|| crate::disk_read::read_disk(&prj_path));
         let Some(orig) = orig else {
             return;
         };
