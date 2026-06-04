@@ -84,6 +84,18 @@ jobs:
           mkdir -p out
           cp "target/${{ matrix.target }}/release/m1-lsp${{ matrix.ext }}" \
              "out/m1-lsp-${{ matrix.target }}${{ matrix.ext }}"
+      - name: Ad-hoc re-sign the macOS binary
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          # The linker's ad-hoc signature on the released binary does not validate
+          # on user machines — AMFI kills it at exec (SIGKILL, "Code Signature
+          # Invalid"), so editors that download and run it (nvim-m1, m1-vscode)
+          # never attach. A fresh ad-hoc re-sign writes a valid signature over the
+          # final bytes; the artifact zip round-trip preserves it to the user.
+          # (nvim-m1#15)
+          codesign --force --sign - "out/m1-lsp-${{ matrix.target }}${{ matrix.ext }}"
+          codesign --verify --verbose "out/m1-lsp-${{ matrix.target }}${{ matrix.ext }}"
       - uses: actions/upload-artifact@v7
         with:
           name: server-${{ matrix.target }}
