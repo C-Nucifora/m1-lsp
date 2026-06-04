@@ -61,6 +61,30 @@ fn walk_scripts(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Apply the disk-sourced `.m1cfg`/`.m1dbc` augmentation to a freshly-parsed
+/// project. Shared by `load_from` (parse from the file) and
+/// `reload_from_m1prj_text` (parse from edited in-memory text); the cfg/dbc are
+/// unaffected by a `.m1prj` text edit, so both re-apply them the same way.
+fn augment(
+    mut project: Project,
+    root: &Path,
+    m1cfg_path: &Option<PathBuf>,
+    dbc_paths: &[PathBuf],
+) -> Result<Project, String> {
+    if let Some(cfg) = m1cfg_path {
+        project = project.with_config(cfg).map_err(|e| e.to_string())?;
+    }
+    for dbc in dbc_paths {
+        let rel = dbc
+            .strip_prefix(root)
+            .unwrap_or(dbc)
+            .to_string_lossy()
+            .into_owned();
+        project = project.with_dbc(dbc, &rel).map_err(|e| e.to_string())?;
+    }
+    Ok(project)
+}
+
 #[derive(Default)]
 pub struct ProjectStore {
     inner: RwLock<Option<LoadedProject>>,
@@ -109,19 +133,8 @@ impl ProjectStore {
         // Build the full project first; if ANY step (.m1prj/.m1cfg/.m1dbc) fails,
         // clear the store so we don't keep serving a stale/partial project.
         let build = || -> Result<Project, String> {
-            let mut project = Project::load(m1prj_path).map_err(|e| e.to_string())?;
-            if let Some(cfg) = &m1cfg_path {
-                project = project.with_config(cfg).map_err(|e| e.to_string())?;
-            }
-            for dbc in &dbc_paths {
-                let rel = dbc
-                    .strip_prefix(&root)
-                    .unwrap_or(dbc)
-                    .to_string_lossy()
-                    .into_owned();
-                project = project.with_dbc(dbc, &rel).map_err(|e| e.to_string())?;
-            }
-            Ok(project)
+            let project = Project::load(m1prj_path).map_err(|e| e.to_string())?;
+            augment(project, &root, &m1cfg_path, &dbc_paths)
         };
         match build() {
             Ok(project) => {
@@ -141,6 +154,44 @@ impl ProjectStore {
                 Err(e)
             }
         }
+    }
+
+    /// Rebuild the cached project from edited `.m1prj` **text** (not disk), then
+    /// re-apply the disk-sourced `.m1cfg`/`.m1dbc` and re-walk scripts. Used after
+    /// a rename rewrites `Project.m1prj`: the client applies the edit to a buffer
+    /// it may not save (and never notifies us via file-watching), so we refresh
+    /// the symbol model immediately from the text the rename produced — otherwise
+    /// the renamed symbol reads as undefined until the server restarts.
+    ///
+    /// `Ok(false)` if no project is loaded. On a parse/augment failure the
+    /// previous model is **kept** (not cleared) — a transiently invalid edit
+    /// shouldn't drop the whole project; `Err` is returned for logging.
+    pub fn reload_from_m1prj_text(&self, m1prj_text: &str) -> Result<bool, String> {
+        let (root, m1prj_path, m1cfg_path, dbc_paths) = {
+            let guard = self.inner.read().unwrap();
+            let Some(lp) = guard.as_ref() else {
+                return Ok(false);
+            };
+            (
+                lp.root.clone(),
+                lp.m1prj_path.clone(),
+                lp.m1cfg_path.clone(),
+                lp.dbc_paths.clone(),
+            )
+        };
+        let project = Project::from_xml(m1prj_text)
+            .map_err(|e| e.to_string())
+            .and_then(|p| augment(p, &root, &m1cfg_path, &dbc_paths))?;
+        let script_files = walk_scripts(&root);
+        *self.inner.write().unwrap() = Some(LoadedProject {
+            project,
+            root,
+            m1prj_path,
+            m1cfg_path,
+            dbc_paths,
+            script_files,
+        });
+        Ok(true)
     }
 
     /// True if `path` is the currently-loaded `.m1prj` or `.m1cfg` (reload trigger).
@@ -275,6 +326,38 @@ mod tests {
         store.with_project(|p| {
             let files = &p.unwrap().script_files;
             assert_eq!(files.len(), 2, "refresh picks up the new script: {files:?}");
+        });
+    }
+
+    #[test]
+    fn reload_from_m1prj_text_refreshes_symbols_without_disk() {
+        // After a rename, the LSP must refresh its model from the edited (not yet
+        // saved) project text, so the renamed symbol is immediately live.
+        let tmp = tempfile::tempdir().unwrap();
+        write_project(tmp.path()); // declares Root.Speed Glonk
+        let store = ProjectStore::new();
+        assert!(store.discover_and_load(tmp.path()).unwrap());
+        store.with_project(|p| {
+            let t = p.unwrap().project.symbols();
+            assert!(t.get("Root.Speed Glonk").is_some());
+            assert!(t.get("Root.Velocity Glonk").is_none());
+        });
+
+        // Simulate the post-rename project text (Speed -> Velocity), as the client
+        // *would* write it — but without touching disk.
+        let renamed = M1PRJ.replace("Speed Glonk", "Velocity Glonk");
+        assert!(store.reload_from_m1prj_text(&renamed).unwrap());
+
+        store.with_project(|p| {
+            let t = p.unwrap().project.symbols();
+            assert!(
+                t.get("Root.Velocity Glonk").is_some(),
+                "renamed symbol must be live after reload"
+            );
+            assert!(
+                t.get("Root.Speed Glonk").is_none(),
+                "old symbol must be gone"
+            );
         });
     }
 

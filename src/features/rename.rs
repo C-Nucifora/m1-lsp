@@ -32,7 +32,9 @@
 //! and a value-bearing channel/parameter that itself has children (rename its
 //! leaf members individually).
 use crate::convert::range as to_range;
-use crate::features::locate::{build_scope, collect_locals, node_at_byte, path_at_byte};
+use crate::features::locate::{
+    build_scope, collect_locals, node_at_byte, path_at_byte, segment_at_byte, segment_nodes,
+};
 use crate::line_index::{LineIndex, PositionEncoding};
 use crate::project_store::LoadedProject;
 use m1_core::{Field, Kind, Node};
@@ -214,27 +216,6 @@ fn resolve_prefix<'p>(path: &str, scope: &Scope<'p>) -> Option<(&'p Symbol, usiz
     None
 }
 
-/// The identifier nodes of a dotted-path node, leftmost first. For
-/// `Root.Engine.Speed` this is `[Root, Engine, Speed]`; for a bare `Speed` it is
-/// `[Speed]`. Anchors are ordinary segments here (`[This, Speed]`).
-fn segment_nodes(top: Node) -> Vec<Node> {
-    fn rec<'a>(n: Node<'a>, out: &mut Vec<Node<'a>>) {
-        if n.kind() == Kind::MemberExpression {
-            if let Some(obj) = n.child_by_field(Field::Object) {
-                rec(obj, out);
-            }
-            if let Some(prop) = n.child_by_field(Field::Property) {
-                out.push(prop);
-            }
-        } else {
-            out.push(n);
-        }
-    }
-    let mut out = Vec::new();
-    rec(top, &mut out);
-    out
-}
-
 /// True for the outermost node of a dotted path (an `identifier` /
 /// `member_expression` not itself the child of a `member_expression`), excluding
 /// type-annotation names.
@@ -356,14 +337,6 @@ fn file_name_of(uri: &Url) -> Option<String> {
 enum Target<'p> {
     Leaf(&'p Symbol),
     Group(&'p Symbol),
-}
-
-/// Index of the dotted-path segment whose text span contains `byte`.
-fn segment_at_byte(top: Node, byte: usize) -> Option<usize> {
-    segment_nodes(top).iter().position(|s| {
-        let r = s.byte_range();
-        byte >= r.start && byte <= r.end
-    })
 }
 
 /// Decide renameability of `sym` (independent of which entry point found it).
@@ -1013,6 +986,73 @@ pub fn execute_m1prj(
     })
 }
 
+/// Apply the text edits in `we` that target `uri` to `text`, returning the new
+/// content (`None` if the edit doesn't touch `uri`). Reads edits from both the
+/// `changes` map and `document_changes`. Used to derive the post-rename
+/// `.m1prj` text so the LSP can refresh its symbol model without waiting for the
+/// client to write the file back to disk.
+pub fn apply_workspace_edit_to(
+    we: &WorkspaceEdit,
+    uri: &Url,
+    text: &str,
+    enc: PositionEncoding,
+) -> Option<String> {
+    let mut edits: Vec<&TextEdit> = Vec::new();
+    if let Some(changes) = &we.changes
+        && let Some(es) = changes.get(uri)
+    {
+        edits.extend(es.iter());
+    }
+    match &we.document_changes {
+        Some(DocumentChanges::Operations(ops)) => {
+            for op in ops {
+                if let DocumentChangeOperation::Edit(tde) = op
+                    && &tde.text_document.uri == uri
+                {
+                    edits.extend(tde.edits.iter().map(|e| match e {
+                        OneOf::Left(te) => te,
+                        OneOf::Right(ate) => &ate.text_edit,
+                    }));
+                }
+            }
+        }
+        Some(DocumentChanges::Edits(tdes)) => {
+            for tde in tdes {
+                if &tde.text_document.uri == uri {
+                    edits.extend(tde.edits.iter().map(|e| match e {
+                        OneOf::Left(te) => te,
+                        OneOf::Right(ate) => &ate.text_edit,
+                    }));
+                }
+            }
+        }
+        None => {}
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    let li = LineIndex::new(text);
+    let mut byte_edits: Vec<(usize, usize, &str)> = edits
+        .iter()
+        .map(|e| {
+            (
+                li.offset(e.range.start, text, enc),
+                li.offset(e.range.end, text, enc),
+                e.new_text.as_str(),
+            )
+        })
+        .collect();
+    // Apply right-to-left so earlier offsets stay valid as we splice.
+    byte_edits.sort_by_key(|&(start, ..)| std::cmp::Reverse(start));
+    let mut out = text.to_string();
+    for (start, end, new_text) in byte_edits {
+        if start <= end && end <= out.len() {
+            out.replace_range(start..end, new_text);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1344,6 +1384,64 @@ mod tests {
                 on_compound.is_none(),
                 "the compound channel is not renameable"
             );
+        });
+    }
+
+    // #119 + the nvim "undefined until restart" report: after a rename rewrites
+    // Project.m1prj, applying the edit back to the project text must yield the new
+    // declaration, and reloading the store from that text must make the renamed
+    // symbol immediately live (no disk round-trip, no server restart).
+    #[test]
+    fn post_rename_m1prj_text_makes_renamed_symbol_live_on_reload() {
+        let (tmp, store) = setup();
+        std::fs::write(
+            tmp.path().join("Engine.Update.m1scr"),
+            "Engine.Threshold = 1.0;\n",
+        )
+        .unwrap();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        let prj_path = tmp.path().join("Project.m1prj");
+        let prj_text = std::fs::read_to_string(&prj_path).unwrap();
+        let prj_uri = Url::from_file_path(&prj_path).unwrap();
+
+        // Rename the leaf parameter Root.Engine.Threshold -> Trip Point.
+        let src = "Engine.Threshold = 1.0;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find("Threshold").unwrap();
+        let enc = PositionEncoding::Utf16;
+        let no_open = |_: &Url| None;
+        let we = store
+            .with_project(|p| {
+                execute(
+                    cst.root(),
+                    byte,
+                    "Trip Point",
+                    Url::from_file_path(tmp.path().join("Engine.Update.m1scr")).unwrap(),
+                    &li,
+                    enc,
+                    p,
+                    Some("Engine.Update.m1scr"),
+                    &no_open,
+                )
+            })
+            .expect("rename should succeed");
+
+        // Derive the post-rename project text and reload the model from it.
+        let new_prj = apply_workspace_edit_to(&we, &prj_uri, &prj_text, enc)
+            .expect("the rename must touch Project.m1prj");
+        assert!(new_prj.contains("Root.Engine.Trip Point"), "got: {new_prj}");
+        assert!(!new_prj.contains("Root.Engine.Threshold"), "got: {new_prj}");
+
+        assert!(store.reload_from_m1prj_text(&new_prj).unwrap());
+        store.with_project(|p| {
+            let t = p.unwrap().project.symbols();
+            assert!(
+                t.get("Root.Engine.Trip Point").is_some(),
+                "renamed symbol must be live without a restart"
+            );
+            assert!(t.get("Root.Engine.Threshold").is_none());
         });
     }
 

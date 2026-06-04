@@ -1,6 +1,6 @@
 //! textDocument/hover: describe the symbol/local/opaque under the cursor.
 use crate::convert::range;
-use crate::features::locate::{build_scope, path_at_byte};
+use crate::features::locate::{build_scope, path_at_byte, segment_at_byte, segment_nodes};
 use crate::line_index::{LineIndex, PositionEncoding};
 use m1_typecheck::project::Project;
 use m1_typecheck::resolve::{Resolution, resolve};
@@ -209,6 +209,23 @@ fn builtin_object_markdown(name: &str) -> String {
     format!("**{name}** `library object`\n\n{doc}")
 }
 
+/// Hover for a built-in object *method* accessor (`.AsInteger()`, `.AsString()`,
+/// `.Set()`, `.Lookup()`, …) called on a project object — the methods the M1
+/// manual documents on every channel/enumerated object. Distinct from a library
+/// *function* (`Calculate.Max`): a method is bound to the object on its left.
+fn object_method_markdown(name: &str, overloads: &[&Overload]) -> String {
+    let mut s = format!("**{name}** `method`\n\n");
+    for ov in overloads {
+        s.push_str(&format!("```\n{}\n```\n", signature(name, ov)));
+    }
+    if let Some(first) = overloads.first()
+        && !first.doc.is_empty()
+    {
+        s.push_str(&format!("\n{}\n", first.doc));
+    }
+    s
+}
+
 fn builtin_fn_markdown(path: &str, overloads: &[&Overload]) -> String {
     let mut s = format!("**{path}** `library function`\n\n");
     for ov in overloads {
@@ -236,6 +253,11 @@ fn builtin_fn_markdown(path: &str, overloads: &[&Overload]) -> String {
 }
 
 /// Render hover for the path at `byte`. `project`/`file_name` drive resolution.
+///
+/// Resolution is *per-segment*: in `Control.Drive State.AsInteger()` the cursor's
+/// segment decides what is described — `Control` the group, `Drive State` the
+/// enum channel, `AsInteger` the built-in accessor method — rather than treating
+/// the whole dotted expression as one opaque object.
 pub fn hover(
     root: m1_core::Node,
     byte: usize,
@@ -244,22 +266,64 @@ pub fn hover(
     li: &LineIndex,
     enc: PositionEncoding,
 ) -> Option<Hover> {
-    let (node, path) = path_at_byte(root, byte)?;
+    let (top, _full) = path_at_byte(root, byte)?;
+    let segs = segment_nodes(top);
+    if segs.is_empty() {
+        return None;
+    }
+    let i = segment_at_byte(top, byte).unwrap_or(segs.len() - 1);
     let scope = build_scope(root, project, file_name);
-    let md = match resolve(&path, &scope) {
-        Resolution::Local(t) => format!("**{path}** `local`\n\ntype: `{}`", value_type_str(t)),
+
+    // The dotted prefix up to and including the segment under the cursor.
+    let prefix = segs[..=i]
+        .iter()
+        .map(|n| n.text())
+        .collect::<Vec<_>>()
+        .join(".");
+    let seg = segs[i];
+    let seg_text = seg.text();
+
+    let md = match resolve(&prefix, &scope) {
+        Resolution::Local(t) => format!("**{prefix}** `local`\n\ntype: `{}`", value_type_str(t)),
         Resolution::Symbol(sym) => symbol_markdown(sym, project),
         Resolution::BuiltinObject(name) => builtin_object_markdown(name),
-        Resolution::BuiltinFn(overloads) => builtin_fn_markdown(&path, &overloads),
-        Resolution::Opaque => format!("**{path}**\n\nbuilt-in symbol — type not modelled"),
-        Resolution::Unresolved => return None,
+        Resolution::BuiltinFn(overloads) => builtin_fn_markdown(&prefix, &overloads),
+        Resolution::Opaque | Resolution::Unresolved => {
+            // A trailing accessor (`object.AsInteger`) doesn't resolve to a
+            // project symbol, but the object on its left does. Describe the
+            // built-in method itself, with the manual's docs.
+            let methods = m1_typecheck::intrinsics::get().object_method(seg_text);
+            let object_resolves = i > 0
+                && matches!(
+                    resolve(
+                        &segs[..i]
+                            .iter()
+                            .map(|n| n.text())
+                            .collect::<Vec<_>>()
+                            .join("."),
+                        &scope
+                    ),
+                    Resolution::Symbol(_)
+                        | Resolution::Opaque
+                        | Resolution::BuiltinObject(_)
+                        | Resolution::Local(_)
+                );
+            if object_resolves && !methods.is_empty() {
+                object_method_markdown(seg_text, &methods)
+            } else if matches!(resolve(&prefix, &scope), Resolution::Opaque) {
+                format!("**{prefix}**\n\nbuilt-in symbol — type not modelled")
+            } else {
+                return None;
+            }
+        }
     };
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
             value: md,
         }),
-        range: Some(range(&node.byte_range(), li, enc)),
+        // Highlight just the hovered segment, not the whole expression.
+        range: Some(range(&seg.byte_range(), li, enc)),
     })
 }
 
@@ -540,6 +604,97 @@ mod tests {
         } else {
             panic!("expected markup");
         }
+    }
+
+    /// A project mirroring the EV-M1 sample line
+    /// `Control.Drive State.AsInteger()`: a `Control` group, a `Drive State`
+    /// channel under it typed as the `Drive State` enum, and the enum's members.
+    fn drive_state_project() -> (tempfile::TempDir, Project) {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<Project>
+  <DataTypes>
+    <Type Name="Drive State" Storage="enum" Default="Idle">
+      <Enum Name="Idle" ContainerOrder="1"/>
+      <Enum Name="Off" ContainerOrder="0"/>
+    </Type>
+  </DataTypes>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Control"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Control.Drive State"><Props Type="::This.Drive State"/></Component>
+</Project>"#,
+            )
+            .unwrap();
+        let project = m1_typecheck::Project::load(&prj).unwrap();
+        (tmp, project)
+    }
+
+    fn hover_value_at(project: &Project, src: &str, find: &str, occurrence: usize) -> String {
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        // Byte of the `occurrence`-th match of `find` (0-based).
+        let byte = src.match_indices(find).nth(occurrence).unwrap().0;
+        let h = hover(
+            cst.root(),
+            byte,
+            Some(project),
+            Some("Control.Update.m1scr"),
+            &li,
+            PositionEncoding::Utf16,
+        )
+        .unwrap_or_else(|| panic!("no hover for `{find}`#{occurrence}"));
+        match h.contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        }
+    }
+
+    #[test]
+    fn hover_resolves_each_segment_of_a_dotted_accessor_separately() {
+        // `Control.Drive State.AsInteger()` — hovering each segment must describe
+        // that segment, not the whole expression: a group, an enum channel, a
+        // built-in method.
+        let (_tmp, project) = drive_state_project();
+        let src = "if (Control.Drive State.AsInteger() > 0)\n{\n}\n";
+
+        // 1) `Control` → the top-level group.
+        let on_control = hover_value_at(&project, src, "Control", 0);
+        assert!(on_control.contains("group"), "Control hover: {on_control}");
+        assert!(
+            !on_control.contains("AsInteger"),
+            "Control hover must not describe the whole path: {on_control}"
+        );
+
+        // 2) `Drive State` (the channel) → the custom enum type + its values.
+        let on_enum = hover_value_at(&project, src, "Drive State", 0);
+        assert!(
+            on_enum.contains("Enum") && on_enum.contains("Drive State"),
+            "Drive State hover should name the enum: {on_enum}"
+        );
+        assert!(
+            !on_enum.contains("AsInteger"),
+            "Drive State hover must not describe the method: {on_enum}"
+        );
+
+        // 3) `AsInteger` → the built-in enum accessor method, with its docs.
+        let on_method = hover_value_at(&project, src, "AsInteger", 0);
+        assert!(
+            on_method.contains("AsInteger"),
+            "AsInteger hover should name the method: {on_method}"
+        );
+        assert!(
+            on_method.to_lowercase().contains("method"),
+            "AsInteger hover should label it a method: {on_method}"
+        );
+        assert!(
+            on_method.contains("Integer representation"),
+            "AsInteger hover should show its doc: {on_method}"
+        );
     }
 
     #[test]
