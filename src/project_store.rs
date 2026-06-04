@@ -80,7 +80,13 @@ fn augment(
             .unwrap_or(dbc)
             .to_string_lossy()
             .into_owned();
-        project = project.with_dbc(dbc, &rel).map_err(|e| e.to_string())?;
+        // A malformed/unreadable DBC must not blank the whole project model:
+        // skip just that file and keep every other symbol. Encoding is handled
+        // upstream (m1-typecheck decodes Windows-1252), so this only trips on
+        // genuinely broken CAN XML.
+        if let Err(e) = project.augment_dbc(dbc, &rel) {
+            eprintln!("m1-lsp: skipping .m1dbc {}: {e}", dbc.display());
+        }
     }
     Ok(project)
 }
@@ -130,8 +136,10 @@ impl ProjectStore {
         let root = m1prj_path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let m1cfg_path = m1_workspace::find_config_file(&root);
         let dbc_paths = m1_workspace::find_dbc_files(&root);
-        // Build the full project first; if ANY step (.m1prj/.m1cfg/.m1dbc) fails,
-        // clear the store so we don't keep serving a stale/partial project.
+        // Build the full project first; if .m1prj or .m1cfg fails, clear the
+        // store so we don't keep serving a stale/partial project. A bad .m1dbc
+        // is non-fatal (skipped in `augment`) — one malformed CAN file must not
+        // blank the whole model.
         let build = || -> Result<Project, String> {
             let project = Project::load(m1prj_path).map_err(|e| e.to_string())?;
             augment(project, &root, &m1cfg_path, &dbc_paths)
@@ -240,25 +248,53 @@ mod tests {
 </DBC>"#;
 
     #[test]
-    fn partial_load_failure_clears_store() {
+    fn malformed_dbc_is_skipped_not_fatal() {
         let tmp = tempfile::tempdir().unwrap();
         write_project(tmp.path());
         let store = ProjectStore::new();
         // First load succeeds and populates the store.
         assert!(store.discover_and_load(tmp.path()).unwrap());
         assert!(store.with_project(|p| p.is_some()));
-        // Add a malformed .m1dbc; the reload must fail AND clear the store so we
-        // don't keep serving the now-stale project. (Regression for #37.)
+        // Add a malformed .m1dbc. A single broken CAN file must NOT blank the
+        // whole model: the reload still succeeds, the store stays populated, and
+        // every non-DBC symbol still resolves. (The original #37 regression — a
+        // bad DBC clearing the store — was the wrong behaviour; it left every
+        // channel unresolved. The fatal path that #37 cared about, a corrupt
+        // .m1prj, is covered by `corrupt_m1prj_clears_store` below.)
         let dbcdir = tmp.path().join("dbc");
         std::fs::create_dir_all(&dbcdir).unwrap();
         std::fs::File::create(dbcdir.join("bad.m1dbc"))
             .unwrap()
             .write_all(b"<<< not valid xml")
             .unwrap();
+        assert!(
+            store.discover_and_load(tmp.path()).unwrap(),
+            "a malformed .m1dbc is skipped, not fatal"
+        );
+        store.with_project(|p| {
+            let lp = p.expect("store stays populated despite the bad DBC");
+            assert!(
+                lp.project.symbols().get("Root.Speed Glonk").is_some(),
+                "non-DBC symbols still resolve"
+            );
+        });
+    }
+
+    #[test]
+    fn corrupt_m1prj_clears_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = write_project(tmp.path());
+        let store = ProjectStore::new();
+        assert!(store.discover_and_load(tmp.path()).unwrap());
+        assert!(store.with_project(|p| p.is_some()));
+        // A corrupt project file IS fatal: the reload must fail AND clear the
+        // store so we don't keep serving the now-stale project. (Regression for
+        // #37, applied to the file that genuinely defines the model.)
+        std::fs::write(&prj, b"<<< not valid xml").unwrap();
         assert!(store.discover_and_load(tmp.path()).is_err());
         assert!(
             store.with_project(|p| p.is_none()),
-            "store must be cleared after a partial load failure"
+            "store must be cleared after a fatal load failure"
         );
     }
 
