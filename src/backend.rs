@@ -149,6 +149,51 @@ impl Backend {
         }
     }
 
+    /// Refresh the in-memory project model after a rename that rewrote
+    /// `Project.m1prj`. The client applies the workspace edit to a buffer it may
+    /// never save (and never tells us via file-watching), so the cached symbol
+    /// table would otherwise keep the old name — making the just-renamed symbol
+    /// read as undefined until the server restarts. We derive the post-rename
+    /// `.m1prj` text from the edit we just computed, reload from it, and
+    /// re-publish so diagnostics reflect the new name immediately.
+    async fn refresh_after_rename(&self, edit: &WorkspaceEdit) {
+        let Some(prj_path) = self
+            .store
+            .with_project(|p| p.map(|lp| lp.m1prj_path.clone()))
+        else {
+            return;
+        };
+        let Ok(prj_uri) = Url::from_file_path(&prj_path) else {
+            return;
+        };
+        let orig = self
+            .docs
+            .get(&prj_uri)
+            .map(|d| d.text.clone())
+            .or_else(|| std::fs::read_to_string(&prj_path).ok());
+        let Some(orig) = orig else {
+            return;
+        };
+        let Some(new_text) = rename::apply_workspace_edit_to(edit, &prj_uri, &orig, self.enc())
+        else {
+            // The rename didn't touch the project file (e.g. a local-only rename).
+            return;
+        };
+        if let Err(e) = self.store.reload_from_m1prj_text(&new_text) {
+            self.client
+                .log_message(
+                    MessageType::WARNING,
+                    format!("m1-lsp: post-rename project refresh failed: {e}"),
+                )
+                .await;
+            return;
+        }
+        let uris: Vec<Url> = self.docs.iter().map(|e| e.key().clone()).collect();
+        for uri in uris {
+            self.publish(uri).await;
+        }
+    }
+
     async fn publish(&self, uri: Url) {
         // Snapshot the doc and drop the shard guard before parsing, so a
         // concurrent did_change on the same shard isn't blocked for the parse.
@@ -708,36 +753,44 @@ impl LanguageServer for Backend {
         // Open buffers win over on-disk copies so an in-flight edit is seen.
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
         // Renaming from within the project file (XML), not a script.
-        if is_m1prj(&uri) {
-            let result = self.store.with_project(|p| match p {
+        let result = if is_m1prj(&uri) {
+            self.store.with_project(|p| match p {
                 Some(lp) => {
                     rename::execute_m1prj(&text, byte, &new_name, uri.clone(), enc, lp, &open_text)
                 }
                 None => Err("no project is loaded".to_string()),
-            });
-            return result.map(Some).map_err(Error::invalid_params);
-        }
-        let cst = m1_core::parse(&text);
-        let file_name = uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
-        let result = self.store.with_project(|p| {
-            rename::execute(
-                cst.root(),
-                byte,
-                &new_name,
-                uri.clone(),
-                &lindex,
-                enc,
-                p,
-                file_name.as_deref(),
-                &open_text,
-            )
-        });
+            })
+        } else {
+            let cst = m1_core::parse(&text);
+            let file_name = uri
+                .to_file_path()
+                .ok()
+                .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+            self.store.with_project(|p| {
+                rename::execute(
+                    cst.root(),
+                    byte,
+                    &new_name,
+                    uri.clone(),
+                    &lindex,
+                    enc,
+                    p,
+                    file_name.as_deref(),
+                    &open_text,
+                )
+            })
+        };
         // An Err is surfaced to the user (Ok(None) would make the client
         // silently do nothing); a successful edit may span several files.
-        result.map(Some).map_err(Error::invalid_params)
+        match result {
+            Ok(edit) => {
+                // Refresh the project model from the edit so the renamed symbol is
+                // live immediately, without waiting for a client file-watch event.
+                self.refresh_after_rename(&edit).await;
+                Ok(Some(edit))
+            }
+            Err(e) => Err(Error::invalid_params(e)),
+        }
     }
 
     async fn semantic_tokens_full(

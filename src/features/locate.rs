@@ -1,5 +1,5 @@
 //! Cursor → CST node → dotted path, plus the m1-typecheck Scope builder.
-use m1_core::{Kind, Node};
+use m1_core::{Field, Kind, Node};
 use m1_typecheck::project::Project;
 use m1_typecheck::resolve::Scope;
 use m1_typecheck::types::ValueType;
@@ -40,6 +40,35 @@ pub fn path_at_byte(root: Node, byte: usize) -> Option<(Node, String)> {
         }
     }
     Some((top, top.text().to_string()))
+}
+
+/// The identifier nodes of a dotted-path node, leftmost first. For
+/// `Root.Engine.Speed` this is `[Root, Engine, Speed]`; for a bare `Speed` it is
+/// `[Speed]`. Anchors are ordinary segments here (`[This, Speed]`).
+pub fn segment_nodes(top: Node) -> Vec<Node> {
+    fn rec<'a>(n: Node<'a>, out: &mut Vec<Node<'a>>) {
+        if n.kind() == Kind::MemberExpression {
+            if let Some(obj) = n.child_by_field(Field::Object) {
+                rec(obj, out);
+            }
+            if let Some(prop) = n.child_by_field(Field::Property) {
+                out.push(prop);
+            }
+        } else {
+            out.push(n);
+        }
+    }
+    let mut out = Vec::new();
+    rec(top, &mut out);
+    out
+}
+
+/// Index of the dotted-path segment whose text span contains `byte`.
+pub fn segment_at_byte(top: Node, byte: usize) -> Option<usize> {
+    segment_nodes(top).iter().position(|s| {
+        let r = s.byte_range();
+        byte >= r.start && byte <= r.end
+    })
 }
 
 /// Infer the type of a single `local` declaration from its initializer
