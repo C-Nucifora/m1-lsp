@@ -110,6 +110,50 @@ fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
     s
 }
 
+/// Hover for an enum-member token, e.g. the trailing `Off` in `Drive State.Off`
+/// — which resolves to neither a project symbol nor a built-in method, but which
+/// the project model fully defines as `EnumType.Member` (name + integer value).
+/// Renders `**{Enum}.{Member}** \`enum member\`\n\n= {value}`.
+///
+/// The segment under the cursor (`seg`, index `i` in `segs`) is the member name.
+/// The enum is identified by the segment to its left when that is the enum's name
+/// (`Drive State.Off`); a bare member (`Off`) is resolved via `enums_with_member`
+/// when it is unambiguous (declared by exactly one enum). Returns `None` when the
+/// segment is not an enum member.
+fn enum_member_markdown(
+    seg: m1_core::Node,
+    i: usize,
+    segs: &[m1_core::Node],
+    project: Option<&Project>,
+) -> Option<String> {
+    let table = project?.symbols();
+    let member = seg.text();
+    // Prefer the explicit `Enum.Member` form: the immediately-preceding segment
+    // names the enum type.
+    let id = if i > 0
+        && let Some(id) = table.enum_by_name(segs[i - 1].text())
+        && table.enum_has_member(id, member)
+    {
+        id
+    } else {
+        // Bare member: accept only when exactly one enum declares it (no ambiguity).
+        match table.enums_with_member(member) {
+            [only] => *only,
+            _ => return None,
+        }
+    };
+    let et = table.enum_type(id);
+    let value = et
+        .members
+        .iter()
+        .find(|(m, _)| m == member)
+        .map(|(_, v)| v)?;
+    Some(format!(
+        "**{}.{member}** `enum member`\n\n= {value}",
+        et.name
+    ))
+}
+
 /// Compact decimal: up to 6 places, trailing zeros trimmed (`0.010000` → `0.01`,
 /// `60.000000` → `60`). Keeps `.m1dbc` multipliers like `9.999e-03` readable.
 fn fmt_num(x: f64) -> String {
@@ -310,6 +354,11 @@ pub fn hover(
                 );
             if object_resolves && !methods.is_empty() {
                 object_method_markdown(seg_text, &methods)
+            } else if let Some(md) = enum_member_markdown(seg, i, &segs, project) {
+                // An enum-member token (`Drive State.Off`, or a bare `Off`) — the
+                // project model defines the enum + member, so describe it rather
+                // than fall through to "type not modelled" (#127).
+                md
             } else if matches!(resolve(&prefix, &scope), Resolution::Opaque) {
                 format!("**{prefix}**\n\nbuilt-in symbol — type not modelled")
             } else {
@@ -694,6 +743,33 @@ mod tests {
         assert!(
             on_method.contains("Integer representation"),
             "AsInteger hover should show its doc: {on_method}"
+        );
+    }
+
+    #[test]
+    fn hover_on_enum_member_renders_enum_member_value() {
+        // `Drive State.Off` — hovering the trailing member `Off` must describe it
+        // as the enum member it is (enum name, member, integer value), not fall
+        // back to "built-in symbol — type not modelled" (#127). The `Drive State`
+        // enum here declares `Off` (ContainerOrder 0) and `Idle` (1).
+        let (_tmp, project) = drive_state_project();
+        let src = "Local State = Drive State.Off;\n";
+        let on_member = hover_value_at(&project, src, "Off", 0);
+        assert!(
+            on_member.contains("Drive State") && on_member.contains("Off"),
+            "enum-member hover should name the enum and member: {on_member}"
+        );
+        assert!(
+            on_member.to_lowercase().contains("enum member"),
+            "enum-member hover should label it an enum member: {on_member}"
+        );
+        assert!(
+            on_member.contains("= 0"),
+            "enum-member hover should show the member's value: {on_member}"
+        );
+        assert!(
+            !on_member.contains("type not modelled"),
+            "enum-member hover must not fall back to the not-modelled message: {on_member}"
         );
     }
 
