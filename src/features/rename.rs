@@ -301,7 +301,7 @@ fn project_scripts(
         open_text(u).or_else(|| {
             u.to_file_path()
                 .ok()
-                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|p| crate::disk_read::read_disk(&p))
         })
     };
     if let Some(t) = read(cursor_uri) {
@@ -315,7 +315,7 @@ fn project_scripts(
         if seen.contains(&u) {
             continue;
         }
-        if let Some(t) = open_text(&u).or_else(|| std::fs::read_to_string(p).ok()) {
+        if let Some(t) = open_text(&u).or_else(|| crate::disk_read::read_disk(p)) {
             seen.insert(u.clone());
             out.push((u, t));
         }
@@ -633,7 +633,7 @@ fn execute_group(
     let prj_uri = Url::from_file_path(&loaded.m1prj_path)
         .map_err(|_| "cannot form a URL for the project file".to_string())?;
     let prj_text = open_text(&prj_uri)
-        .or_else(|| std::fs::read_to_string(&loaded.m1prj_path).ok())
+        .or_else(|| crate::disk_read::read_disk(&loaded.m1prj_path))
         .ok_or_else(|| "cannot read the project file".to_string())?;
     let prj_edits = m1prj_group_edits(&prj_text, &group_path, old_leaf, new_name, enc);
     if prj_edits.is_empty() {
@@ -803,7 +803,7 @@ pub fn execute(
     let prj_uri = Url::from_file_path(&loaded.m1prj_path)
         .map_err(|_| "cannot form a URL for the project file".to_string())?;
     let prj_text = open_text(&prj_uri)
-        .or_else(|| std::fs::read_to_string(&loaded.m1prj_path).ok())
+        .or_else(|| crate::disk_read::read_disk(&loaded.m1prj_path))
         .ok_or_else(|| "cannot read the project file".to_string())?;
     let prj_edit =
         m1prj_name_edit(&prj_text, &target_path, old_leaf, new_name, enc).ok_or_else(|| {
@@ -966,7 +966,7 @@ pub fn execute_m1prj(
         let Ok(su) = Url::from_file_path(p) else {
             continue;
         };
-        let Some(stext) = open_text(&su).or_else(|| std::fs::read_to_string(p).ok()) else {
+        let Some(stext) = open_text(&su).or_else(|| crate::disk_read::read_disk(p)) else {
             continue;
         };
         let scst = m1_core::parse(&stext);
@@ -1225,6 +1225,66 @@ mod tests {
         // `Threshold` belongs to Root.Other.Threshold and is left alone.
         let be = changes_for(&we, "Other.Update.m1scr");
         assert_eq!(be.len(), 1, "only the absolute Root.Engine.Threshold ref");
+    }
+
+    // #125: a disk-sourced script that is NOT valid UTF-8 (a Windows-1252 `°`
+    // = 0xB0 in a comment) must still be decoded, parsed, and included in the
+    // rename's WorkspaceEdit — previously `read_to_string(p).ok()` turned the
+    // bad-encoding read into `None` and silently dropped the file, leaving its
+    // occurrences un-renamed.
+    #[test]
+    fn renames_into_non_utf8_script() {
+        let (tmp, store) = setup();
+        // The renamed symbol lives under Root.Engine; this third script's owner
+        // is Root.Engine.Update so a bare `Engine.Threshold` resolves to it.
+        let a = "local a = Engine.Threshold;\n";
+        std::fs::write(tmp.path().join("Engine.Update.m1scr"), a).unwrap();
+        // A SECOND script, owned by Root.Other.Update, containing a lone 0xB0
+        // byte in a comment (Windows-1252 `°`) — invalid UTF-8 — plus an
+        // absolute reference to the renamed Root.Engine.Threshold symbol.
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"// temp in \xb0C threshold\n");
+        b.extend_from_slice(b"local g = Root.Engine.Threshold;\n");
+        std::fs::write(tmp.path().join("Other.Update.m1scr"), &b).unwrap();
+        // Sanity: the file really is not UTF-8, so the old read path would drop it.
+        assert!(
+            std::fs::read_to_string(tmp.path().join("Other.Update.m1scr")).is_err(),
+            "the fixture must be non-UTF-8 for this test to be meaningful"
+        );
+        store.discover_and_load(tmp.path()).unwrap();
+
+        let a_uri = Url::from_file_path(tmp.path().join("Engine.Update.m1scr")).unwrap();
+        let cst = m1_core::parse(a);
+        let li = LineIndex::new(a);
+        let byte = a.find("Threshold").unwrap();
+        let no_open = |_: &Url| None;
+
+        let we = store
+            .with_project(|p| {
+                execute(
+                    cst.root(),
+                    byte,
+                    "Trip Point",
+                    a_uri.clone(),
+                    &li,
+                    PositionEncoding::Utf16,
+                    p,
+                    Some("Engine.Update.m1scr"),
+                    &no_open,
+                )
+            })
+            .expect("rename should succeed");
+
+        // The non-UTF-8 script must be present in the WorkspaceEdit with its one
+        // absolute reference rewritten — not silently absent.
+        let be = changes_for(&we, "Other.Update.m1scr");
+        assert_eq!(
+            be.len(),
+            1,
+            "the non-UTF-8 script's Root.Engine.Threshold reference must be renamed, \
+             not silently dropped: {be:?}"
+        );
+        assert_eq!(be[0].new_text, "Trip Point");
     }
 
     // #74: renaming from a *reference* (read) site must also rewrite the
