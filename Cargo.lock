@@ -571,17 +571,8 @@ dependencies = [
 
 [[package]]
 name = "m1-core"
-version = "0.4.1"
-source = "git+https://github.com/C-Nucifora/m1-core.git?tag=v0.4.1#dc0fcd93a6cc1cda118a30ad9b1af60864af2894"
-dependencies = [
- "tree-sitter",
- "tree-sitter-m1",
-]
-
-[[package]]
-name = "m1-core"
-version = "0.5.0"
-source = "git+https://github.com/C-Nucifora/m1-core.git?tag=v0.5.0#8f3018ce9a5b3218d4e39a0a8c8c627a15cdbffe"
+version = "0.6.0"
+source = "git+https://github.com/C-Nucifora/m1-core.git?tag=v0.6.0#1a11f62e74cb22fbaad6b07a3aa5f7cd0e12d496"
 dependencies = [
  "tree-sitter",
  "tree-sitter-m1",
@@ -589,32 +580,32 @@ dependencies = [
 
 [[package]]
 name = "m1-fmt"
-version = "0.4.3"
-source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.4.3#a4f53e2f4e765a656e128fb6aeeda671010df926"
+version = "0.5.0"
+source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.5.0#f8a9589cd5c3664d8606caf763d82fdccba83c53"
 dependencies = [
  "clap",
- "m1-core 0.4.1",
+ "m1-core",
  "m1-workspace",
  "toml",
 ]
 
 [[package]]
 name = "m1-lint"
-version = "0.7.0"
-source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.7.0#3fb55c412ef69ea4aa1cd0dc7089eee0e83da047"
+version = "0.8.0"
+source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.8.0#d7a6326538f713b54ccd62b2e58c01831ed5045f"
 dependencies = [
  "glob",
- "m1-core 0.5.0",
+ "m1-core",
  "m1-workspace",
  "toml",
 ]
 
 [[package]]
 name = "m1-lsp"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "dashmap 6.2.1",
- "m1-core 0.5.0",
+ "m1-core",
  "m1-fmt",
  "m1-lint",
  "m1-typecheck",
@@ -629,11 +620,11 @@ dependencies = [
 
 [[package]]
 name = "m1-typecheck"
-version = "0.19.0"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.19.0#6ac601361b8f2eab1b53240f7eedaf22e4a17172"
+version = "0.20.0"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.20.0#2cbf2411188c00ffa11d9a37924f527b3ef566f3"
 dependencies = [
  "clap",
- "m1-core 0.5.0",
+ "m1-core",
  "m1-workspace",
  "roxmltree",
  "serde",
@@ -643,8 +634,8 @@ dependencies = [
 
 [[package]]
 name = "m1-workspace"
-version = "0.2.0"
-source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.2.0#4e5d55fdd0d950b1a79d673418f21ccf00c2e6fb"
+version = "0.3.0"
+source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.3.0#35080eb011f35e0d967fdaaf9d9f2996d0a6d6c9"
 
 [[package]]
 name = "memchr"
@@ -1156,8 +1147,8 @@ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 
 [[package]]
 name = "tree-sitter-m1"
-version = "0.4.0"
-source = "git+https://github.com/C-Nucifora/tree-sitter-m1.git?tag=v0.4.0#a0f0cc897260ca15c86f3ee72ae8593c259c39c7"
+version = "0.4.1"
+source = "git+https://github.com/C-Nucifora/tree-sitter-m1.git?tag=v0.4.1#5a7a19dc9c5bdfc334470f43e15d2ee832e9277e"
 dependencies = [
  "cc",
  "tree-sitter-language",

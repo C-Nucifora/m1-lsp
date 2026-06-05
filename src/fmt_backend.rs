@@ -23,8 +23,23 @@ impl Default for M1Fmt {
     }
 }
 
+/// Whether `src` nests deeper than is safe to format.
+///
+/// m1-fmt's pretty-printer recurses over expression nesting, so a pathologically
+/// deep document overflows the stack and aborts the whole language server — an
+/// uncatchable crash that would take down language support for the entire
+/// workspace. The server must not hand such input to the formatter; declining to
+/// format it (no edit) is the safe response to adversarial input. Computed with
+/// m1-core's iterative `max_depth`, so the guard itself never overflows.
+fn too_deep_to_format(src: &str) -> bool {
+    m1_core::parse(src).root().max_depth() > m1_core::MAX_RECURSION_DEPTH
+}
+
 impl Formatter for M1Fmt {
     fn format(&self, src: &str) -> Option<String> {
+        if too_deep_to_format(src) {
+            return None;
+        }
         let opts = self.opts.read().unwrap();
         match m1_fmt::format_str_with(src, &opts) {
             Ok(result) if result.changed => Some(result.output),
@@ -38,6 +53,9 @@ impl Formatter for M1Fmt {
         start_line: u32,
         end_line: u32,
     ) -> Option<(u32, u32, String)> {
+        if too_deep_to_format(src) {
+            return None;
+        }
         let opts = self.opts.read().unwrap();
         match m1_fmt::format_range(src, start_line as usize, end_line as usize, &opts) {
             Ok(Some(r)) if r.changed => Some((r.start_line as u32, r.end_line as u32, r.output)),
@@ -86,5 +104,15 @@ mod tests {
                 .format_range("local a = 1;\nlocal b = 2;\n", 0, 0)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn pathologically_deep_input_is_declined_not_crashed() {
+        // A 50k-deep expression overflows m1-fmt's recursive printer; the backend
+        // must decline to format it (None) rather than abort the server.
+        let src = format!("x = {}1{};\n", "(".repeat(50_000), ")".repeat(50_000));
+        let f = M1Fmt::new();
+        assert!(f.format(&src).is_none());
+        assert!(f.format_range(&src, 0, 0).is_none());
     }
 }
