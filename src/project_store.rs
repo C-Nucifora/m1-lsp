@@ -24,7 +24,7 @@ impl LoadedProject {
     /// can't form a file URL. Mirrors the goto-definition resolution.
     pub fn symbol_location(&self, sym: &Symbol) -> Option<Location> {
         let (target, line) = match &sym.filename {
-            Some(f) => (self.root.join(f), 0),
+            Some(f) => (contained_join(&self.root, f)?, 0),
             None => (self.m1prj_path.clone(), sym.def_line?),
         };
         let uri = Url::from_file_path(&target).ok()?;
@@ -35,6 +35,33 @@ impl LoadedProject {
     }
 }
 
+/// Maximum directory depth [`walk_scripts`] descends (defense-in-depth against a
+/// pathologically deep tree).
+const MAX_WALK_DEPTH: usize = 64;
+
+/// Join an (untrusted) `.m1prj` `Filename=` value to the project root, rejecting
+/// anything that would escape the project tree.
+///
+/// A `.m1prj` comes from an arbitrary cloned repo, so its `Filename=` is
+/// attacker-controllable. `Path::join` discards the base entirely for an
+/// *absolute* value (`Filename="/etc/passwd"`), and preserves `..` segments, so
+/// a naive join can yield a Location pointing anywhere on disk that the editor
+/// would open on goto-definition / workspace-symbol click (#134). Accept only a
+/// relative path whose components are all normal (no root, prefix, or `..`), so
+/// the result is lexically contained in `root`.
+pub(crate) fn contained_join(root: &Path, filename: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let rel = Path::new(filename);
+    for comp in rel.components() {
+        match comp {
+            Component::Normal(_) | Component::CurDir => {}
+            // RootDir/Prefix (absolute) or ParentDir (`..`) could escape root.
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir => return None,
+        }
+    }
+    Some(root.join(rel))
+}
+
 /// Every `*.m1scr` file under `root`, recursively (sorted). Taken from the
 /// filesystem rather than the symbol table's `Filename` attributes, because a
 /// real `.m1prj` typically omits `Filename=` (scripts are matched to components
@@ -42,21 +69,34 @@ impl LoadedProject {
 /// Computed once at load and cached in [`LoadedProject::script_files`] for the
 /// workspace-wide features (cross-file references, rename).
 fn walk_scripts(root: &Path) -> Vec<PathBuf> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > MAX_WALK_DEPTH {
+            return;
+        }
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for e in entries.flatten() {
+            // Use the entry's own (non-following) file type: a crafted in-tree
+            // symlink to an out-of-tree directory must not be descended, or the
+            // server would enumerate arbitrary host `*.m1scr` files into the
+            // workspace symbol set (mirrors m1-workspace#7).
+            let Ok(ft) = e.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
             let p = e.path();
-            if p.is_dir() {
-                walk(&p, out);
+            if ft.is_dir() {
+                walk(&p, depth + 1, out);
             } else if p.extension().and_then(|x| x.to_str()) == Some("m1scr") {
                 out.push(p);
             }
         }
     }
     let mut out = Vec::new();
-    walk(root, &mut out);
+    walk(root, 0, &mut out);
     out.sort();
     out
 }
