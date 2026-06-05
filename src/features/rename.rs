@@ -102,21 +102,22 @@ pub fn is_valid_identifier(name: &str) -> bool {
 }
 
 fn collect_local_edits(
-    n: Node,
+    root: Node,
     name: &str,
     new_name: &str,
     li: &LineIndex,
     enc: PositionEncoding,
     out: &mut Vec<TextEdit>,
 ) {
-    if is_local_ref(n, name) {
-        out.push(TextEdit {
-            range: to_range(&n.byte_range(), li, enc),
-            new_text: new_name.to_string(),
-        });
-    }
-    for c in n.children() {
-        collect_local_edits(c, name, new_name, li, enc, out);
+    // Iterative pre-order traversal (m1-core's `descendants`) rather than
+    // recursion, so a pathologically deep tree can't overflow the stack (#133).
+    for n in root.descendants() {
+        if is_local_ref(n, name) {
+            out.push(TextEdit {
+                range: to_range(&n.byte_range(), li, enc),
+                new_text: new_name.to_string(),
+            });
+        }
     }
 }
 
@@ -237,15 +238,10 @@ fn collect_ref_edits(
     li: &LineIndex,
     enc: PositionEncoding,
 ) -> Vec<TextEdit> {
-    fn walk(
-        n: Node,
-        target_path: &str,
-        new_name: &str,
-        scope: &Scope,
-        li: &LineIndex,
-        enc: PositionEncoding,
-        out: &mut Vec<TextEdit>,
-    ) {
+    // Iterative pre-order traversal (m1-core's `descendants`) rather than
+    // recursion, so a pathologically deep tree can't overflow the stack (#133).
+    let mut out = Vec::new();
+    for n in root.descendants() {
         if is_top_path(n)
             && let Some((sym, k)) = resolve_prefix(n.text(), scope)
             && sym.path == target_path
@@ -256,12 +252,7 @@ fn collect_ref_edits(
                 new_text: new_name.to_string(),
             });
         }
-        for c in n.children() {
-            walk(c, target_path, new_name, scope, li, enc, out);
-        }
     }
-    let mut out = Vec::new();
-    walk(root, target_path, new_name, scope, li, enc, &mut out);
     out
 }
 
@@ -480,22 +471,13 @@ fn collect_group_ref_edits(
 ) -> Vec<TextEdit> {
     let group_depth = group_path.split('.').count() - 1;
     let prefix = format!("{group_path}.");
-    #[allow(clippy::too_many_arguments)]
-    fn walk(
-        n: Node,
-        group_path: &str,
-        prefix: &str,
-        old_leaf: &str,
-        new_name: &str,
-        group_depth: usize,
-        scope: &Scope,
-        li: &LineIndex,
-        enc: PositionEncoding,
-        out: &mut Vec<TextEdit>,
-    ) {
+    // Iterative pre-order traversal (m1-core's `descendants`) rather than
+    // recursion, so a pathologically deep tree can't overflow the stack (#133).
+    let mut out = Vec::new();
+    for n in root.descendants() {
         if is_top_path(n)
             && let Some((sym, k)) = resolve_prefix(n.text(), scope)
-            && (sym.path == group_path || sym.path.starts_with(prefix))
+            && (sym.path == group_path || sym.path.starts_with(&prefix))
         {
             let sym_last = sym.path.split('.').count() - 1;
             let j = sym_last - group_depth; // segments from the leaf up to the group
@@ -509,34 +491,7 @@ fn collect_group_ref_edits(
                 });
             }
         }
-        for c in n.children() {
-            walk(
-                c,
-                group_path,
-                prefix,
-                old_leaf,
-                new_name,
-                group_depth,
-                scope,
-                li,
-                enc,
-                out,
-            );
-        }
     }
-    let mut out = Vec::new();
-    walk(
-        root,
-        group_path,
-        &prefix,
-        old_leaf,
-        new_name,
-        group_depth,
-        scope,
-        li,
-        enc,
-        &mut out,
-    );
     out
 }
 

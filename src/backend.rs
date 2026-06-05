@@ -560,9 +560,14 @@ impl LanguageServer for Backend {
         // "Implementation" of a channel = where it is written (produced). With a
         // project loaded, search every `.m1scr`; open buffers win over disk.
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
-        let locs = self.store.with_project(|p| {
-            p.and_then(|lp| {
-                references::project_implementations(lp, &uri, &text, byte, enc, &open_text)
+        // Snapshot the script-path list, drop the project RwLock guard, then run
+        // the read+parse-every-script loop off the async worker (#135).
+        let script_files = self
+            .store
+            .with_project(|p| p.map(|lp| lp.script_files.clone()));
+        let locs = script_files.and_then(|scripts| {
+            tokio::task::block_in_place(|| {
+                references::project_implementations(&scripts, &uri, &text, byte, enc, &open_text)
             })
         });
         Ok(locs.map(GotoDefinitionResponse::Array))
@@ -673,8 +678,12 @@ impl LanguageServer for Backend {
         );
         let enc = self.enc();
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
-        Ok(self.store.with_project(|p| {
-            p.and_then(|lp| call_hierarchy::prepare(lp, &uri, &text, byte, enc, &open_text))
+        // Reads + parses every script under the live project; run off the async
+        // worker via `block_in_place` (#135).
+        Ok(tokio::task::block_in_place(|| {
+            self.store.with_project(|p| {
+                p.and_then(|lp| call_hierarchy::prepare(lp, &uri, &text, byte, enc, &open_text))
+            })
         }))
     }
 
@@ -684,8 +693,12 @@ impl LanguageServer for Backend {
     ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
         let enc = self.enc();
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
-        Ok(self.store.with_project(|p| {
-            p.and_then(|lp| call_hierarchy::incoming(lp, &params.item, enc, &open_text))
+        // Reads + parses every script under the live project; run off the async
+        // worker via `block_in_place` (#135).
+        Ok(tokio::task::block_in_place(|| {
+            self.store.with_project(|p| {
+                p.and_then(|lp| call_hierarchy::incoming(lp, &params.item, enc, &open_text))
+            })
         }))
     }
 
@@ -695,8 +708,12 @@ impl LanguageServer for Backend {
     ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
         let enc = self.enc();
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
-        Ok(self.store.with_project(|p| {
-            p.and_then(|lp| call_hierarchy::outgoing(lp, &params.item, enc, &open_text))
+        // Reads + parses every script under the live project; run off the async
+        // worker via `block_in_place` (#135).
+        Ok(tokio::task::block_in_place(|| {
+            self.store.with_project(|p| {
+                p.and_then(|lp| call_hierarchy::outgoing(lp, &params.item, enc, &open_text))
+            })
         }))
     }
 
@@ -752,13 +769,24 @@ impl LanguageServer for Backend {
         let enc = self.enc();
         // Open buffers win over on-disk copies so an in-flight edit is seen.
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
-        // Renaming from within the project file (XML), not a script.
+        // A project-wide rename reads + parses every script. Those functions
+        // borrow the live project for the duration, so we keep the RwLock guard
+        // around the call but run it under `block_in_place` so the blocking
+        // read+parse doesn't stall an async worker (#135).
         let result = if is_m1prj(&uri) {
-            self.store.with_project(|p| match p {
-                Some(lp) => {
-                    rename::execute_m1prj(&text, byte, &new_name, uri.clone(), enc, lp, &open_text)
-                }
-                None => Err("no project is loaded".to_string()),
+            tokio::task::block_in_place(|| {
+                self.store.with_project(|p| match p {
+                    Some(lp) => rename::execute_m1prj(
+                        &text,
+                        byte,
+                        &new_name,
+                        uri.clone(),
+                        enc,
+                        lp,
+                        &open_text,
+                    ),
+                    None => Err("no project is loaded".to_string()),
+                })
             })
         } else {
             let cst = m1_core::parse(&text);
@@ -766,18 +794,20 @@ impl LanguageServer for Backend {
                 .to_file_path()
                 .ok()
                 .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
-            self.store.with_project(|p| {
-                rename::execute(
-                    cst.root(),
-                    byte,
-                    &new_name,
-                    uri.clone(),
-                    &lindex,
-                    enc,
-                    p,
-                    file_name.as_deref(),
-                    &open_text,
-                )
+            tokio::task::block_in_place(|| {
+                self.store.with_project(|p| {
+                    rename::execute(
+                        cst.root(),
+                        byte,
+                        &new_name,
+                        uri.clone(),
+                        &lindex,
+                        enc,
+                        p,
+                        file_name.as_deref(),
+                        &open_text,
+                    )
+                })
             })
         };
         // An Err is surfaced to the user (Ok(None) would make the client
@@ -878,9 +908,16 @@ impl LanguageServer for Backend {
         // With a project loaded, search every `.m1scr` for a project symbol
         // (#29); locals stay file-local. Open buffers win over on-disk text.
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
-        if let Some(locs) = self.store.with_project(|p| {
-            p.map(|lp| references::project_references(lp, &uri, &text, byte, enc, &open_text))
-        }) {
+        // Snapshot the small script-path list, then drop the project RwLock guard
+        // before the read+parse-every-script loop, and run that blocking work via
+        // `block_in_place` so it doesn't stall an async worker (#135).
+        let script_files = self
+            .store
+            .with_project(|p| p.map(|lp| lp.script_files.clone()));
+        if let Some(scripts) = script_files {
+            let locs = tokio::task::block_in_place(|| {
+                references::project_references(&scripts, &uri, &text, byte, enc, &open_text)
+            });
             return Ok(locs);
         }
         // Project-less mode: single-file references.

@@ -10,7 +10,6 @@
 use crate::convert::range;
 use crate::features::locate::{collect_locals, node_at_byte, path_at_byte};
 use crate::line_index::{LineIndex, PositionEncoding};
-use crate::project_store::LoadedProject;
 use m1_core::{Field, Kind, Node};
 use tower_lsp::lsp_types::{DocumentHighlight, DocumentHighlightKind, Location, Url};
 
@@ -50,31 +49,33 @@ fn top_path_node(n: Node) -> Node {
 
 /// Every identifier that refers to the local named `name` (declaration or use),
 /// excluding member-access properties and type-annotation names.
-fn collect_local_idents<'a>(n: Node<'a>, name: &str, out: &mut Vec<Node<'a>>) {
-    if n.kind() == Kind::Identifier
-        && n.text() == name
-        && !is_member_property(n)
-        && !in_type_annotation(n)
-    {
-        out.push(n);
-    }
-    for c in n.children() {
-        collect_local_idents(c, name, out);
+///
+/// Iterative pre-order traversal (m1-core's `descendants`) rather than recursion,
+/// so a pathologically deep tree can't overflow the call stack (#133).
+fn collect_local_idents<'a>(root: Node<'a>, name: &str, out: &mut Vec<Node<'a>>) {
+    for n in root.descendants() {
+        if n.kind() == Kind::Identifier
+            && n.text() == name
+            && !is_member_property(n)
+            && !in_type_annotation(n)
+        {
+            out.push(n);
+        }
     }
 }
 
-/// Every top-level path node whose dotted text equals `path`.
-fn collect_path_matches<'a>(n: Node<'a>, path: &str, out: &mut Vec<Node<'a>>) {
-    let is_path = matches!(n.kind(), Kind::Identifier | Kind::MemberExpression);
-    let is_top = n
-        .parent()
-        .map(|p| p.kind() != Kind::MemberExpression)
-        .unwrap_or(true);
-    if is_path && is_top && !in_type_annotation(n) && n.text() == path {
-        out.push(n);
-    }
-    for c in n.children() {
-        collect_path_matches(c, path, out);
+/// Every top-level path node whose dotted text equals `path`. Iterative pre-order
+/// traversal (see [`collect_local_idents`]) — stack-safe on deep input (#133).
+fn collect_path_matches<'a>(root: Node<'a>, path: &str, out: &mut Vec<Node<'a>>) {
+    for n in root.descendants() {
+        let is_path = matches!(n.kind(), Kind::Identifier | Kind::MemberExpression);
+        let is_top = n
+            .parent()
+            .map(|p| p.kind() != Kind::MemberExpression)
+            .unwrap_or(true);
+        if is_path && is_top && !in_type_annotation(n) && n.text() == path {
+            out.push(n);
+        }
     }
 }
 
@@ -125,7 +126,10 @@ fn is_write(n: Node) -> bool {
 /// everything else is a read. Skips type-annotation names. Powers the
 /// call-hierarchy channel↔script read/write index ([`super::call_hierarchy`]).
 pub(crate) fn path_occurrences(root: Node) -> Vec<(String, std::ops::Range<usize>, bool)> {
-    fn walk(n: Node, out: &mut Vec<(String, std::ops::Range<usize>, bool)>) {
+    // Iterative pre-order traversal (m1-core's `descendants`) rather than
+    // recursion, so a pathologically deep tree can't overflow the stack (#133).
+    let mut out = Vec::new();
+    for n in root.descendants() {
         let is_path = matches!(n.kind(), Kind::Identifier | Kind::MemberExpression);
         let is_top = n
             .parent()
@@ -134,12 +138,7 @@ pub(crate) fn path_occurrences(root: Node) -> Vec<(String, std::ops::Range<usize
         if is_path && is_top && !in_type_annotation(n) {
             out.push((n.text().to_string(), n.byte_range(), is_write(n)));
         }
-        for c in n.children() {
-            walk(c, out);
-        }
     }
-    let mut out = Vec::new();
-    walk(root, &mut out);
     out
 }
 
@@ -207,13 +206,17 @@ fn path_locations(
 }
 
 /// Project-wide references (#29). A local stays file-local; a project symbol is
-/// searched across every `.m1scr` in the workspace. The script set is taken from
-/// the filesystem (a real `.m1prj` carries no `Filename=` attributes, so the
-/// symbol-table list would be empty). `open_text` supplies the in-memory buffer
-/// for a file when one is open (newer than disk); files not open are read from
-/// disk. The cursor's own file is always included.
+/// searched across every `.m1scr` in the workspace. The script set (`script_files`)
+/// is taken from the filesystem (a real `.m1prj` carries no `Filename=` attributes,
+/// so the symbol-table list would be empty). `open_text` supplies the in-memory
+/// buffer for a file when one is open (newer than disk); files not open are read
+/// from disk. The cursor's own file is always included.
+///
+/// Takes the script-path slice by reference (rather than `&LoadedProject`) so the
+/// caller can clone the small `Vec<PathBuf>` and release the project `RwLock`
+/// guard *before* this read+parse-every-script loop runs (#135).
 pub fn project_references(
-    loaded: &LoadedProject,
+    script_files: &[std::path::PathBuf],
     cursor_uri: &Url,
     cursor_text: &str,
     byte: usize,
@@ -231,7 +234,7 @@ pub fn project_references(
             // Gather (uri, text) for the cursor file first, then every other
             // project script (deduped by uri), preferring open buffers.
             let mut files: Vec<(Url, String)> = vec![(cursor_uri.clone(), cursor_text.to_string())];
-            for p in &loaded.script_files {
+            for p in script_files {
                 let Ok(uri) = Url::from_file_path(p) else {
                     continue;
                 };
@@ -281,7 +284,7 @@ fn path_write_locations(
 /// declaration / assignment sites within the file. Mirrors
 /// [`project_references`] but keeps only write occurrences.
 pub fn project_implementations(
-    loaded: &LoadedProject,
+    script_files: &[std::path::PathBuf],
     cursor_uri: &Url,
     cursor_text: &str,
     byte: usize,
@@ -306,7 +309,7 @@ pub fn project_implementations(
         }
         RefTarget::Path(path) => {
             let mut files: Vec<(Url, String)> = vec![(cursor_uri.clone(), cursor_text.to_string())];
-            for p in &loaded.script_files {
+            for p in script_files {
                 let Ok(uri) = Url::from_file_path(p) else {
                     continue;
                 };
@@ -422,6 +425,33 @@ mod tests {
     }
 
     #[test]
+    fn path_occurrences_do_not_overflow_on_deep_input() {
+        // Regression for #133: the iterative pre-order walk must not overflow on a
+        // pathologically deep document. Reaching the assertion is the proof — a
+        // stack overflow would abort the process. Default test-thread stack. (The
+        // walk also climbs parents per node, unchanged O(n²), so 20_000 keeps the
+        // test quick while staying above the ~18_000 pre-fix abort point.)
+        let depth = 20_000;
+        let mut src = String::with_capacity(depth * 2 + 8);
+        src.push_str("x = ");
+        for _ in 0..depth {
+            src.push('(');
+        }
+        src.push('1');
+        for _ in 0..depth {
+            src.push(')');
+        }
+        src.push_str(";\n");
+        let cst = m1_core::parse(&src);
+        let occ = path_occurrences(cst.root());
+        // The assignment target `x` is the one top-level path occurrence.
+        assert!(
+            occ.iter().any(|(p, _, w)| p == "x" && *w),
+            "expected the write to `x`"
+        );
+    }
+
+    #[test]
     fn project_references_span_multiple_scripts() {
         use crate::project_store::ProjectStore;
         use std::io::Write;
@@ -453,7 +483,7 @@ mod tests {
         let locs = store
             .with_project(|p| {
                 project_references(
-                    p.unwrap(),
+                    &p.unwrap().script_files,
                     &a_uri,
                     a_src,
                     byte,
@@ -509,7 +539,7 @@ mod tests {
         let locs = store
             .with_project(|p| {
                 project_implementations(
-                    p.unwrap(),
+                    &p.unwrap().script_files,
                     &b_uri,
                     b_src,
                     byte,
@@ -575,7 +605,7 @@ mod tests {
         let locs = store
             .with_project(|p| {
                 project_references(
-                    p.unwrap(),
+                    &p.unwrap().script_files,
                     &a_uri,
                     a_src,
                     0,

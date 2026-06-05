@@ -13,13 +13,11 @@ fn unsupported_c_tokens(
 ) -> Vec<LspDiag> {
     let intr = m1_typecheck::intrinsics::get();
     let mut out = Vec::new();
-    fn walk(
-        n: m1_core::Node,
-        intr: &'static m1_typecheck::intrinsics::Intrinsics,
-        li: &LineIndex,
-        enc: PositionEncoding,
-        out: &mut Vec<LspDiag>,
-    ) {
+    // Iterate the tree with m1-core's explicit work-stack pre-order iterator
+    // rather than recursion, so a pathologically deep document can't overflow the
+    // call stack (#133). This pass runs on every open/change, so a deeply nested
+    // script must not abort the server here either.
+    for n in root.descendants() {
         if let Some(replacement) = intr.unsupported_c_token(n.kind_str()) {
             out.push(LspDiag {
                 range: convert::range(&n.byte_range(), li, enc),
@@ -30,11 +28,7 @@ fn unsupported_c_tokens(
                 ..Default::default()
             });
         }
-        for c in n.children() {
-            walk(c, intr, li, enc, out);
-        }
     }
-    walk(root, intr, li, enc, &mut out);
     out
 }
 
