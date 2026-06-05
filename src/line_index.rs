@@ -37,7 +37,16 @@ impl LineIndex {
     }
 
     pub fn position(&self, byte: usize, enc: PositionEncoding) -> Position {
-        let byte = byte.min(self.text.len());
+        let mut byte = byte.min(self.text.len());
+        // Round down to a UTF-8 char boundary. A diagnostic byte range can end
+        // mid-codepoint (e.g. an unterminated string/comment containing a
+        // multibyte char like `é`/`°`/an emoji); slicing `text[..byte]` at a
+        // non-boundary would panic and, propagating out of the publish future,
+        // abort the entire language server (#132). Line starts are always
+        // boundaries (they follow `\n`), so only the upper bound needs flooring.
+        while byte > 0 && !self.text.is_char_boundary(byte) {
+            byte -= 1;
+        }
         let line = self.line_of(byte);
         let line_start = self.line_starts[line];
         let slice = &self.text[line_start..byte];
@@ -124,5 +133,23 @@ mod tests {
     fn empty_document() {
         let li = idx("");
         assert_eq!(li.position(0, PositionEncoding::Utf16), Position::new(0, 0));
+    }
+
+    #[test]
+    fn position_with_mid_codepoint_byte_does_not_panic() {
+        // #132: a diagnostic byte range can end inside a multibyte char (e.g. an
+        // unterminated comment containing `𝄞`). `position` must clamp to a char
+        // boundary instead of panicking and aborting the whole server.
+        let s = "/* é 𝄞"; // '𝄞' occupies bytes 6..10
+        let li = idx(s);
+        // Byte 7 is inside the 4-byte '𝄞' — must behave like byte 6, not panic.
+        assert_eq!(
+            li.position(7, PositionEncoding::Utf16),
+            li.position(6, PositionEncoding::Utf16)
+        );
+        assert_eq!(li.position(7, PositionEncoding::Utf16), Position::new(0, 5));
+        // Past-end offsets must also be safe.
+        let _ = li.position(s.len(), PositionEncoding::Utf16);
+        let _ = li.position(9999, PositionEncoding::Utf8);
     }
 }

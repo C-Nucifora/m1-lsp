@@ -46,20 +46,37 @@ pub fn path_at_byte(root: Node, byte: usize) -> Option<(Node, String)> {
 /// `Root.Engine.Speed` this is `[Root, Engine, Speed]`; for a bare `Speed` it is
 /// `[Speed]`. Anchors are ordinary segments here (`[This, Speed]`).
 pub fn segment_nodes(top: Node) -> Vec<Node> {
-    fn rec<'a>(n: Node<'a>, out: &mut Vec<Node<'a>>) {
+    // Descend the left (Object) spine iteratively rather than recursively, so a
+    // deeply nested member chain can't overflow the call stack (#133). The
+    // recursive form visited Object first then pushed Property, yielding segments
+    // leftmost-first; we reproduce that by collecting each member's Property while
+    // walking down, then reversing (and appending the leftmost base node, which
+    // the recursion emitted first).
+    let mut props = Vec::new(); // properties, innermost-first
+    let mut base = None; // the leftmost non-member node, if any
+    let mut n = top;
+    loop {
         if n.kind() == Kind::MemberExpression {
-            if let Some(obj) = n.child_by_field(Field::Object) {
-                rec(obj, out);
-            }
             if let Some(prop) = n.child_by_field(Field::Property) {
-                out.push(prop);
+                props.push(prop);
             }
+            if let Some(obj) = n.child_by_field(Field::Object) {
+                n = obj;
+                continue;
+            }
+            // Member with no Object field: the recursion would have pushed only
+            // its Property (already recorded) and stopped — no base node.
+            break;
         } else {
-            out.push(n);
+            base = Some(n);
+            break;
         }
     }
     let mut out = Vec::new();
-    rec(top, &mut out);
+    if let Some(b) = base {
+        out.push(b);
+    }
+    out.extend(props.into_iter().rev());
     out
 }
 
@@ -101,8 +118,11 @@ pub fn local_decl_type(decl: Node) -> ValueType {
 
 /// Collect locals (name -> inferred type) from the CST, mirroring m1-typecheck.
 pub fn collect_locals(root: Node) -> HashMap<String, ValueType> {
+    // Iterate the tree with m1-core's explicit work-stack pre-order iterator
+    // rather than recursion, so a pathologically deep document can't overflow the
+    // call stack (#133). Same pre-order visit, same result.
     let mut locals = HashMap::new();
-    fn walk(n: Node, locals: &mut HashMap<String, ValueType>) {
+    for n in root.descendants() {
         if n.kind() == Kind::LocalDeclaration
             && let Some(name) = n
                 .named_children()
@@ -111,11 +131,7 @@ pub fn collect_locals(root: Node) -> HashMap<String, ValueType> {
         {
             locals.insert(name.text().to_string(), local_decl_type(n));
         }
-        for c in n.children() {
-            walk(c, locals);
-        }
     }
-    walk(root, &mut locals);
     locals
 }
 

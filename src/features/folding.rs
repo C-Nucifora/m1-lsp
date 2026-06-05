@@ -8,18 +8,19 @@ use m1_core::{Kind, Node};
 use tower_lsp::lsp_types::{FoldingRange, FoldingRangeKind};
 
 pub fn folding_ranges(root: Node, li: &LineIndex, enc: PositionEncoding) -> Vec<FoldingRange> {
+    // Iterate the tree with m1-core's explicit work-stack pre-order iterator
+    // rather than recursion, so a pathologically deep document can't overflow the
+    // call stack (#133). Same pre-order visit, same result.
     let mut out = Vec::new();
-    collect(root, li, enc, &mut out);
-    out
-}
-
-fn collect(n: Node, li: &LineIndex, enc: PositionEncoding, out: &mut Vec<FoldingRange>) {
-    let kind = match n.kind() {
-        Kind::Block => Some(None),
-        Kind::BlockComment => Some(Some(FoldingRangeKind::Comment)),
-        _ => None,
-    };
-    if let Some(fold_kind) = kind {
+    for n in root.descendants() {
+        let kind = match n.kind() {
+            Kind::Block => Some(None),
+            Kind::BlockComment => Some(Some(FoldingRangeKind::Comment)),
+            _ => None,
+        };
+        let Some(fold_kind) = kind else {
+            continue;
+        };
         let r = n.byte_range();
         let start = li.position(r.start, enc);
         let end = li.position(r.end, enc);
@@ -35,9 +36,7 @@ fn collect(n: Node, li: &LineIndex, enc: PositionEncoding, out: &mut Vec<Folding
             });
         }
     }
-    for c in n.children() {
-        collect(c, li, enc, out);
-    }
+    out
 }
 
 #[cfg(test)]

@@ -32,13 +32,19 @@ pub fn inlay_hints(
 }
 
 fn collect(
-    n: Node,
+    root: Node,
     range: &Range,
     li: &LineIndex,
     enc: PositionEncoding,
     out: &mut Vec<InlayHint>,
 ) {
-    if n.kind() == Kind::LocalDeclaration {
+    // Iterate the tree with m1-core's explicit work-stack pre-order iterator
+    // rather than recursion, so a pathologically deep document can't overflow the
+    // call stack (#133). Same pre-order visit, same result.
+    for n in root.descendants() {
+        if n.kind() != Kind::LocalDeclaration {
+            continue;
+        }
         // Skip locals the author already annotated with `<Type>`.
         let annotated = n
             .named_children()
@@ -62,9 +68,6 @@ fn collect(
                 }
             }
         }
-    }
-    for c in n.children() {
-        collect(c, range, li, enc, out);
     }
 }
 

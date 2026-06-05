@@ -106,82 +106,93 @@ struct RawToken {
 
 // ── Walker ────────────────────────────────────────────────────────────────────
 
-fn walk(node: Node, scope: &Scope, li: &LineIndex, enc: PositionEncoding, out: &mut Vec<RawToken>) {
-    match node.kind() {
-        // ── Literals ──────────────────────────────────────────────────────────
-        Kind::Number => {
-            push(node, TT_NUMBER, 0, li, enc, out);
-        }
-        Kind::String => {
-            push_singleline(node, TT_STRING, 0, li, enc, out);
-        }
-        Kind::LineComment => {
-            push_singleline(node, TT_COMMENT, 0, li, enc, out);
-        }
-        Kind::BlockComment => {
-            // Block comments may span lines; emit one token per line so a
-            // multi-line `/* … */` is highlighted (push_singleline drops it).
-            push_multiline(node, TT_COMMENT, 0, li, enc, out);
-        }
-
-        // ── Keywords ─────────────────────────────────────────────────────────
-        Kind::If
-        | Kind::Else
-        | Kind::Local
-        | Kind::Static
-        | Kind::When
-        | Kind::And
-        | Kind::Or
-        | Kind::Not
-        | Kind::Expand
-        | Kind::To
-        | Kind::Is
-        | Kind::True
-        | Kind::False => {
-            push(node, TT_KEYWORD, 0, li, enc, out);
-        }
-
-        // ── Type annotations (<Integer>, <Float>, …) ──────────────────────────
-        Kind::TypeAnnotation => {
-            push(node, TT_TYPE, 0, li, enc, out);
-        }
-
-        // ── Member expressions (Foo.Bar, Group.Channel.Value, …) ─────────────
-        Kind::MemberExpression => {
-            let (tt, tm) = classify_member(node, scope);
-            push(node, tt, tm, li, enc, out);
-            // Do NOT recurse — we just covered the whole span.
-        }
-
-        // ── Identifiers ───────────────────────────────────────────────────────
-        Kind::Identifier => {
-            // Identifiers that are part of a MemberExpression are covered by
-            // the MemberExpression arm above; skip them here.
-            if let Some(parent) = node.parent() {
-                if parent.kind() == Kind::MemberExpression {
-                    return;
-                }
-                // Callee of a bare call (not member): CallExpression's first
-                // named child is the function name.
-                if parent.kind() == Kind::CallExpression && is_first_named_child(node, parent) {
-                    push(node, TT_FUNCTION, 0, li, enc, out);
-                    return;
-                }
-                // Declaration site of a local variable.
-                if parent.kind() == Kind::LocalDeclaration && is_first_named_child(node, parent) {
-                    push(node, TT_VARIABLE, TM_DEFINITION, li, enc, out);
-                    return;
-                }
+/// Classify every token under `root`. Uses an explicit LIFO work-stack rather
+/// than recursion so a pathologically deep tree can't overflow the call stack
+/// (#133, mirroring `m1-core`'s hardened `syntax::walk`). Children are pushed in
+/// reverse so the leftmost is popped next, preserving pre-order left-to-right
+/// visit order. Only the arms that recurse in the original recursive walk push
+/// children, so the "do not recurse into MemberExpression / early-return
+/// Identifier" decisions are preserved exactly.
+fn walk(root: Node, scope: &Scope, li: &LineIndex, enc: PositionEncoding, out: &mut Vec<RawToken>) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            // ── Literals ──────────────────────────────────────────────────────
+            Kind::Number => {
+                push(node, TT_NUMBER, 0, li, enc, out);
             }
-            // General identifier: resolve against scope.
-            let (tt, tm) = classify_path(node.text(), scope, false);
-            push(node, tt, tm, li, enc, out);
-        }
+            Kind::String => {
+                push_singleline(node, TT_STRING, 0, li, enc, out);
+            }
+            Kind::LineComment => {
+                push_singleline(node, TT_COMMENT, 0, li, enc, out);
+            }
+            Kind::BlockComment => {
+                // Block comments may span lines; emit one token per line so a
+                // multi-line `/* … */` is highlighted (push_singleline drops it).
+                push_multiline(node, TT_COMMENT, 0, li, enc, out);
+            }
 
-        // ── Everything else: recurse into children ────────────────────────────
-        _ => {
-            for child in node.children() {
-                walk(child, scope, li, enc, out);
+            // ── Keywords ─────────────────────────────────────────────────────
+            Kind::If
+            | Kind::Else
+            | Kind::Local
+            | Kind::Static
+            | Kind::When
+            | Kind::And
+            | Kind::Or
+            | Kind::Not
+            | Kind::Expand
+            | Kind::To
+            | Kind::Is
+            | Kind::True
+            | Kind::False => {
+                push(node, TT_KEYWORD, 0, li, enc, out);
+            }
+
+            // ── Type annotations (<Integer>, <Float>, …) ──────────────────────
+            Kind::TypeAnnotation => {
+                push(node, TT_TYPE, 0, li, enc, out);
+            }
+
+            // ── Member expressions (Foo.Bar, Group.Channel.Value, …) ─────────
+            Kind::MemberExpression => {
+                let (tt, tm) = classify_member(node, scope);
+                push(node, tt, tm, li, enc, out);
+                // Do NOT recurse — we just covered the whole span.
+            }
+
+            // ── Identifiers ───────────────────────────────────────────────────
+            Kind::Identifier => {
+                // Identifiers that are part of a MemberExpression are covered by
+                // the MemberExpression arm above; skip them here.
+                if let Some(parent) = node.parent() {
+                    if parent.kind() == Kind::MemberExpression {
+                        continue;
+                    }
+                    // Callee of a bare call (not member): CallExpression's first
+                    // named child is the function name.
+                    if parent.kind() == Kind::CallExpression && is_first_named_child(node, parent) {
+                        push(node, TT_FUNCTION, 0, li, enc, out);
+                        continue;
+                    }
+                    // Declaration site of a local variable.
+                    if parent.kind() == Kind::LocalDeclaration && is_first_named_child(node, parent)
+                    {
+                        push(node, TT_VARIABLE, TM_DEFINITION, li, enc, out);
+                        continue;
+                    }
+                }
+                // General identifier: resolve against scope.
+                let (tt, tm) = classify_path(node.text(), scope, false);
+                push(node, tt, tm, li, enc, out);
+            }
+
+            // ── Everything else: recurse into children ────────────────────────
+            _ => {
+                for child in node.children().into_iter().rev() {
+                    stack.push(child);
+                }
             }
         }
     }

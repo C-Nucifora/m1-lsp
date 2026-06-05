@@ -70,6 +70,10 @@ jobs:
           # longer reliably allocates Intel-Mac runners, which stalls the release.
           # Intel-Mac users build the server from source — see README ("Intel macOS").
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -96,6 +100,10 @@ jobs:
           # (nvim-m1#15)
           codesign --force --sign - "out/m1-lsp-${{ matrix.target }}${{ matrix.ext }}"
           codesign --verify --verbose "out/m1-lsp-${{ matrix.target }}${{ matrix.ext }}"
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: out/*
       - uses: actions/upload-artifact@v7
         with:
           name: server-${{ matrix.target }}

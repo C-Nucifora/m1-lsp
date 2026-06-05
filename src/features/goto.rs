@@ -3,7 +3,7 @@
 //! `.m1prj` at the declaring `<Component>` line for project objects (channels,
 //! parameters, groups, tables, references, package objects).
 use crate::features::locate::{build_scope, path_at_byte};
-use crate::project_store::LoadedProject;
+use crate::project_store::{LoadedProject, contained_join};
 use m1_typecheck::resolve::{Resolution, resolve};
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
@@ -23,8 +23,10 @@ pub fn goto(
         return None;
     };
     let (target, line) = match &sym.filename {
-        // Script/DBC-backed: open the body file at its start.
-        Some(f) => (loaded.root.join(f), 0),
+        // Script/DBC-backed: open the body file at its start. The Filename comes
+        // from the (untrusted) .m1prj, so reject any value that escapes the
+        // project root rather than open an out-of-tree file (#134).
+        Some(f) => (contained_join(&loaded.root, f)?, 0),
         // Project object: jump to its declaration line in the .m1prj (#31).
         None => (loaded.m1prj_path.clone(), sym.def_line?),
     };
@@ -130,6 +132,50 @@ mod tests {
             assert_eq!(
                 loc.range.start.line, 3,
                 "should point at the declaration line"
+            );
+        });
+    }
+
+    #[test]
+    fn contained_join_rejects_absolute_and_parent_escapes() {
+        use std::path::Path;
+        let root = Path::new("/home/user/project");
+        assert!(contained_join(root, "/etc/passwd").is_none());
+        assert!(contained_join(root, "../../../../etc/passwd").is_none());
+        assert!(contained_join(root, "sub/../../etc").is_none());
+        assert_eq!(
+            contained_join(root, "dbc/Foo.m1dbc"),
+            Some(root.join("dbc/Foo.m1dbc"))
+        );
+        assert_eq!(
+            contained_join(root, "Do Thing.m1scr"),
+            Some(root.join("Do Thing.m1scr"))
+        );
+    }
+
+    #[test]
+    fn goto_rejects_out_of_tree_filename() {
+        // #134: a `.m1prj` Filename pointing outside the project (absolute here)
+        // must not yield a goto Location the editor would open.
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.FuncUser" Name="Root.Evil" Filename="/etc/passwd"/>
+</Project>"#,
+            )
+            .unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+        let cst = m1_core::parse("Evil();\n");
+        store.with_project(|p| {
+            assert!(
+                goto(cst.root(), 0, p.unwrap(), Some("Caller.m1scr")).is_none(),
+                "an absolute .m1prj Filename must not produce a goto Location"
             );
         });
     }
