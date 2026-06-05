@@ -21,6 +21,7 @@ pub fn code_str(c: Code) -> &'static str {
         Code::TypeError => "type-error",
         Code::LintError => "lint-error",
         Code::SemanticError => "semantic-error",
+        Code::Annotation => "annotation",
     }
 }
 

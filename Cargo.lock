@@ -579,35 +579,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "m1-core"
+version = "0.5.0"
+source = "git+https://github.com/C-Nucifora/m1-core.git?tag=v0.5.0#8f3018ce9a5b3218d4e39a0a8c8c627a15cdbffe"
+dependencies = [
+ "tree-sitter",
+ "tree-sitter-m1",
+]
+
+[[package]]
 name = "m1-fmt"
-version = "0.4.1"
-source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.4.1#1a3c1b000146f3dfbf531b2460b7745a8207d223"
+version = "0.4.3"
+source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.4.3#a4f53e2f4e765a656e128fb6aeeda671010df926"
 dependencies = [
  "clap",
- "m1-core",
+ "m1-core 0.4.1",
+ "m1-workspace",
  "toml",
 ]
 
 [[package]]
 name = "m1-lint"
-version = "0.5.1"
-source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.5.1#5a9207aa1d173d842d533e91ab0627cc7dc766de"
+version = "0.7.0"
+source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.7.0#3fb55c412ef69ea4aa1cd0dc7089eee0e83da047"
 dependencies = [
  "glob",
- "m1-core",
+ "m1-core 0.5.0",
+ "m1-workspace",
  "toml",
 ]
 
 [[package]]
 name = "m1-lsp"
-version = "0.22.3"
+version = "0.23.0"
 dependencies = [
  "dashmap 6.2.1",
- "m1-core",
+ "m1-core 0.5.0",
  "m1-fmt",
  "m1-lint",
  "m1-typecheck",
- "m1-workspace 0.2.0",
+ "m1-workspace",
  "serde",
  "serde_json",
  "tempfile",
@@ -618,21 +629,17 @@ dependencies = [
 
 [[package]]
 name = "m1-typecheck"
-version = "0.16.2"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.16.2#a995fec8aeece7e30753c4d39318de3b63f9d8da"
+version = "0.19.0"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.19.0#6ac601361b8f2eab1b53240f7eedaf22e4a17172"
 dependencies = [
  "clap",
- "m1-core",
- "m1-workspace 0.1.0",
+ "m1-core 0.5.0",
+ "m1-workspace",
  "roxmltree",
  "serde",
  "serde_json",
+ "toml",
 ]
-
-[[package]]
-name = "m1-workspace"
-version = "0.1.0"
-source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.1.0#640d1d52b75f5a08df272c8081d3cf8cab30dce2"
 
 [[package]]
 name = "m1-workspace"
