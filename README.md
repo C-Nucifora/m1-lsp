@@ -52,6 +52,12 @@ optional sibling checkout.
 
   Recomputed on open / change / save, and re-published when the project model
   reloads.
+
+  **Project-scope diagnostics** (source `m1-typecheck`) — the `.m1cfg`-coverage
+  audit (`T041`: a parameter declared in the `.m1prj` but missing from the
+  `.m1cfg`) and the name/component audit (`T050`/`T010`/`T071`) — are published
+  against the `Project.m1prj` URI once the project loads, so the editor matches
+  what the CLI reports rather than only showing per-script findings.
 - **Quick-fixes** (`textDocument/codeAction`): for the fixable
   `unsupported-c-token` operators, a quick-fix replaces them with the M1
   keyword (`==`→`eq`, `!=`→`neq`, `&&`→`and`, `||`→`or`, `!`→`not`).
