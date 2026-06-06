@@ -154,6 +154,59 @@ fn enum_member_markdown(
     ))
 }
 
+/// Hover for the *head* of an enum literal, e.g. the `Gear State` in
+/// `Gear State.Driving` (or AV-M1's `ASSI.Driving`). The enum *type* name is not
+/// a project symbol — it lives in the type table, not the channel table — so it
+/// resolves Opaque and would otherwise fall back to "type not modelled". When the
+/// segment names a known enum, describe the enum: its name and the valid members
+/// (ContainerOrder, default marked), matching the channel-side enum rendering.
+/// Returns `None` when the segment is not an enum name.
+fn enum_type_markdown(name: &str, project: Option<&Project>) -> Option<String> {
+    let table = project?.symbols();
+    let id = table.enum_by_name(name)?;
+    let et = table.enum_type(id);
+    let mut members: Vec<&(String, i64)> = et.members.iter().collect();
+    members.sort_by_key(|(_, order)| *order);
+    let list = members
+        .iter()
+        .map(|(name, _)| {
+            if et.default.as_deref() == Some(name.as_str()) {
+                format!("`{name}` (default)")
+            } else {
+                format!("`{name}`")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut s = format!("**{}** `enum type`", et.name);
+    if !list.is_empty() {
+        s.push_str(&format!("\n\nvalues: {list}"));
+    }
+    Some(s)
+}
+
+/// `ASSI` in `ASSI.Driving`: the *head* of an `EnumName.Member` literal. An enum
+/// type routinely shares its name with a group/channel (the AV-M1 `ASSI` enum
+/// lives alongside the `Root.Control.AV.ASSI` group), so plain per-segment
+/// resolution returns that shadowing group (`type: Unknown`). The disambiguator
+/// is the *next* segment: when it names a member of the enum this segment names,
+/// the pair is unambiguously an enum literal, so describe the enum type rather
+/// than the group. Returns `None` when there is no following member of a matching
+/// enum (e.g. `ASSI.Status`, a real group-relative path).
+fn enum_literal_head_markdown(
+    i: usize,
+    segs: &[m1_core::Node],
+    project: Option<&Project>,
+) -> Option<String> {
+    let table = project?.symbols();
+    let id = table.enum_by_name(segs[i].text())?;
+    let next = segs.get(i + 1)?;
+    if !table.enum_has_member(id, next.text()) {
+        return None;
+    }
+    enum_type_markdown(segs[i].text(), project)
+}
+
 /// Compact decimal: up to 6 places, trailing zeros trimmed (`0.010000` → `0.01`,
 /// `60.000000` → `60`). Keeps `.m1dbc` multipliers like `9.999e-03` readable.
 fn fmt_num(x: f64) -> String {
@@ -327,42 +380,57 @@ pub fn hover(
     let seg = segs[i];
     let seg_text = seg.text();
 
-    let md = match resolve(&prefix, &scope) {
-        Resolution::Local(t) => format!("**{prefix}** `local`\n\ntype: `{}`", value_type_str(t)),
-        Resolution::Symbol(sym) => symbol_markdown(sym, project),
-        Resolution::BuiltinObject(name) => builtin_object_markdown(name),
-        Resolution::BuiltinFn(overloads) => builtin_fn_markdown(&prefix, &overloads),
-        Resolution::Opaque | Resolution::Unresolved => {
-            // A trailing accessor (`object.AsInteger`) doesn't resolve to a
-            // project symbol, but the object on its left does. Describe the
-            // built-in method itself, with the manual's docs.
-            let methods = m1_typecheck::intrinsics::get().object_method(seg_text);
-            let object_resolves = i > 0
-                && matches!(
-                    resolve(
-                        &segs[..i]
-                            .iter()
-                            .map(|n| n.text())
-                            .collect::<Vec<_>>()
-                            .join("."),
-                        &scope
-                    ),
-                    Resolution::Symbol(_)
-                        | Resolution::Opaque
-                        | Resolution::BuiltinObject(_)
-                        | Resolution::Local(_)
-                );
-            if object_resolves && !methods.is_empty() {
-                object_method_markdown(seg_text, &methods)
-            } else if let Some(md) = enum_member_markdown(seg, i, &segs, project) {
-                // An enum-member token (`Drive State.Off`, or a bare `Off`) — the
-                // project model defines the enum + member, so describe it rather
-                // than fall through to "type not modelled" (#127).
-                md
-            } else if matches!(resolve(&prefix, &scope), Resolution::Opaque) {
-                format!("**{prefix}**\n\nbuilt-in symbol — type not modelled")
-            } else {
-                return None;
+    // Enum-literal head (`ASSI` in `ASSI.Driving`) must win over plain resolution:
+    // the enum type often shares its name with a group/channel, so resolving the
+    // segment alone would describe that shadowing symbol. Decided by the following
+    // member segment, so it never misfires on a real group-relative path.
+    let md = if let Some(md) = enum_literal_head_markdown(i, &segs, project) {
+        md
+    } else {
+        match resolve(&prefix, &scope) {
+            Resolution::Local(t) => {
+                format!("**{prefix}** `local`\n\ntype: `{}`", value_type_str(t))
+            }
+            Resolution::Symbol(sym) => symbol_markdown(sym, project),
+            Resolution::BuiltinObject(name) => builtin_object_markdown(name),
+            Resolution::BuiltinFn(overloads) => builtin_fn_markdown(&prefix, &overloads),
+            Resolution::Opaque | Resolution::Unresolved => {
+                // A trailing accessor (`object.AsInteger`) doesn't resolve to a
+                // project symbol, but the object on its left does. Describe the
+                // built-in method itself, with the manual's docs.
+                let methods = m1_typecheck::intrinsics::get().object_method(seg_text);
+                let object_resolves = i > 0
+                    && matches!(
+                        resolve(
+                            &segs[..i]
+                                .iter()
+                                .map(|n| n.text())
+                                .collect::<Vec<_>>()
+                                .join("."),
+                            &scope
+                        ),
+                        Resolution::Symbol(_)
+                            | Resolution::Opaque
+                            | Resolution::BuiltinObject(_)
+                            | Resolution::Local(_)
+                    );
+                if object_resolves && !methods.is_empty() {
+                    object_method_markdown(seg_text, &methods)
+                } else if let Some(md) = enum_member_markdown(seg, i, &segs, project) {
+                    // An enum-member token (`Drive State.Off`, or a bare `Off`) — the
+                    // project model defines the enum + member, so describe it rather
+                    // than fall through to "type not modelled" (#127).
+                    md
+                } else if let Some(md) = enum_type_markdown(seg_text, project) {
+                    // The head of an `EnumName.Member` literal (e.g. `ASSI` in
+                    // `ASSI.Driving`): the enum type itself. Describe the enum rather
+                    // than fall through to "type not modelled".
+                    md
+                } else if matches!(resolve(&prefix, &scope), Resolution::Opaque) {
+                    format!("**{prefix}**\n\nbuilt-in symbol — type not modelled")
+                } else {
+                    return None;
+                }
             }
         }
     };
@@ -770,6 +838,112 @@ mod tests {
         assert!(
             !on_member.contains("type not modelled"),
             "enum-member hover must not fall back to the not-modelled message: {on_member}"
+        );
+    }
+
+    /// `Status = ASSI.Driving;` — the *head* of an `EnumName.Member` literal is
+    /// the enum type itself. Hovering it must describe the enum (name + values),
+    /// not fall back to "type not modelled". The enum name is not a channel, so it
+    /// only ever resolves Opaque; this is the AV-M1 `ASSI.Driving` case. The member
+    /// `Driving` and the enum-typed LHS already hover correctly — only the head was
+    /// broken.
+    #[test]
+    fn hover_on_enum_type_head_names_the_enum() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<Project>
+  <DataTypes>
+    <Type Name="Gear State" Storage="enum" Default="Neutral">
+      <Enum Name="Neutral" ContainerOrder="0"/>
+      <Enum Name="Driving" ContainerOrder="1"/>
+    </Type>
+  </DataTypes>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Control"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Control.Status"><Props Type="::This.Gear State"/></Component>
+</Project>"#,
+            )
+            .unwrap();
+        let project = m1_typecheck::Project::load(&prj).unwrap();
+        let src = "Status = Gear State.Driving;\n";
+        // Hover the enum-type head `Gear State`, not the `Driving` member.
+        let on_head = hover_value_at(&project, src, "Gear State", 0);
+        assert!(
+            on_head.contains("Gear State") && on_head.to_lowercase().contains("enum"),
+            "enum-type head hover should name the enum type: {on_head}"
+        );
+        assert!(
+            on_head.contains("Driving") && on_head.contains("Neutral"),
+            "enum-type head hover should list the members: {on_head}"
+        );
+        assert!(
+            !on_head.contains("type not modelled"),
+            "enum-type head must not fall back to the not-modelled message: {on_head}"
+        );
+    }
+
+    /// The real AV-M1 case: the enum type `ASSI` shares its name with its
+    /// enclosing group `Root.Control.AV.ASSI`. Hovering `ASSI` in `ASSI.Driving`
+    /// must describe the *enum* (because the next segment `Driving` is one of its
+    /// members), not the shadowing group — which group-relative resolution would
+    /// otherwise return as `group / type: Unknown`.
+    #[test]
+    fn hover_on_enum_head_that_shadows_a_group_names_the_enum() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<Project>
+  <DataTypes>
+    <Type Name="ASSI" Storage="enum" Default="Off">
+      <Enum Name="Off" ContainerOrder="0"/>
+      <Enum Name="Driving" ContainerOrder="1"/>
+    </Type>
+  </DataTypes>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Control"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Control.ASSI"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Control.ASSI.Status"><Props Type="::This.ASSI"/></Component>
+  <Component Classname="BuiltIn.MethodUser" Name="Root.Control.ASSI.Update"/>
+</Project>"#,
+            )
+            .unwrap();
+        let project = m1_typecheck::Project::load(&prj).unwrap();
+        let src = "Status = ASSI.Driving;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find("ASSI").unwrap();
+        // The script lives in the `Root.Control.ASSI` group — so a bare `ASSI`
+        // resolves group-relatively to that group unless we recognise the literal.
+        let h = hover(
+            cst.root(),
+            byte,
+            Some(&project),
+            Some("Control.ASSI.Update.m1scr"),
+            &li,
+            PositionEncoding::Utf16,
+        )
+        .unwrap();
+        let HoverContents::Markup(m) = h.contents else {
+            panic!("expected markup")
+        };
+        assert!(
+            m.value.to_lowercase().contains("enum") && m.value.contains("Driving"),
+            "ASSI head should describe the enum, not the shadowing group: {}",
+            m.value
+        );
+        assert!(
+            !m.value.contains("group"),
+            "ASSI head must not resolve to the shadowing group: {}",
+            m.value
         );
     }
 
