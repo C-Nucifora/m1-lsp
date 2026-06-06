@@ -624,14 +624,22 @@ impl LanguageServer for Backend {
         // "Implementation" of a channel = where it is written (produced). With a
         // project loaded, search every `.m1scr`; open buffers win over disk.
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
-        // Snapshot the script-path list, drop the project RwLock guard, then run
-        // the read+parse-every-script loop off the async worker (#135).
-        let script_files = self
-            .store
-            .with_project(|p| p.map(|lp| lp.script_files.clone()));
-        let locs = script_files.and_then(|scripts| {
-            tokio::task::block_in_place(|| {
-                references::project_implementations(&scripts, &uri, &text, byte, enc, &open_text)
+        // Canonicalising the write sites across files needs the project model held
+        // for the whole loop (#143); run it under the read guard via
+        // `block_in_place` to keep the async runtime healthy (#135).
+        let locs = tokio::task::block_in_place(|| {
+            self.store.with_project(|p| {
+                p.and_then(|lp| {
+                    references::project_implementations(
+                        &lp.project,
+                        &lp.script_files,
+                        &uri,
+                        &text,
+                        byte,
+                        enc,
+                        &open_text,
+                    )
+                })
             })
         });
         Ok(locs.map(GotoDefinitionResponse::Array))
@@ -981,16 +989,27 @@ impl LanguageServer for Backend {
         // With a project loaded, search every `.m1scr` for a project symbol
         // (#29); locals stay file-local. Open buffers win over on-disk text.
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
-        // Snapshot the small script-path list, then drop the project RwLock guard
-        // before the read+parse-every-script loop, and run that blocking work via
-        // `block_in_place` so it doesn't stall an async worker (#135).
-        let script_files = self
-            .store
-            .with_project(|p| p.map(|lp| lp.script_files.clone()));
-        if let Some(scripts) = script_files {
-            let locs = tokio::task::block_in_place(|| {
-                references::project_references(&scripts, &uri, &text, byte, enc, &open_text)
-            });
+        // Canonicalising occurrences across files needs the project model held for
+        // the whole read+parse loop (group-relative resolution, #143), so run it
+        // under the read guard via `block_in_place` to keep the async runtime
+        // healthy (#135). `with_project` returns `None` only when no project is
+        // loaded; an inner `None` means a project is loaded but nothing matched.
+        let result = tokio::task::block_in_place(|| {
+            self.store.with_project(|p| {
+                p.map(|lp| {
+                    references::project_references(
+                        &lp.project,
+                        &lp.script_files,
+                        &uri,
+                        &text,
+                        byte,
+                        enc,
+                        &open_text,
+                    )
+                })
+            })
+        });
+        if let Some(locs) = result {
             return Ok(locs);
         }
         // Project-less mode: single-file references.
@@ -1019,12 +1038,23 @@ impl LanguageServer for Backend {
         };
         let byte = lindex.offset(tdp.position, &text, self.enc());
         let cst = m1_core::parse(&text);
-        Ok(references::document_highlights(
-            cst.root(),
-            byte,
-            &lindex,
-            self.enc(),
-        ))
+        let file_name = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let li = &lindex;
+        let enc = self.enc();
+        // Project-aware so a channel spelled two ways in one file highlights as one (#143).
+        Ok(self.store.with_project(|p| {
+            references::document_highlights_scoped(
+                p.map(|lp| &lp.project),
+                file_name.as_deref(),
+                cst.root(),
+                byte,
+                li,
+                enc,
+            )
+        }))
     }
 
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {

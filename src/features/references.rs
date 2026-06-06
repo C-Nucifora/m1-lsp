@@ -8,10 +8,72 @@
 //! (`script_files`), enumerated from the filesystem since a real `.m1prj` omits
 //! `Filename=` attributes and the symbol-table list would be empty.
 use crate::convert::range;
-use crate::features::locate::{collect_locals, node_at_byte, path_at_byte};
+use crate::features::locate::{build_scope, collect_locals, node_at_byte, path_at_byte};
 use crate::line_index::{LineIndex, PositionEncoding};
 use m1_core::{Field, Kind, Node};
+use m1_typecheck::project::Project;
+use m1_typecheck::resolve::{Resolution, Scope, resolve};
 use tower_lsp::lsp_types::{DocumentHighlight, DocumentHighlightKind, Location, Url};
+
+/// The canonical project-symbol path that `path` names when written with `scope`
+/// — e.g. a group-relative `Speed` in the `Root.Engine` group resolves to
+/// `Root.Engine.Speed`. `None` when it doesn't resolve to a project symbol (a
+/// local, a library member, or an opaque/unresolved path), in which case callers
+/// fall back to matching the path text verbatim. This is what lets the same
+/// channel under different spellings collapse onto one entity (#143), mirroring
+/// the call-hierarchy data-flow graph.
+fn canonical(scope: &Scope, path: &str) -> Option<String> {
+    match resolve(path, scope) {
+        Resolution::Symbol(s) => Some(s.path.clone()),
+        _ => None,
+    }
+}
+
+/// The file name (basename) of a `file://` URI, for group-relative resolution.
+fn file_name_of(uri: &Url) -> Option<String> {
+    uri.to_file_path()
+        .ok()?
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+}
+
+/// Every top-level path occurrence in `root` whose canonical symbol path equals
+/// `target`, resolved through this file's group `scope`. When `writes_only`, keep
+/// only assignment-target (producer) sites — the go-to-implementation case.
+#[allow(clippy::too_many_arguments)]
+fn canonical_locations(
+    project: &Project,
+    file_name: &str,
+    root: Node,
+    target: &str,
+    uri: &Url,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    writes_only: bool,
+) -> Vec<Location> {
+    let scope = build_scope(root, Some(project), Some(file_name));
+    let mut out = Vec::new();
+    for n in root.descendants() {
+        let is_path = matches!(n.kind(), Kind::Identifier | Kind::MemberExpression);
+        let is_top = n
+            .parent()
+            .map(|p| p.kind() != Kind::MemberExpression)
+            .unwrap_or(true);
+        if !is_path || !is_top || in_type_annotation(n) {
+            continue;
+        }
+        if writes_only && !is_write(n) {
+            continue;
+        }
+        if canonical(&scope, n.text()).as_deref() == Some(target) {
+            out.push(Location {
+                uri: uri.clone(),
+                range: range(&n.byte_range(), li, enc),
+            });
+        }
+    }
+    out
+}
 
 /// True when `n` is the `property` half of a `member_expression` (after the `.`).
 fn is_member_property(n: Node) -> bool {
@@ -215,7 +277,31 @@ fn path_locations(
 /// Takes the script-path slice by reference (rather than `&LoadedProject`) so the
 /// caller can clone the small `Vec<PathBuf>` and release the project `RwLock`
 /// guard *before* this read+parse-every-script loop runs (#135).
+/// (uri, text) for the cursor file first, then every other project script
+/// (deduped by uri), preferring open buffers over on-disk text.
+fn gather_files(
+    script_files: &[std::path::PathBuf],
+    cursor_uri: &Url,
+    cursor_text: &str,
+    open_text: &dyn Fn(&Url) -> Option<String>,
+) -> Vec<(Url, String)> {
+    let mut files: Vec<(Url, String)> = vec![(cursor_uri.clone(), cursor_text.to_string())];
+    for p in script_files {
+        let Ok(uri) = Url::from_file_path(p) else {
+            continue;
+        };
+        if files.iter().any(|(u, _)| *u == uri) {
+            continue;
+        }
+        if let Some(t) = open_text(&uri).or_else(|| crate::disk_read::read_disk(p)) {
+            files.push((uri, t));
+        }
+    }
+    files
+}
+
 pub fn project_references(
+    project: &Project,
     script_files: &[std::path::PathBuf],
     cursor_uri: &Url,
     cursor_text: &str,
@@ -231,25 +317,35 @@ pub fn project_references(
             references(cursor_cst.root(), byte, cursor_uri.clone(), &li, enc)
         }
         RefTarget::Path(path) => {
-            // Gather (uri, text) for the cursor file first, then every other
-            // project script (deduped by uri), preferring open buffers.
-            let mut files: Vec<(Url, String)> = vec![(cursor_uri.clone(), cursor_text.to_string())];
-            for p in script_files {
-                let Ok(uri) = Url::from_file_path(p) else {
-                    continue;
-                };
-                if files.iter().any(|(u, _)| *u == uri) {
-                    continue;
-                }
-                if let Some(t) = open_text(&uri).or_else(|| crate::disk_read::read_disk(p)) {
-                    files.push((uri, t));
-                }
-            }
+            let files = gather_files(script_files, cursor_uri, cursor_text, open_text);
+            // Resolve the cursor's path to a canonical project symbol through its
+            // own group scope, then match every file's occurrences by canonical
+            // path so group-relative and full-path spellings of the same channel
+            // collapse (#143). Fall back to verbatim text matching when it isn't a
+            // project symbol (library member / opaque / unresolved).
+            let cursor_scope = build_scope(
+                cursor_cst.root(),
+                Some(project),
+                file_name_of(cursor_uri).as_deref(),
+            );
+            let target = canonical(&cursor_scope, &path);
             let mut locs = Vec::new();
             for (uri, text) in &files {
                 let li = LineIndex::new(text);
                 let cst = m1_core::parse(text);
-                locs.extend(path_locations(cst.root(), &path, uri, &li, enc));
+                match &target {
+                    Some(t) => locs.extend(canonical_locations(
+                        project,
+                        file_name_of(uri).as_deref().unwrap_or_default(),
+                        cst.root(),
+                        t,
+                        uri,
+                        &li,
+                        enc,
+                        false,
+                    )),
+                    None => locs.extend(path_locations(cst.root(), &path, uri, &li, enc)),
+                }
             }
             (!locs.is_empty()).then_some(locs)
         }
@@ -284,6 +380,7 @@ fn path_write_locations(
 /// declaration / assignment sites within the file. Mirrors
 /// [`project_references`] but keeps only write occurrences.
 pub fn project_implementations(
+    project: &Project,
     script_files: &[std::path::PathBuf],
     cursor_uri: &Url,
     cursor_text: &str,
@@ -308,23 +405,31 @@ pub fn project_implementations(
             (!locs.is_empty()).then_some(locs)
         }
         RefTarget::Path(path) => {
-            let mut files: Vec<(Url, String)> = vec![(cursor_uri.clone(), cursor_text.to_string())];
-            for p in script_files {
-                let Ok(uri) = Url::from_file_path(p) else {
-                    continue;
-                };
-                if files.iter().any(|(u, _)| *u == uri) {
-                    continue;
-                }
-                if let Some(t) = open_text(&uri).or_else(|| crate::disk_read::read_disk(p)) {
-                    files.push((uri, t));
-                }
-            }
+            let files = gather_files(script_files, cursor_uri, cursor_text, open_text);
+            // Canonicalize like `project_references`, but keep only writes (#143).
+            let cursor_scope = build_scope(
+                cursor_cst.root(),
+                Some(project),
+                file_name_of(cursor_uri).as_deref(),
+            );
+            let target = canonical(&cursor_scope, &path);
             let mut locs = Vec::new();
             for (uri, text) in &files {
                 let li = LineIndex::new(text);
                 let cst = m1_core::parse(text);
-                locs.extend(path_write_locations(cst.root(), &path, uri, &li, enc));
+                match &target {
+                    Some(t) => locs.extend(canonical_locations(
+                        project,
+                        file_name_of(uri).as_deref().unwrap_or_default(),
+                        cst.root(),
+                        t,
+                        uri,
+                        &li,
+                        enc,
+                        true,
+                    )),
+                    None => locs.extend(path_write_locations(cst.root(), &path, uri, &li, enc)),
+                }
             }
             (!locs.is_empty()).then_some(locs)
         }
@@ -354,6 +459,60 @@ pub fn document_highlights(
             })
             .collect(),
     )
+}
+
+/// Project-aware document highlight: like [`document_highlights`], but when the
+/// cursor is on a project symbol it matches every occurrence in the file by
+/// canonical path, so a channel spelled group-relative in one line and full-path
+/// in another both highlight (#143). Falls back to the text/name-based highlight
+/// for locals, library members, and when no project is loaded.
+pub fn document_highlights_scoped(
+    project: Option<&Project>,
+    file_name: Option<&str>,
+    root: Node,
+    byte: usize,
+    li: &LineIndex,
+    enc: PositionEncoding,
+) -> Option<Vec<DocumentHighlight>> {
+    let node = node_at_byte(root, byte)?;
+    // Locals stay name-based (already exact); only project paths need canonicalising.
+    let is_local = node.kind() == Kind::Identifier
+        && !is_member_property(node)
+        && !in_type_annotation(node)
+        && collect_locals(root).contains_key(node.text());
+    if !is_local
+        && let Some(proj) = project
+        && let Some((_, path)) = path_at_byte(root, byte)
+    {
+        let scope = build_scope(root, Some(proj), file_name);
+        if let Some(target) = canonical(&scope, &path) {
+            let mut out = Vec::new();
+            for n in root.descendants() {
+                let is_path = matches!(n.kind(), Kind::Identifier | Kind::MemberExpression);
+                let is_top = n
+                    .parent()
+                    .map(|p| p.kind() != Kind::MemberExpression)
+                    .unwrap_or(true);
+                if !is_path || !is_top || in_type_annotation(n) {
+                    continue;
+                }
+                if canonical(&scope, n.text()).as_deref() == Some(target.as_str()) {
+                    out.push(DocumentHighlight {
+                        range: range(&n.byte_range(), li, enc),
+                        kind: Some(if is_write(n) {
+                            DocumentHighlightKind::WRITE
+                        } else {
+                            DocumentHighlightKind::READ
+                        }),
+                    });
+                }
+            }
+            if !out.is_empty() {
+                return Some(out);
+            }
+        }
+    }
+    document_highlights(root, byte, li, enc)
 }
 
 #[cfg(test)]
@@ -482,8 +641,10 @@ mod tests {
         let no_open = |_: &Url| None;
         let locs = store
             .with_project(|p| {
+                let lp = p.unwrap();
                 project_references(
-                    &p.unwrap().script_files,
+                    &lp.project,
+                    &lp.script_files,
                     &a_uri,
                     a_src,
                     byte,
@@ -500,6 +661,65 @@ mod tests {
             files.len(),
             2,
             "references should span both scripts: {locs:?}"
+        );
+        assert!(locs.iter().any(|l| l.uri.path().ends_with("A.m1scr")));
+        assert!(locs.iter().any(|l| l.uri.path().ends_with("B.m1scr")));
+    }
+
+    #[test]
+    fn references_canonicalize_across_path_spellings() {
+        // #143: the same channel written group-relative in one script and read
+        // full-path in another must be found by a single Find-All-References,
+        // regardless of which spelling the cursor is on.
+        use crate::project_store::ProjectStore;
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let m1prj = r#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Engine"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Engine.Speed"><Props Type="f32"/></Component>
+  <Component Classname="BuiltIn.FuncUser" Name="Root.Engine.Write" Filename="A.m1scr"/>
+  <Component Classname="BuiltIn.FuncUser" Name="Root.Engine.Read" Filename="B.m1scr"/>
+</Project>"#;
+        std::fs::File::create(tmp.path().join("Project.m1prj"))
+            .unwrap()
+            .write_all(m1prj.as_bytes())
+            .unwrap();
+        // A writes the channel GROUP-RELATIVE (it lives in Root.Engine); B reads
+        // it FULL-PATH. Different spellings, same channel.
+        let a_src = "Speed = 1.0;\n";
+        let b_src = "local x = Root.Engine.Speed;\n";
+        std::fs::write(tmp.path().join("A.m1scr"), a_src).unwrap();
+        std::fs::write(tmp.path().join("B.m1scr"), b_src).unwrap();
+
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+        let a_uri = Url::from_file_path(tmp.path().join("A.m1scr")).unwrap();
+        let no_open = |_: &Url| None;
+
+        // Cursor on the group-relative `Speed` in A must still find B's full-path read.
+        let locs = store
+            .with_project(|p| {
+                let lp = p.unwrap();
+                project_references(
+                    &lp.project,
+                    &lp.script_files,
+                    &a_uri,
+                    a_src,
+                    a_src.find("Speed").unwrap(),
+                    PositionEncoding::Utf16,
+                    &no_open,
+                )
+            })
+            .expect("references across spellings");
+        let files: std::collections::BTreeSet<_> =
+            locs.iter().map(|l| l.uri.path().to_string()).collect();
+        assert_eq!(
+            files.len(),
+            2,
+            "group-relative cursor should still find the full-path reference: {locs:?}"
         );
         assert!(locs.iter().any(|l| l.uri.path().ends_with("A.m1scr")));
         assert!(locs.iter().any(|l| l.uri.path().ends_with("B.m1scr")));
@@ -538,8 +758,10 @@ mod tests {
         let no_open = |_: &Url| None;
         let locs = store
             .with_project(|p| {
+                let lp = p.unwrap();
                 project_implementations(
-                    &p.unwrap().script_files,
+                    &lp.project,
+                    &lp.script_files,
                     &b_uri,
                     b_src,
                     byte,
@@ -604,8 +826,10 @@ mod tests {
         let no_open = |_: &Url| None;
         let locs = store
             .with_project(|p| {
+                let lp = p.unwrap();
                 project_references(
-                    &p.unwrap().script_files,
+                    &lp.project,
+                    &lp.script_files,
                     &a_uri,
                     a_src,
                     0,
@@ -630,5 +854,50 @@ mod tests {
             locs.iter()
                 .any(|l| l.uri.path().ends_with("Engine.Read.m1scr"))
         );
+    }
+
+    #[test]
+    fn highlights_canonicalize_mixed_spellings_in_one_file() {
+        // #143: a channel written group-relative and read full-path within the
+        // SAME file should highlight as one entity.
+        use crate::project_store::ProjectStore;
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let m1prj = r#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Engine"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Engine.Speed"><Props Type="f32"/></Component>
+  <Component Classname="BuiltIn.FuncUser" Name="Root.Engine.Calc" Filename="C.m1scr"/>
+</Project>"#;
+        std::fs::File::create(tmp.path().join("Project.m1prj"))
+            .unwrap()
+            .write_all(m1prj.as_bytes())
+            .unwrap();
+        let c_src = "Speed = 1.0;\nlocal x = Root.Engine.Speed;\n";
+        std::fs::write(tmp.path().join("C.m1scr"), c_src).unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        store.with_project(|p| {
+            let lp = p.unwrap();
+            let cst = m1_core::parse(c_src);
+            let li = LineIndex::new(c_src);
+            let hl = document_highlights_scoped(
+                Some(&lp.project),
+                Some("C.m1scr"),
+                cst.root(),
+                c_src.find("Speed").unwrap(),
+                &li,
+                PositionEncoding::Utf16,
+            )
+            .expect("highlights");
+            assert_eq!(
+                hl.len(),
+                2,
+                "group-relative write + full-path read should both highlight: {hl:?}"
+            );
+        });
     }
 }

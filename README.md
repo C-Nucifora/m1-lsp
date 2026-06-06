@@ -75,10 +75,14 @@ optional sibling checkout.
   `.m1scr` / `.m1dbc` file of a project function or DBC signal, the `.m1prj`
   declaration line of a project channel/parameter, or — for a bare `local` — its
   `local …` declaration in the same file (works with no project loaded).
-- **References & document highlights** (`textDocument/references`,
-  `textDocument/documentHighlight`): all same-file occurrences of the local /
-  channel / symbol under the cursor, with read/write classification for
-  highlights.
+- **References, implementation & document highlights** (`textDocument/references`,
+  `textDocument/implementation`, `textDocument/documentHighlight`): occurrences of
+  the local / channel / symbol under the cursor — project-wide for channels,
+  file-local for locals — with read/write classification for highlights, and
+  `implementation` keeping only the write (producer) sites. Channel occurrences are
+  matched by **canonical path** (resolved through each script's group scope), so the
+  same channel written group-relative in one script and read full-path in another
+  collapses onto one entity instead of splitting by spelling.
 - **Document symbols** (`textDocument/documentSymbol`): outline of locals,
   assignment targets, and call statements (e.g. `Output.SetState`), nested under
   their `if`/`when` blocks — so call-only actuator/fault scripts still get an
