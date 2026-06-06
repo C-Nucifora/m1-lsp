@@ -263,6 +263,45 @@ async fn project_diagnostics_published_for_m1prj_on_init() {
     );
 }
 
+// #141: Go to Definition on a bare `local` returns its declaration in the same
+// file, and works with no project loaded (locals are file-scoped).
+#[tokio::test]
+async fn goto_definition_resolves_a_local_without_project() {
+    use tower_lsp::lsp_types::Url;
+
+    let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+    write_msg(&mut client, &initialize_msg(1)).await; // rootUri: null -> project-less
+    let _ = read_response(&mut client, 1).await;
+
+    let uri = Url::parse("file:///tmp/Test.m1scr").unwrap();
+    let src = "local myValue = 0;\nmyValue = myValue + 1;\n";
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":uri,"languageId":"m1","version":1,"text":src}}}),
+    )
+    .await;
+    // Go to Definition on the use-site `myValue` (line 1, char 0).
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{
+            "textDocument":{"uri":uri},"position":{"line":1,"character":0}}}),
+    )
+    .await;
+    let resp = read_response(&mut client, 2).await;
+    assert_eq!(
+        resp["result"]["range"]["start"]["line"],
+        json!(0),
+        "goto on a local should return its declaration on line 0: {resp}"
+    );
+    assert_eq!(resp["result"]["uri"], json!(uri.as_str()));
+}
+
 // Direct-call tests of the pure analysis path (no transport needed).
 #[test]
 fn analyze_reports_syntax_error() {
