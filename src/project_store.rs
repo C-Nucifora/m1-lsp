@@ -160,6 +160,22 @@ impl ProjectStore {
         f(guard.as_ref())
     }
 
+    /// Project-scope diagnostics for the loaded project: the `.m1cfg`-coverage
+    /// audit (T041) plus the symbol-name / component audit (T050/T010/T071).
+    /// These are not tied to any one script — the CLI emits them once per
+    /// project, and the LSP anchors them to the `.m1prj` (#139). Empty when no
+    /// project is loaded.
+    pub fn project_diagnostics(&self) -> Vec<m1_typecheck::diagnostics::TypeDiagnostic> {
+        self.with_project(|p| match p {
+            Some(lp) => {
+                let mut v = lp.project.missing_cfg_parameters();
+                v.extend(lp.project.audit());
+                v
+            }
+            None => Vec::new(),
+        })
+    }
+
     /// Discover + load from `start_dir`, replacing any cached project. Returns
     /// `Ok(true)` if a project was loaded, `Ok(false)` if none was found, and
     /// `Err(msg)` if a found project failed to load (store is left empty).
@@ -336,6 +352,54 @@ mod tests {
             store.with_project(|p| p.is_none()),
             "store must be cleared after a fatal load failure"
         );
+    }
+
+    #[test]
+    fn project_diagnostics_flag_param_missing_from_cfg() {
+        // A parameter declared in the `.m1prj` but absent from the `.m1cfg`
+        // should surface as a T041 project-level diagnostic (#139) — the same
+        // audit the CLI runs, made available to the LSP.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("Project.m1prj"),
+            "<?xml version=\"1.0\"?>\n<Project>\n\
+             <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root\"/>\n\
+             <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root.A\"/>\n\
+             <Component Classname=\"BuiltIn.Parameter\" Name=\"Root.A.Covered\"><Props Type=\"u32\"/></Component>\n\
+             <Component Classname=\"BuiltIn.Parameter\" Name=\"Root.A.Missing\"><Props Type=\"u32\"/></Component>\n\
+             </Project>",
+        )
+        .unwrap();
+        // A real `.m1cfg` lists parameters with the `Root.` prefix stripped.
+        std::fs::write(
+            tmp.path().join("parameters.m1cfg"),
+            "<?xml version=\"1.0\"?>\n<Configuration>\n <Group Name=\"\">\n\
+             <Parameter Name=\"A.Covered\"><Cell Type=\"u32\"><![CDATA[1]]></Cell></Parameter>\n\
+             </Group>\n</Configuration>",
+        )
+        .unwrap();
+        let store = ProjectStore::new();
+        assert!(store.discover_and_load(tmp.path()).unwrap());
+        let diags = store.project_diagnostics();
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == m1_typecheck::diagnostics::TypeCode::T041
+                    && d.inner.message.contains("Root.A.Missing")),
+            "param missing from cfg should be flagged T041; got {diags:?}"
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.inner.message.contains("Root.A.Covered")),
+            "a covered parameter must not be flagged"
+        );
+    }
+
+    #[test]
+    fn project_diagnostics_empty_when_no_project() {
+        let store = ProjectStore::new();
+        assert!(store.project_diagnostics().is_empty());
     }
 
     #[test]
