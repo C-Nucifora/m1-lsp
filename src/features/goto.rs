@@ -2,8 +2,11 @@
 //! file for file-backed symbols (FuncUser/MethodUser, DBC signals), or the
 //! `.m1prj` at the declaring `<Component>` line for project objects (channels,
 //! parameters, groups, tables, references, package objects).
+use crate::convert::range;
 use crate::features::locate::{build_scope, path_at_byte};
+use crate::line_index::{LineIndex, PositionEncoding};
 use crate::project_store::{LoadedProject, contained_join};
+use m1_core::Kind;
 use m1_typecheck::resolve::{Resolution, resolve};
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
@@ -37,6 +40,53 @@ pub fn goto(
     })
 }
 
+/// If `byte` sits on a bare reference to a `local` variable, the [`Location`] of
+/// that local's `local <name> = …` declaration in the same file. M1 locals are
+/// file-scoped (and their names may contain spaces), so this is a pure in-file
+/// lookup that needs no project — covering the project-less case too (#141).
+///
+/// When a name is declared more than once (shadowing / re-declaration), the
+/// nearest declaration at or before the cursor wins; otherwise the first.
+pub fn goto_local(
+    root: m1_core::Node,
+    byte: usize,
+    uri: &Url,
+    li: &LineIndex,
+    enc: PositionEncoding,
+) -> Option<Location> {
+    let (_, path) = path_at_byte(root, byte)?;
+    // A dotted path is a channel/member access, never a local.
+    if path.contains('.') {
+        return None;
+    }
+    // The identifier node of every `local <name> = …` whose name matches.
+    let mut decls: Vec<m1_core::Node> = root
+        .descendants()
+        .filter(|n| n.kind() == Kind::LocalDeclaration)
+        .filter_map(|n| {
+            n.named_children()
+                .into_iter()
+                .find(|c| c.kind() == Kind::Identifier)
+        })
+        .filter(|id| id.text() == path)
+        .collect();
+    if decls.is_empty() {
+        return None;
+    }
+    decls.sort_by_key(|id| id.byte_range().start);
+    // Nearest declaration at or before the cursor, else the first one.
+    let id = decls
+        .iter()
+        .rev()
+        .find(|id| id.byte_range().start <= byte)
+        .copied()
+        .unwrap_or(decls[0]);
+    Some(Location {
+        uri: uri.clone(),
+        range: range(&id.byte_range(), li, enc),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,6 +98,45 @@ mod tests {
   <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
   <Component Classname="BuiltIn.FuncUser" Name="Root.Do Thing" Filename="Do Thing.m1scr"/>
 </Project>"#;
+
+    #[test]
+    fn goto_local_returns_its_declaration_in_file() {
+        use crate::line_index::{LineIndex, PositionEncoding};
+        // A local used after its declaration; goto from the use-site should land
+        // on the declaration line in the same file (#141). No project needed.
+        let src = "local myValue = 0;\nmyValue = myValue + 1;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let uri = Url::parse("file:///x.m1scr").unwrap();
+
+        // use-site on line 1 (the assignment target `myValue`).
+        let use_byte = src.find("myValue = myValue").unwrap();
+        let loc = goto_local(cst.root(), use_byte, &uri, &li, PositionEncoding::Utf16)
+            .expect("a local use should resolve to its declaration");
+        assert_eq!(loc.uri, uri);
+        assert_eq!(loc.range.start.line, 0, "declaration is on line 0");
+
+        // from the declaration itself it still resolves (idempotent).
+        let decl_byte = src.find("myValue").unwrap();
+        assert!(
+            goto_local(cst.root(), decl_byte, &uri, &li, PositionEncoding::Utf16).is_some(),
+            "goto on the declaration should also resolve"
+        );
+    }
+
+    #[test]
+    fn goto_local_ignores_dotted_paths() {
+        use crate::line_index::{LineIndex, PositionEncoding};
+        let src = "Root.Speed = 1.0;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let uri = Url::parse("file:///x.m1scr").unwrap();
+        // `Root.Speed` is a dotted channel path, never a local.
+        assert!(
+            goto_local(cst.root(), 0, &uri, &li, PositionEncoding::Utf16).is_none(),
+            "a dotted path is not a local"
+        );
+    }
 
     #[test]
     fn goto_dbc_object_returns_its_m1dbc_file() {

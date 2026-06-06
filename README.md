@@ -64,8 +64,9 @@ optional sibling checkout.
   named enum types), and library functions (signatures, `stateful` /
   `deprecated` flags).
 - **Go-to-definition** (`textDocument/definition`): jumps to the backing
-  `.m1scr` / `.m1dbc` file of a project function or DBC signal. (The target is
-  opened at its start; the symbol model does not track a finer position.)
+  `.m1scr` / `.m1dbc` file of a project function or DBC signal, the `.m1prj`
+  declaration line of a project channel/parameter, or — for a bare `local` — its
+  `local …` declaration in the same file (works with no project loaded).
 - **References & document highlights** (`textDocument/references`,
   `textDocument/documentHighlight`): all same-file occurrences of the local /
   channel / symbol under the cursor, with read/write classification for

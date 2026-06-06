@@ -536,10 +536,16 @@ impl LanguageServer for Backend {
             .to_file_path()
             .ok()
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
-        Ok(self.store.with_project(|p| {
-            p.and_then(|lp| goto::goto(cst.root(), byte, lp, file_name.as_deref()))
-                .map(GotoDefinitionResponse::Scalar)
-        }))
+        // Project symbols (channels/params/functions/DBC) resolve via the
+        // project; a bare `local` resolves in-file and works even with no project
+        // loaded (#141).
+        let loc = self
+            .store
+            .with_project(|p| {
+                p.and_then(|lp| goto::goto(cst.root(), byte, lp, file_name.as_deref()))
+            })
+            .or_else(|| goto::goto_local(cst.root(), byte, &uri, &lindex, self.enc()));
+        Ok(loc.map(GotoDefinitionResponse::Scalar))
     }
 
     async fn goto_implementation(
