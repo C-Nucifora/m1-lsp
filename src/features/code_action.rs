@@ -561,8 +561,14 @@ mod tests {
             ..Default::default()
         };
         store.with_project(|p| {
-            let actions =
-                code_actions(src, &li, enc, &uri(), &[d.clone()], p.map(|lp| &lp.project));
+            let actions = code_actions(
+                src,
+                &li,
+                enc,
+                &uri(),
+                std::slice::from_ref(&d),
+                p.map(|lp| &lp.project),
+            );
             let titles: Vec<_> = actions
                 .iter()
                 .filter_map(|a| match a {
