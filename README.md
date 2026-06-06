@@ -60,7 +60,9 @@ optional sibling checkout.
   what the CLI reports rather than only showing per-script findings.
 - **Quick-fixes** (`textDocument/codeAction`): for the fixable
   `unsupported-c-token` operators, a quick-fix replaces them with the M1
-  keyword (`==`→`eq`, `!=`→`neq`, `&&`→`and`, `||`→`or`, `!`→`not`).
+  keyword (`==`→`eq`, `!=`→`neq`, `&&`→`and`, `||`→`or`, `!`→`not`); for a
+  `T020` enum-non-member, a "did you mean" fix replaces the typo with the nearest
+  valid enum member (e.g. `Drive State.Of`→`Drive State.Off`).
 - **Formatting** (`textDocument/formatting`): whole-document reformat via
   `m1-fmt`, returned as a single full-document `TextEdit`. No edits are returned
   when the document is already formatted or has syntax errors (pass-through
