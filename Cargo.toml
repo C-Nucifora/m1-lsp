@@ -30,4 +30,4 @@ m1-workspace = { git = "https://github.com/nedlane/m1-workspace.git", tag = "v0.
 [dev-dependencies]
 serde_json = "1"
 tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros", "time"] }

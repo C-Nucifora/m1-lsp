@@ -174,6 +174,95 @@ async fn did_open_discovers_project_without_root_uri() {
     );
 }
 
+// Read messages until a `textDocument/publishDiagnostics` for `uri` arrives,
+// returning its diagnostics array. Bounded by a timeout so a missing publish
+// fails the test instead of hanging.
+async fn read_publish_for(stream: &mut DuplexStream, uri: &str) -> Vec<Value> {
+    let fut = async {
+        loop {
+            let msg = read_msg(stream).await;
+            if msg.get("method").and_then(|m| m.as_str()) == Some("textDocument/publishDiagnostics")
+                && msg["params"]["uri"] == json!(uri)
+            {
+                return msg["params"]["diagnostics"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+            }
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), fut)
+        .await
+        .unwrap_or_default()
+}
+
+// #139: project-level diagnostics (the `.m1cfg`-coverage audit, T041) must be
+// surfaced in the editor, anchored to the `.m1prj`, once the project loads — not
+// only on the CLI. A parameter declared in the project but missing from the
+// `.m1cfg` should produce a T041 publishDiagnostics on the `.m1prj` URI.
+#[tokio::test]
+async fn project_diagnostics_published_for_m1prj_on_init() {
+    use std::io::Write;
+    use tower_lsp::lsp_types::Url;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let prj = r#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Engine"/>
+  <Component Classname="BuiltIn.Parameter" Name="Root.Engine.Covered"><Props Type="u32"/></Component>
+  <Component Classname="BuiltIn.Parameter" Name="Root.Engine.Missing"><Props Type="u32"/></Component>
+</Project>"#;
+    std::fs::File::create(tmp.path().join("Project.m1prj"))
+        .unwrap()
+        .write_all(prj.as_bytes())
+        .unwrap();
+    std::fs::File::create(tmp.path().join("parameters.m1cfg"))
+        .unwrap()
+        .write_all(
+            b"<?xml version=\"1.0\"?>\n<Configuration>\n <Group Name=\"\">\n\
+              <Parameter Name=\"Engine.Covered\"><Cell Type=\"u32\"><![CDATA[1]]></Cell></Parameter>\n\
+              </Group>\n</Configuration>",
+        )
+        .unwrap();
+
+    let root_uri = Url::from_file_path(tmp.path()).unwrap();
+    let prj_uri = Url::from_file_path(tmp.path().join("Project.m1prj")).unwrap();
+
+    let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+
+    // initialize WITH rootUri so the project is loaded from it. Empty client
+    // capabilities -> the server won't try dynamic watch registration (which
+    // would otherwise await a client response).
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+            "params":{"capabilities":{},"processId":null,"rootUri":root_uri}}),
+    )
+    .await;
+    let _ = read_response(&mut client, 1).await;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+
+    let diags = read_publish_for(&mut client, prj_uri.as_str()).await;
+    assert!(
+        diags.iter().any(|d| d["code"] == json!("T041")
+            && d["message"]
+                .as_str()
+                .map(|m| m.contains("Root.Engine.Missing"))
+                .unwrap_or(false)),
+        "expected a T041 project diagnostic for the uncovered parameter on the .m1prj; got {diags:?}"
+    );
+}
+
 // Direct-call tests of the pure analysis path (no transport needed).
 #[test]
 fn analyze_reports_syntax_error() {

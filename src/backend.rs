@@ -136,6 +136,8 @@ impl Backend {
                     .await;
                 // Resolve the unified config now that we have a workspace root.
                 self.apply_config(&dir);
+                // Surface the project-scope audit for the just-loaded project (#139).
+                self.publish_project_diagnostics().await;
             }
             Ok(false) => { /* no project found from this file; stay project-less */ }
             Err(e) => {
@@ -192,6 +194,8 @@ impl Backend {
         for uri in uris {
             self.publish(uri).await;
         }
+        // The rename may have changed which parameters are covered / names valid.
+        self.publish_project_diagnostics().await;
     }
 
     async fn publish(&self, uri: Url) {
@@ -205,12 +209,26 @@ impl Backend {
             return;
         };
         // The `.m1prj` is XML, not an M1 script — don't run the script analysis
-        // on it (it would emit bogus syntax diagnostics). It can still be opened
-        // as a document so a channel/parameter can be renamed from its
-        // declaration; just publish no diagnostics for it.
+        // on it (it would emit bogus syntax diagnostics). Instead, when it is the
+        // active project's file, surface the project-scope audit (T041/T050/…)
+        // anchored to it so opening/editing the `.m1prj` shows — and doesn't wipe
+        // — those diagnostics (#139). Any other `.m1prj` gets cleared.
         if is_m1prj(&uri) {
+            let active = self
+                .store
+                .with_project(|p| p.and_then(|lp| Url::from_file_path(&lp.m1prj_path).ok()));
+            let diags = if active.as_ref() == Some(&uri) {
+                let enc = self.enc();
+                self.store
+                    .project_diagnostics()
+                    .iter()
+                    .map(|d| crate::convert::type_diagnostic(d, &lindex, enc))
+                    .collect()
+            } else {
+                vec![]
+            };
             self.client
-                .publish_diagnostics(uri, vec![], Some(version))
+                .publish_diagnostics(uri, diags, Some(version))
                 .await;
             return;
         }
@@ -226,6 +244,43 @@ impl Backend {
         self.client
             .publish_diagnostics(uri, diags, Some(version))
             .await;
+    }
+
+    /// Publish the project-scope diagnostics (the `.m1cfg`-coverage / name
+    /// audits — T041/T050/T010/T071) anchored to the loaded `.m1prj`. These are
+    /// not tied to any open script, so the editor shows them as soon as the
+    /// project loads, matching what the CLI reports (#139). Publishes an empty
+    /// set (clearing stale entries) when the project loaded cleanly with no
+    /// findings; a no-op when no project is loaded.
+    async fn publish_project_diagnostics(&self) {
+        let Some(prj_path) = self
+            .store
+            .with_project(|p| p.map(|lp| lp.m1prj_path.clone()))
+        else {
+            return;
+        };
+        let Ok(uri) = Url::from_file_path(&prj_path) else {
+            return;
+        };
+        // Project diagnostics carry a zero byte-range (no script location), which
+        // maps to line 0 regardless of the index contents; build it from the
+        // open buffer if any, else the file on disk.
+        let text = self
+            .docs
+            .get(&uri)
+            .map(|d| d.text.clone())
+            .or_else(|| crate::disk_read::read_disk(&prj_path))
+            .unwrap_or_default();
+        let li = crate::line_index::LineIndex::new(&text);
+        let enc = self.enc();
+        let diags: Vec<Diagnostic> = self
+            .store
+            .project_diagnostics()
+            .iter()
+            .map(|d| crate::convert::type_diagnostic(d, &li, enc))
+            .collect();
+        let version = self.docs.get(&uri).map(|d| d.version);
+        self.client.publish_diagnostics(uri, diags, version).await;
     }
 }
 
@@ -422,6 +477,9 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "m1-lsp ready (v2)")
             .await;
+        // Surface the project-scope audit (T041/T050/…) now that the client is
+        // ready to receive diagnostics (#139).
+        self.publish_project_diagnostics().await;
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
@@ -1072,6 +1130,8 @@ impl LanguageServer for Backend {
         for uri in uris {
             self.publish(uri).await;
         }
+        // A `.m1cfg`/`.m1prj` edit can change cfg coverage or names — re-audit (#139).
+        self.publish_project_diagnostics().await;
     }
 
     async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
