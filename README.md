@@ -136,6 +136,10 @@ cargo build --release      # binary at target/release/m1-lsp
 cargo install --path .     # installs `m1-lsp` onto your $PATH
 ```
 
+Run with no arguments to start the language server over stdio (how editors launch
+it). `m1-lsp --help` / `--version` print and exit; `--scaffold-config` prints a
+default `m1-tools.toml`. An unrecognised flag exits non-zero rather than blocking.
+
 ## Editor setup
 
 See [`editors/nvim/README.md`](editors/nvim/README.md) for Neovim setup,
