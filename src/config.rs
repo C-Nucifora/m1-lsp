@@ -11,7 +11,7 @@
 //! drives the lint section when no `m1-tools.toml` is present.
 use m1_fmt::FormatOptions;
 use m1_lint::config::Config as LintConfig;
-use serde::Deserialize;
+use m1_workspace::config::M1ToolsConfig;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -55,20 +55,16 @@ impl M1Config {
     pub fn resolve(editor: Option<&serde_json::Value>, root: &Path) -> M1Config {
         let mut cfg = M1Config::default();
         if let Some(v) = editor
-            && let Ok(raw) = serde_json::from_value::<Raw>(v.clone())
+            && let Ok(tc) = serde_json::from_value::<M1ToolsConfig>(v.clone())
         {
-            raw.apply(&mut cfg);
+            apply(tc, &mut cfg);
         }
-        match discover(root, "m1-tools.toml") {
-            Some(text) => {
-                if let Ok(raw) = toml::from_str::<Raw>(&text) {
-                    raw.apply(&mut cfg);
-                }
-            }
+        match M1ToolsConfig::discover(root) {
+            Some(tc) => apply(tc, &mut cfg),
             // No unified file: keep the editor/default lint config unless a legacy
             // `.m1lint.toml` is present, which then takes over the lint section.
             None => {
-                if discover(root, ".m1lint.toml").is_some()
+                if m1_workspace::find_upward(root, ".m1lint.toml").is_some()
                     && let Ok(lint) = LintConfig::discover(root)
                 {
                     cfg.lint = lint;
@@ -79,81 +75,56 @@ impl M1Config {
     }
 }
 
-/// Raw, fully-optional view shared by the `m1-tools.toml` parse and the editor
-/// settings JSON (which the extension sends in this same snake_case shape).
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct Raw {
-    lint: RawLint,
-    format: RawFormat,
-    diagnostics: RawDiag,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct RawLint {
-    max_line_length: Option<usize>,
-    max_nesting_depth: Option<usize>,
-    max_complexity: Option<u32>,
-    exclude: Option<Vec<String>>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct RawFormat {
-    line_width: Option<usize>,
-    max_blank_lines: Option<usize>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct RawDiag {
-    ignore: Option<Vec<String>>,
-    select: Option<Vec<String>>,
-}
-
-impl Raw {
-    /// Overlay this layer's set fields onto `cfg`; unset fields leave the lower
-    /// layer untouched.
-    fn apply(self, cfg: &mut M1Config) {
-        if let Some(n) = self.lint.max_line_length {
-            cfg.lint.max_line_length = n;
+/// Overlay a parsed unified config onto `cfg`; unset fields leave the lower layer
+/// untouched. `[format].indent_style` is shared — it drives both the formatter and
+/// the linter (L010).
+fn apply(tc: M1ToolsConfig, cfg: &mut M1Config) {
+    if let Some(n) = tc.lint.max_line_length {
+        cfg.lint.max_line_length = n;
+    }
+    if let Some(n) = tc.lint.max_nesting_depth {
+        cfg.lint.max_nesting_depth = n;
+    }
+    if let Some(n) = tc.lint.max_complexity {
+        cfg.lint.max_complexity = n;
+    }
+    if let Some(n) = tc.lint.max_cognitive_complexity {
+        cfg.lint.max_cognitive_complexity = n;
+    }
+    if let Some(ex) = tc.lint.exclude {
+        cfg.lint.exclude = ex;
+    }
+    if let Some(n) = tc.format.line_width {
+        cfg.format.line_width = n;
+    }
+    if let Some(n) = tc.format.max_blank_lines {
+        cfg.format.max_blank_lines = n;
+    }
+    if let Some(n) = tc.format.indent_width {
+        cfg.format.indent_width = n;
+    }
+    if let Some(s) = tc.format.indent_style.as_deref() {
+        if let Some(fs) = m1_fmt::config::parse_indent_style(s) {
+            cfg.format.indent_style = fs;
         }
-        if let Some(n) = self.lint.max_nesting_depth {
-            cfg.lint.max_nesting_depth = n;
-        }
-        if let Some(n) = self.lint.max_complexity {
-            cfg.lint.max_complexity = n;
-        }
-        if let Some(ex) = self.lint.exclude {
-            cfg.lint.exclude = ex;
-        }
-        if let Some(n) = self.format.line_width {
-            cfg.format.line_width = n;
-        }
-        if let Some(n) = self.format.max_blank_lines {
-            cfg.format.max_blank_lines = n;
-        }
-        if let Some(ig) = self.diagnostics.ignore {
-            cfg.diagnostics.ignore = ig.into_iter().collect();
-        }
-        if let Some(se) = self.diagnostics.select {
-            cfg.diagnostics.select = se.into_iter().collect();
+        if let Some(ls) = m1_lint::config::IndentStyle::parse(s) {
+            cfg.lint.indent_style = ls;
         }
     }
-}
-
-/// Walk up from `start` looking for a file named `name`; return its contents.
-fn discover(start: &Path, name: &str) -> Option<String> {
-    let mut dir = Some(start);
-    while let Some(d) = dir {
-        let candidate = d.join(name);
-        if candidate.is_file() {
-            return std::fs::read_to_string(&candidate).ok();
-        }
-        dir = d.parent();
+    if let Some(s) = tc
+        .format
+        .brace_style
+        .as_deref()
+        .and_then(m1_fmt::config::parse_brace_style)
+    {
+        cfg.format.brace_style = s;
     }
-    None
+    if let Some(ig) = tc.diagnostics.ignore {
+        cfg.diagnostics.ignore = ig.into_iter().collect();
+    }
+    if let Some(se) = tc.diagnostics.select {
+        cfg.diagnostics.select = se.into_iter().collect();
+    }
 }
 
 /// A fully-commented `m1-tools.toml` pre-filled with every default, plus the full
@@ -177,11 +148,31 @@ pub fn scaffold() -> String {
     let _ = writeln!(s, "max_line_length = {}", lint.max_line_length);
     let _ = writeln!(s, "max_nesting_depth = {}", lint.max_nesting_depth);
     let _ = writeln!(s, "max_complexity = {}", lint.max_complexity);
+    let _ = writeln!(
+        s,
+        "max_cognitive_complexity = {}",
+        lint.max_cognitive_complexity
+    );
     s.push_str("exclude = []            # globs to skip (e.g. \"*.gen.m1scr\")\n\n");
 
     s.push_str("[format]\n");
     let _ = writeln!(s, "line_width = {}", fmt.line_width);
     let _ = writeln!(s, "max_blank_lines = {}", fmt.max_blank_lines);
+    let indent = match fmt.indent_style {
+        m1_fmt::IndentStyle::Tab => "tab",
+        m1_fmt::IndentStyle::Spaces => "spaces",
+    };
+    let brace = match fmt.brace_style {
+        m1_fmt::BraceStyle::Allman => "allman",
+        m1_fmt::BraceStyle::KAndR => "kr",
+    };
+    // indent_style is shared by the formatter and the linter (L010).
+    let _ = writeln!(
+        s,
+        "indent_style = \"{indent}\"   # \"tab\" | \"spaces\" (shared with lint)"
+    );
+    let _ = writeln!(s, "indent_width = {}", fmt.indent_width);
+    let _ = writeln!(s, "brace_style = \"{brace}\"      # \"allman\" | \"kr\"");
     s.push('\n');
 
     s.push_str("[diagnostics]\n");
@@ -260,5 +251,29 @@ mod tests {
         assert_eq!(cfg.lint.max_line_length, d.lint.max_line_length);
         assert_eq!(cfg.format.line_width, d.format.line_width);
         assert!(cfg.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn format_style_keys_map_to_fmt_and_lint() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("m1-tools.toml"),
+            "[format]\nbrace_style = \"kr\"\nindent_style = \"spaces\"\nindent_width = 2\n",
+        )
+        .unwrap();
+        let cfg = M1Config::resolve(None, tmp.path());
+        assert_eq!(cfg.format.brace_style, m1_fmt::BraceStyle::KAndR);
+        assert_eq!(cfg.format.indent_style, m1_fmt::IndentStyle::Spaces);
+        assert_eq!(cfg.format.indent_width, 2);
+        // The shared indent decision also drives the linter (L010).
+        assert_eq!(cfg.lint.indent_style, m1_lint::config::IndentStyle::Spaces);
+    }
+
+    #[test]
+    fn scaffold_emits_style_keys() {
+        let toml = scaffold();
+        assert!(toml.contains("brace_style"));
+        assert!(toml.contains("indent_style"));
+        assert!(toml.contains("indent_width"));
     }
 }
