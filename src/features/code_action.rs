@@ -6,11 +6,17 @@
 //! - `while`/`for`/`do`, which have no mechanical rewrite (M1 has no iteration) but
 //!   get a `WhenStatement` skeleton inserted above them as a starting point (#83).
 use crate::line_index::{LineIndex, PositionEncoding};
+use m1_typecheck::project::Project;
 use std::collections::HashMap;
 use tower_lsp::lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic, NumberOrString, Position, Range,
     TextEdit, Url, WorkspaceEdit,
 };
+
+/// True for the `T020` enum-non-member type diagnostic.
+fn is_t020(d: &Diagnostic) -> bool {
+    matches!(&d.code, Some(NumberOrString::String(s)) if s == "T020")
+}
 
 /// The M1 keyword that replaces a C operator, for the ones with a clean swap.
 fn replacement(op: &str) -> Option<&'static str> {
@@ -90,8 +96,40 @@ pub fn code_actions(
     enc: PositionEncoding,
     uri: &Url,
     diagnostics: &[Diagnostic],
+    project: Option<&Project>,
 ) -> Vec<CodeActionOrCommand> {
     let mut out = Vec::new();
+
+    // T020 enum-non-member: suggest the nearest valid enum member (#159). Needs
+    // the project model to look up the enum's members. The diagnostic range spans
+    // the whole `<Enum>.<Member>` path.
+    if let Some(project) = project {
+        let table = project.symbols();
+        for d in diagnostics.iter().filter(|d| is_t020(d)) {
+            let start = li.offset(d.range.start, text, enc);
+            let end = li.offset(d.range.end, text, enc);
+            let Some((head, member)) = text.get(start..end).and_then(|s| s.rsplit_once('.')) else {
+                continue;
+            };
+            let (head, member) = (head.trim(), member.trim());
+            let Some(id) = table.enum_by_name(head) else {
+                continue;
+            };
+            if let Some(best) = nearest_enum_member(member, &table.enum_type(id).members)
+                && best != member
+            {
+                out.push(quickfix(
+                    format!("Replace `{member}` with `{best}`"),
+                    uri,
+                    vec![TextEdit {
+                        range: d.range,
+                        new_text: format!("{head}.{best}"),
+                    }],
+                    Some(d),
+                ));
+            }
+        }
+    }
 
     // Per-diagnostic operator quick-fix: syntax `unsupported-c-token` + L004/L005.
     for d in diagnostics.iter().filter(|d| is_operator_fix(d)) {
@@ -206,6 +244,44 @@ fn loop_keyword(
     }
 }
 
+/// Levenshtein edit distance between two strings (small inputs — enum member
+/// names — so the simple O(m·n) row form is fine).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.chars().enumerate() {
+        cur[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// The enum member that `typo` most likely meant: a case-insensitive match wins
+/// outright (e.g. `OFf` → `Off`); otherwise the smallest edit distance, but only
+/// when it is close enough (≤ a third of the name's length, min 1) so unrelated
+/// garbage suggests nothing. `None` when no member is close.
+fn nearest_enum_member(typo: &str, members: &[(String, i64)]) -> Option<String> {
+    if let Some((name, _)) = members.iter().find(|(m, _)| m.eq_ignore_ascii_case(typo)) {
+        return Some(name.clone());
+    }
+    let mut best: Option<(&str, usize)> = None;
+    for (m, _) in members {
+        let d = edit_distance(&typo.to_ascii_lowercase(), &m.to_ascii_lowercase());
+        if best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((m, d));
+        }
+    }
+    best.and_then(|(name, d)| {
+        let limit = (name.chars().count() / 3).max(1);
+        (d <= limit).then(|| name.to_string())
+    })
+}
+
 /// The leading whitespace (indentation) of `line`.
 fn line_indent(text: &str, li: &LineIndex, enc: PositionEncoding, line: u32) -> String {
     let line_start = li.offset(Position::new(line, 0), text, enc);
@@ -241,7 +317,7 @@ mod tests {
         let li = LineIndex::new(src);
         let enc = PositionEncoding::Utf16;
         let d = diag_for(src, op, &li);
-        let actions = code_actions(src, &li, enc, &uri(), &[d]);
+        let actions = code_actions(src, &li, enc, &uri(), &[d], None);
         let CodeActionOrCommand::CodeAction(a) = actions.into_iter().next()? else {
             return None;
         };
@@ -252,6 +328,27 @@ mod tests {
         let mut s = src.to_string();
         s.replace_range(start..end, &edit.new_text);
         Some(s)
+    }
+
+    #[test]
+    fn nearest_enum_member_prefers_case_then_edit_distance() {
+        let members = vec![
+            ("Off".to_string(), 0i64),
+            ("On".to_string(), 1),
+            ("Driving".to_string(), 2),
+        ];
+        // case-only difference wins outright
+        assert_eq!(nearest_enum_member("OFf", &members).as_deref(), Some("Off"));
+        // one-edit typo
+        assert_eq!(nearest_enum_member("Of", &members).as_deref(), Some("Off"));
+        assert_eq!(
+            nearest_enum_member("Drivng", &members).as_deref(),
+            Some("Driving")
+        );
+        // far-off garbage suggests nothing
+        assert_eq!(nearest_enum_member("Xyzzy", &members), None);
+        // an exact member is not a typo (caller shouldn't have flagged it, but be safe)
+        assert_eq!(nearest_enum_member("On", &members).as_deref(), Some("On"));
     }
 
     #[test]
@@ -281,7 +378,7 @@ mod tests {
 
     fn titles(src: &str, diags: &[Diagnostic]) -> Vec<String> {
         let li = LineIndex::new(src);
-        code_actions(src, &li, PositionEncoding::Utf16, &uri(), diags)
+        code_actions(src, &li, PositionEncoding::Utf16, &uri(), diags, None)
             .into_iter()
             .filter_map(|a| match a {
                 CodeActionOrCommand::CodeAction(a) => Some(a.title),
@@ -309,7 +406,7 @@ mod tests {
         let li = LineIndex::new(src);
         let d = lint_diag(src, "  ", "L002", &li);
         let enc = PositionEncoding::Utf16;
-        let actions = code_actions(src, &li, enc, &uri(), &[d]);
+        let actions = code_actions(src, &li, enc, &uri(), &[d], None);
         let CodeActionOrCommand::CodeAction(a) = actions.into_iter().next().unwrap() else {
             panic!("expected an action");
         };
@@ -358,7 +455,7 @@ mod tests {
         let li = LineIndex::new(src);
         let enc = PositionEncoding::Utf16;
         let d = diag_for(src, "for", &li); // unsupported-c-token on `for`
-        let actions = code_actions(src, &li, enc, &uri(), &[d]);
+        let actions = code_actions(src, &li, enc, &uri(), &[d], None);
         let CodeActionOrCommand::CodeAction(a) = actions.into_iter().next().unwrap() else {
             panic!("expected a code action");
         };
@@ -396,7 +493,7 @@ mod tests {
         let src = "while (1) {}\n";
         let li = LineIndex::new(src);
         let d = diag_for(src, "while", &li);
-        let actions = code_actions(src, &li, PositionEncoding::Utf16, &uri(), &[d]);
+        let actions = code_actions(src, &li, PositionEncoding::Utf16, &uri(), &[d], None);
         assert_eq!(actions.len(), 1);
         let CodeActionOrCommand::CodeAction(a) = &actions[0] else {
             panic!("expected a code action");
@@ -424,6 +521,65 @@ mod tests {
             ..Default::default()
         };
         // Must not panic (produces no action for the mid-codepoint slice).
-        let _ = code_actions(src, &li, PositionEncoding::Utf8, &uri(), &[d]);
+        let _ = code_actions(src, &li, PositionEncoding::Utf8, &uri(), &[d], None);
+    }
+
+    #[test]
+    fn t020_offers_nearest_enum_member_quickfix() {
+        use crate::project_store::ProjectStore;
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let xml = r#"<?xml version="1.0"?>
+<Project>
+  <DataTypes>
+    <Type Name="Drive State" Storage="enum" Default="Off">
+      <Enum Name="Off" ContainerOrder="0"/>
+      <Enum Name="On" ContainerOrder="1"/>
+    </Type>
+  </DataTypes>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+</Project>"#;
+        std::fs::File::create(tmp.path().join("Project.m1prj"))
+            .unwrap()
+            .write_all(xml.as_bytes())
+            .unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        // A T020 on `Drive State.Of` (a typo of `Off`) spanning the whole path.
+        let src = "x = Drive State.Of;\n";
+        let li = LineIndex::new(src);
+        let enc = PositionEncoding::Utf16;
+        let at = src.find("Drive State.Of").unwrap();
+        let d = Diagnostic {
+            range: Range::new(
+                li.position(at, enc),
+                li.position(at + "Drive State.Of".len(), enc),
+            ),
+            code: Some(NumberOrString::String("T020".into())),
+            ..Default::default()
+        };
+        store.with_project(|p| {
+            let actions = code_actions(
+                src,
+                &li,
+                enc,
+                &uri(),
+                std::slice::from_ref(&d),
+                p.map(|lp| &lp.project),
+            );
+            let titles: Vec<_> = actions
+                .iter()
+                .filter_map(|a| match a {
+                    CodeActionOrCommand::CodeAction(a) => Some(a.title.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                titles.iter().any(|t| t == "Replace `Of` with `Off`"),
+                "expected a did-you-mean fix; got {titles:?}"
+            );
+        });
     }
 }

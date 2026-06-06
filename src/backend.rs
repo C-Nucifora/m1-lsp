@@ -1083,13 +1083,18 @@ impl LanguageServer for Backend {
         else {
             return Ok(None);
         };
-        let actions = code_action::code_actions(
-            &text,
-            &lindex,
-            self.enc(),
-            &uri,
-            &params.context.diagnostics,
-        );
+        let enc = self.enc();
+        // The project model backs the T020 "did you mean" enum-member fix (#159).
+        let actions = self.store.with_project(|p| {
+            code_action::code_actions(
+                &text,
+                &lindex,
+                enc,
+                &uri,
+                &params.context.diagnostics,
+                p.map(|lp| &lp.project),
+            )
+        });
         Ok((!actions.is_empty()).then_some(actions))
     }
 
