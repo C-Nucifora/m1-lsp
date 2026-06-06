@@ -55,7 +55,16 @@ fn completion_includes_project_symbol() {
     let src = "local x = 1;\n";
     let cst = m1_core::parse(src);
     store.with_project(|p| {
-        let items = completion::completions(cst.root(), p, Some("X.m1scr"), src, src.len());
+        let li = LineIndex::new(src);
+        let items = completion::completions(
+            cst.root(),
+            p,
+            Some("X.m1scr"),
+            src,
+            src.len(),
+            &li,
+            PositionEncoding::Utf16,
+        );
         assert!(items.iter().any(|i| i.label.contains("Speed Glonk")));
     });
 }

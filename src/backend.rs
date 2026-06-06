@@ -600,14 +600,23 @@ impl LanguageServer for Backend {
         else {
             return Ok(None);
         };
-        let byte = lindex.offset(tdp.position, &text, self.enc());
+        let enc = self.enc();
+        let byte = lindex.offset(tdp.position, &text, enc);
         let cst = m1_core::parse(&text);
         let file_name = uri
             .to_file_path()
             .ok()
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
         let items = self.store.with_project(|p| {
-            completion::completions(cst.root(), p, file_name.as_deref(), &text, byte)
+            completion::completions(
+                cst.root(),
+                p,
+                file_name.as_deref(),
+                &text,
+                byte,
+                &lindex,
+                enc,
+            )
         });
         Ok(Some(CompletionResponse::Array(items)))
     }
