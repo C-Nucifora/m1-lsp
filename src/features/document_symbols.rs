@@ -16,6 +16,18 @@ fn name_of(decl: Node) -> Option<Node> {
         .find(|c| matches!(c.kind(), Kind::Identifier | Kind::MemberExpression))
 }
 
+/// The callee path node of a call-expression statement — the `Output.SetState`
+/// of `Output.SetState(1);` — when `stmt`'s direct child is a `CallExpression`.
+/// Restricted to a direct child so a nested call inside a larger expression
+/// (`a + Foo(x);`) doesn't mislabel the statement.
+fn call_callee(stmt: Node) -> Option<Node> {
+    let call = stmt
+        .named_children()
+        .into_iter()
+        .find(|c| c.kind() == Kind::CallExpression)?;
+    call.child_by_field(Field::Function)
+}
+
 /// A short header label for a block construct, e.g. `when (driveMode)` or
 /// `if (ready)`, whitespace-collapsed and truncated so the outline stays
 /// readable.
@@ -58,6 +70,22 @@ fn collect(n: Node, li: &LineIndex, enc: PositionEncoding) -> Vec<DocumentSymbol
                     out.push(leaf(name.text(), SymbolKind::FIELD, child, name, li, enc));
                 }
             }
+            // A bare call statement (`Output.SetState(1);`, `Timer.Start();`) is
+            // the actual behaviour of many actuator/fault scripts; surface it as a
+            // leaf labelled by the callee path so those scripts get an outline
+            // instead of a blank one (#152). A non-call expression statement just
+            // descends.
+            Kind::ExpressionStatement => match call_callee(child) {
+                Some(callee) => out.push(leaf(
+                    callee.text(),
+                    SymbolKind::METHOD,
+                    child,
+                    callee,
+                    li,
+                    enc,
+                )),
+                None => out.extend(collect(child, li, enc)),
+            },
             Kind::IfStatement => {
                 let kids = collect(child, li, enc);
                 if !kids.is_empty() {
@@ -137,6 +165,42 @@ mod tests {
         let names: Vec<_> = syms.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"fGain"));
         assert!(names.contains(&"Ratio"));
+    }
+
+    #[test]
+    fn lists_call_statements_as_leaves() {
+        // A script whose body is only side-effecting calls (actuator/fault
+        // scripts) must not produce a blank outline (#152).
+        let src = "Output.SetState(1);\nTimer.Start();\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let syms = document_symbols(cst.root(), &li, PositionEncoding::Utf16);
+        let names: Vec<_> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Output.SetState"), "got {names:?}");
+        assert!(names.contains(&"Timer.Start"), "got {names:?}");
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn surfaces_if_block_whose_only_children_are_calls() {
+        let src = "if (ready) {\nOutput.SetState(1);\n}\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let syms = document_symbols(cst.root(), &li, PositionEncoding::Utf16);
+        assert_eq!(
+            syms.len(),
+            1,
+            "an if block whose only child is a call should still appear: {syms:?}"
+        );
+        assert!(syms[0].name.starts_with("if"));
+        assert!(
+            syms[0]
+                .children
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|k| k.name == "Output.SetState")
+        );
     }
 
     #[test]

@@ -77,8 +77,10 @@ optional sibling checkout.
   `textDocument/documentHighlight`): all same-file occurrences of the local /
   channel / symbol under the cursor, with read/write classification for
   highlights.
-- **Document symbols** (`textDocument/documentSymbol`): outline of locals and
-  assignment targets.
+- **Document symbols** (`textDocument/documentSymbol`): outline of locals,
+  assignment targets, and call statements (e.g. `Output.SetState`), nested under
+  their `if`/`when` blocks — so call-only actuator/fault scripts still get an
+  outline.
 - **Completion** (`textDocument/completion`): in-scope locals, project symbols,
   library objects and keywords; after a library object `.` (a trigger
   character), that object's methods. Project symbols carry their value type and
