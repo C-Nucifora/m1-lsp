@@ -148,6 +148,11 @@ pub fn scaffold() -> String {
     let _ = writeln!(s, "max_line_length = {}", lint.max_line_length);
     let _ = writeln!(s, "max_nesting_depth = {}", lint.max_nesting_depth);
     let _ = writeln!(s, "max_complexity = {}", lint.max_complexity);
+    let _ = writeln!(
+        s,
+        "max_cognitive_complexity = {}",
+        lint.max_cognitive_complexity
+    );
     s.push_str("exclude = []            # globs to skip (e.g. \"*.gen.m1scr\")\n\n");
 
     s.push_str("[format]\n");
