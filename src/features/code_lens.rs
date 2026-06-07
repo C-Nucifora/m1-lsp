@@ -11,7 +11,7 @@
 //! LSP — so there is deliberately no write-back.
 use crate::features::call_hierarchy::script_symbol;
 use crate::project_store::LoadedProject;
-use tower_lsp::lsp_types::{CodeLens, Command, Position, Range, Url};
+use tower_lsp::lsp_types::{CodeLens, Command, Location, Position, Range, Url};
 
 /// A single code lens at line 0 of the script naming its execution rate, or an
 /// empty vec when the file is not a known script or its rate is not statically
@@ -27,17 +27,39 @@ pub fn code_lens(loaded: &LoadedProject, uri: &Url) -> Vec<CodeLens> {
     if !file_name.ends_with(".m1scr") {
         return Vec::new();
     }
-    let Some(rate) = script_symbol(loaded, &file_name).and_then(|s| s.call_rate_hz) else {
+    let Some(sym) = script_symbol(loaded, &file_name) else {
+        return Vec::new();
+    };
+    let Some(rate) = sym.call_rate_hz else {
         return Vec::new();
     };
     let title = format!("⚡ {} Hz", fmt_hz(rate));
+    // Make the lens clickable: navigate to the script's `<Component>` line in the
+    // `.m1prj` — where its `<Props SelectedTrigger=…>` (the clock that set this
+    // rate) lives. Driven server-side via `window/showDocument` through the
+    // `m1.revealLocation` command, so it works on any LSP 3.16 client (#175).
+    let command = match (Url::from_file_path(&loaded.m1prj_path), sym.def_line) {
+        (Ok(prj_uri), Some(line)) => {
+            let loc = Location {
+                uri: prj_uri,
+                range: Range::new(Position::new(line, 0), Position::new(line, 0)),
+            };
+            Command {
+                title,
+                command: "m1.revealLocation".to_string(),
+                arguments: serde_json::to_value(loc).ok().map(|v| vec![v]),
+            }
+        }
+        // No locatable declaration: keep the badge informational (not clickable).
+        _ => Command {
+            title,
+            command: String::new(),
+            arguments: None,
+        },
+    };
     vec![CodeLens {
         range: Range::new(Position::new(0, 0), Position::new(0, 0)),
-        command: Some(Command {
-            title,
-            command: String::new(), // informational; not clickable
-            arguments: None,
-        }),
+        command: Some(command),
         data: None,
     }]
 }
@@ -89,8 +111,16 @@ mod tests {
         store.with_project(|p| {
             let lenses = code_lens(p.unwrap(), &uri);
             assert_eq!(lenses.len(), 1);
-            assert_eq!(lenses[0].command.as_ref().unwrap().title, "⚡ 500 Hz");
+            let cmd = lenses[0].command.as_ref().unwrap();
+            assert_eq!(cmd.title, "⚡ 500 Hz");
             assert_eq!(lenses[0].range.start.line, 0);
+            // Clickable: navigates to the script's declaration in the .m1prj (#175).
+            assert_eq!(cmd.command, "m1.revealLocation");
+            let loc: Location =
+                serde_json::from_value(cmd.arguments.as_ref().unwrap()[0].clone()).unwrap();
+            assert!(loc.uri.path().ends_with("Project.m1prj"));
+            // Root.Engine.Update is the 6th component line in M1PRJ (0-based 5).
+            assert_eq!(loc.range.start.line, 5);
         });
     }
 
