@@ -504,6 +504,19 @@ fn collect_group_ref_edits(
 /// segment. Refuses (the whole rename) if any such script can't be located on
 /// disk — renaming the group without renaming its file would silently break the
 /// script's group-relative references, which we never do.
+/// True for a symbol backed by a user-authored `.m1scr` (so a missing file is a
+/// real problem), as opposed to a firmware/auto-generated method that never has
+/// one. Used to decide whether a missing backing file should refuse a group
+/// rename or just be skipped (#147).
+fn is_user_authored_script(sym: &m1_typecheck::symbols::Symbol) -> bool {
+    matches!(
+        sym.classname.as_deref(),
+        Some(c) if c.starts_with("BuiltIn.FuncUser")
+            || c.starts_with("BuiltIn.CalFuncUser")
+            || c == "BuiltIn.MethodUser"
+    )
+}
+
 fn group_file_renames(
     loaded: &LoadedProject,
     project: &Project,
@@ -535,10 +548,17 @@ fn group_file_renames(
                 .map(|f| f == old_base.as_str())
                 .unwrap_or(false)
         }) else {
-            return Err(format!(
-                "‘{}’ has no locatable backing script ({old_base}); rename that file before renaming the group so references aren't silently broken",
-                sym.path
-            ));
+            // Firmware/auto-generated methods (FuncGenerated, IO methods) are not
+            // backed by a user `.m1scr` — there is no file to rename, so skip them.
+            // Only a genuine user-authored script (FuncUser/CalFuncUser/MethodUser)
+            // with a missing file is a real hazard worth refusing for (#147).
+            if is_user_authored_script(sym) {
+                return Err(format!(
+                    "‘{}’ has no locatable backing script ({old_base}); rename that file before renaming the group so references aren't silently broken",
+                    sym.path
+                ));
+            }
+            continue;
         };
         let (Ok(old_uri), Ok(new_uri)) = (
             Url::from_file_path(disk),
@@ -1690,6 +1710,50 @@ mod tests {
         });
         let err = res.unwrap_err();
         assert!(err.contains("backing script"), "got: {err}");
+    }
+
+    #[test]
+    fn group_rename_skips_firmware_generated_children() {
+        // #147: a top-level group whose only file-less method descendants are
+        // firmware-generated (FuncGenerated/IO methods — never backed by a user
+        // script) must rename, not be refused for a file those methods never have.
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = r#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.CAN"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.CAN.Active"><Props Type="f32"/></Component>
+  <Component Classname="BuiltIn.FuncGenerated.IO" Name="Root.CAN.Generated Method"/>
+</Project>"#;
+        std::fs::write(tmp.path().join("Project.m1prj"), prj).unwrap();
+        let src = "local a = Root.CAN.Active;\n";
+        std::fs::write(tmp.path().join("X.m1scr"), src).unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        let uri = Url::from_file_path(tmp.path().join("X.m1scr")).unwrap();
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find("CAN").unwrap();
+        let no_open = |_: &Url| None;
+        let res = store.with_project(|p| {
+            execute(
+                cst.root(),
+                byte,
+                "Comms",
+                uri.clone(),
+                &li,
+                PositionEncoding::Utf16,
+                p,
+                Some("X.m1scr"),
+                &no_open,
+            )
+        });
+        let edit = res.expect("group with only firmware-generated methods should rename");
+        assert!(
+            edit.document_changes.is_some() || edit.changes.is_some(),
+            "expected a non-empty edit: {edit:?}"
+        );
     }
 
     #[test]
