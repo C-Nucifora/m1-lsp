@@ -6,6 +6,7 @@
 //! - `while`/`for`/`do`, which have no mechanical rewrite (M1 has no iteration) but
 //!   get a `WhenStatement` skeleton inserted above them as a starting point (#83).
 use crate::line_index::{LineIndex, PositionEncoding};
+use m1_core::{Field, Kind, Node};
 use m1_typecheck::project::Project;
 use std::collections::HashMap;
 use tower_lsp::lsp_types::{
@@ -277,6 +278,289 @@ pub fn code_actions(
     out
 }
 
+/// Selection-driven `REFACTOR` code actions (#174), independent of diagnostics:
+/// "Extract to local" (a selected expression → a named `local` above the
+/// statement) and "Inline local" (a single-assignment `local` → its initializer
+/// at every read, declaration deleted). Both are purely in-file syntactic edits.
+pub fn refactors(
+    text: &str,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    uri: &Url,
+    range: Range,
+) -> Vec<CodeActionOrCommand> {
+    let cst = m1_core::parse(text);
+    let root = cst.root();
+    let mut out = Vec::new();
+    if let Some(a) = extract_local(text, li, enc, uri, range, root) {
+        out.push(a);
+    }
+    if let Some(a) = inline_local(text, li, enc, uri, range, root) {
+        out.push(a);
+    }
+    out
+}
+
+/// The M1 expression node kinds — the things that can be extracted to a local or
+/// substituted in for one.
+fn is_expression_kind(k: Kind) -> bool {
+    matches!(
+        k,
+        Kind::Identifier
+            | Kind::Interpolation
+            | Kind::MemberExpression
+            | Kind::CallExpression
+            | Kind::UnaryExpression
+            | Kind::BinaryExpression
+            | Kind::TernaryExpression
+            | Kind::ParenthesizedExpression
+            | Kind::Number
+            | Kind::Boolean
+            | Kind::String
+    )
+}
+
+/// The statement node that directly contains `n` (the child of a `SourceFile` or
+/// `Block` on the path up from `n`).
+fn enclosing_statement(n: Node) -> Node {
+    let mut cur = n;
+    while let Some(p) = cur.parent() {
+        if matches!(p.kind(), Kind::SourceFile | Kind::Block) {
+            return cur;
+        }
+        cur = p;
+    }
+    cur
+}
+
+/// True when `n` lies within the `target` (lvalue) side of an assignment — a
+/// position where neither extraction nor an inlined value belongs.
+fn within_assignment_target(n: Node) -> bool {
+    let mut cur = n;
+    while let Some(p) = cur.parent() {
+        if p.kind() == Kind::AssignmentStatement {
+            return p
+                .child_by_field(Field::Target)
+                .map(|t| {
+                    let (tr, nr) = (t.byte_range(), cur.byte_range());
+                    tr.start <= nr.start && nr.end <= tr.end
+                })
+                .unwrap_or(false);
+        }
+        cur = p;
+    }
+    false
+}
+
+/// True when `n` is inside a `<Type>` annotation (e.g. `local <Integer>`), where
+/// an identifier names a type, not a value.
+fn within_type_annotation(n: Node) -> bool {
+    let mut cur = n;
+    while let Some(p) = cur.parent() {
+        if p.kind() == Kind::TypeAnnotation {
+            return true;
+        }
+        cur = p;
+    }
+    false
+}
+
+/// True when `n` is the `name` identifier of a `local` declaration.
+fn is_local_decl_name(n: Node) -> bool {
+    n.parent()
+        .filter(|p| p.kind() == Kind::LocalDeclaration)
+        .and_then(|p| p.child_by_field(Field::Name))
+        .map(|name| name.byte_range() == n.byte_range())
+        .unwrap_or(false)
+}
+
+/// A value-position expression occurrence (extractable / substitutable): an
+/// expression node that is neither an lvalue target, a type-annotation name, nor
+/// a `local` declaration's name.
+fn is_value_expression(n: Node) -> bool {
+    is_expression_kind(n.kind())
+        && !within_assignment_target(n)
+        && !within_type_annotation(n)
+        && !is_local_decl_name(n)
+}
+
+/// A fresh local name (`myValue`, `myValue2`, …) not already declared in `root`.
+fn fresh_local_name(root: Node) -> String {
+    let locals = crate::features::locate::collect_locals(root);
+    let base = "myValue";
+    if !locals.contains_key(base) {
+        return base.to_string();
+    }
+    (2..)
+        .map(|i| format!("{base}{i}"))
+        .find(|c| !locals.contains_key(c))
+        .unwrap()
+}
+
+/// "Extract to local": wrap the selected expression in a `local` above its
+/// statement and replace every textually-identical value-position occurrence with
+/// the new name. `None` for an empty selection, a selection that doesn't cover a
+/// whole expression, or an expression in lvalue / type-annotation position.
+fn extract_local(
+    text: &str,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    uri: &Url,
+    range: Range,
+    root: Node,
+) -> Option<CodeActionOrCommand> {
+    let mut s = li.offset(range.start, text, enc);
+    let mut e = li.offset(range.end, text, enc);
+    // Trim whitespace inside the selection so a trailing/leading space (common in
+    // a drag-select) still lines up with an expression node's exact span.
+    while s < e && text[s..].chars().next().is_some_and(char::is_whitespace) {
+        s += text[s..].chars().next().unwrap().len_utf8();
+    }
+    while s < e
+        && text[..e]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
+    {
+        e -= text[..e].chars().next_back().unwrap().len_utf8();
+    }
+    if s >= e {
+        return None; // empty selection (a bare cursor) is not an extraction
+    }
+
+    // The outermost expression node fully covered by the trimmed selection.
+    let expr = root
+        .descendants()
+        .filter(|n| is_expression_kind(n.kind()))
+        .filter(|n| {
+            let r = n.byte_range();
+            r.start >= s && r.end <= e
+        })
+        .max_by_key(|n| n.byte_range().end - n.byte_range().start)?;
+    if !is_value_expression(expr) {
+        return None;
+    }
+    let needle = expr.text().trim().to_string();
+    if needle.is_empty() {
+        return None;
+    }
+
+    // Every identical value-position occurrence, earliest first.
+    let mut occ: Vec<Node> = root
+        .descendants()
+        .filter(|n| is_value_expression(*n) && n.text().trim() == needle)
+        .collect();
+    occ.sort_by_key(|n| n.byte_range().start);
+    occ.dedup_by_key(|n| n.byte_range().start);
+    let first = *occ.first()?;
+
+    let name = fresh_local_name(root);
+    let stmt = enclosing_statement(first);
+    let line = li.position(stmt.byte_range().start, enc).line;
+    let indent = line_indent(text, li, enc, line);
+    let insert_pos = Position::new(line, 0);
+
+    let mut edits = vec![TextEdit {
+        range: Range::new(insert_pos, insert_pos),
+        new_text: format!("{indent}local {name} = {needle};\n"),
+    }];
+    for n in occ {
+        edits.push(TextEdit {
+            range: crate::convert::range(&n.byte_range(), li, enc),
+            new_text: name.clone(),
+        });
+    }
+    Some(refactor_action(
+        "Extract to local",
+        uri,
+        edits,
+        CodeActionKind::REFACTOR_EXTRACT,
+    ))
+}
+
+/// "Inline local": replace each read of the cursor's `local` with its
+/// initializer and delete the declaration. `None` when the cursor isn't on a
+/// local, the local has no initializer, or it is reassigned anywhere (so its
+/// value isn't a single constant expression).
+fn inline_local(
+    text: &str,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    uri: &Url,
+    range: Range,
+    root: Node,
+) -> Option<CodeActionOrCommand> {
+    let byte = li.offset(range.start, text, enc);
+    let ident = crate::features::rename::local_ident_at(root, byte)?;
+    let name = ident.text();
+
+    // The declaration and its single initializer.
+    let decl = root.descendants().find(|n| {
+        n.kind() == Kind::LocalDeclaration
+            && n.child_by_field(Field::Name).map(|nm| nm.text()) == Some(name)
+    })?;
+    let decl_name = decl.child_by_field(Field::Name)?;
+    let init = decl.child_by_field(Field::Value)?;
+    let init_text = init.text().to_string();
+
+    // Collect read occurrences; bail if the local is ever an assignment target
+    // (its value isn't a single expression we can substitute everywhere).
+    let mut reads = Vec::new();
+    for n in root.descendants() {
+        if !crate::features::rename::is_local_ref(n, name) {
+            continue;
+        }
+        if n.byte_range() == decl_name.byte_range() {
+            continue; // the declaration's own name
+        }
+        if within_assignment_target(n) {
+            return None;
+        }
+        reads.push(n);
+    }
+
+    let mut edits: Vec<TextEdit> = reads
+        .iter()
+        .map(|n| TextEdit {
+            range: crate::convert::range(&n.byte_range(), li, enc),
+            new_text: init_text.clone(),
+        })
+        .collect();
+    // Delete the whole declaration line.
+    let decl_line = li.position(decl.byte_range().start, enc).line;
+    edits.push(TextEdit {
+        range: Range::new(Position::new(decl_line, 0), Position::new(decl_line + 1, 0)),
+        new_text: String::new(),
+    });
+    Some(refactor_action(
+        "Inline local",
+        uri,
+        edits,
+        CodeActionKind::REFACTOR_INLINE,
+    ))
+}
+
+/// A `REFACTOR`-kind code action carrying a single-file `WorkspaceEdit`.
+fn refactor_action(
+    title: &str,
+    uri: &Url,
+    edits: Vec<TextEdit>,
+    kind: CodeActionKind,
+) -> CodeActionOrCommand {
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), edits);
+    CodeActionOrCommand::CodeAction(CodeAction {
+        title: title.to_string(),
+        kind: Some(kind),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        }),
+        ..Default::default()
+    })
+}
+
 /// A source-level "Format Document" / "Format Selection" action (kind `SOURCE`)
 /// that applies `edits` to the document. Surfaced independently of diagnostics so
 /// the code-action menu offers formatting even on clean code (#161).
@@ -454,6 +738,125 @@ mod tests {
         let mut s = src.to_string();
         s.replace_range(start..end, &edit.new_text);
         Some(s)
+    }
+
+    // --- #174 extract-local / inline-local refactors -----------------------
+
+    const ENC: PositionEncoding = PositionEncoding::Utf16;
+
+    /// Range spanning the first occurrence of `needle` in `src`.
+    fn sel(src: &str, needle: &str, li: &LineIndex) -> Range {
+        let s = src.find(needle).unwrap();
+        Range::new(li.position(s, ENC), li.position(s + needle.len(), ENC))
+    }
+
+    /// A zero-width range (a cursor) at the first occurrence of `needle`.
+    fn cursor(src: &str, needle: &str, li: &LineIndex) -> Range {
+        let s = src.find(needle).unwrap();
+        let p = li.position(s, ENC);
+        Range::new(p, p)
+    }
+
+    /// The edits of the refactor action titled `title`, if present.
+    fn action_edits(actions: &[CodeActionOrCommand], title: &str) -> Option<Vec<TextEdit>> {
+        actions.iter().find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) if ca.title == title => {
+                ca.edit.as_ref()?.changes.as_ref()?.get(&uri()).cloned()
+            }
+            _ => None,
+        })
+    }
+
+    /// Apply a set of (non-overlapping) text edits to `src`.
+    fn apply(src: &str, edits: &[TextEdit], li: &LineIndex) -> String {
+        let mut spans: Vec<(usize, usize, String)> = edits
+            .iter()
+            .map(|e| {
+                (
+                    li.offset(e.range.start, src, ENC),
+                    li.offset(e.range.end, src, ENC),
+                    e.new_text.clone(),
+                )
+            })
+            .collect();
+        // Apply right-to-left so earlier offsets stay valid.
+        spans.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        let mut out = src.to_string();
+        for (s, e, t) in spans {
+            out.replace_range(s..e, &t);
+        }
+        out
+    }
+
+    #[test]
+    fn extract_local_introduces_named_intermediate() {
+        let src = "Demo.Widget Count = (Demo.Raw Value - Demo.Offset) * Demo.Scale Factor;\n\
+                   Demo.Mode Output = (Demo.Raw Value - Demo.Offset) * Demo.Scale Factor;\n";
+        let li = LineIndex::new(src);
+        let range = sel(
+            src,
+            "(Demo.Raw Value - Demo.Offset) * Demo.Scale Factor",
+            &li,
+        );
+        let actions = refactors(src, &li, ENC, &uri(), range);
+        let edits = action_edits(&actions, "Extract to local")
+            .expect("an Extract to local action should be offered");
+        let out = apply(src, &edits, &li);
+        // A `local` is introduced above the first statement, and every identical
+        // occurrence is replaced with the new name.
+        assert_eq!(
+            out,
+            "local myValue = (Demo.Raw Value - Demo.Offset) * Demo.Scale Factor;\n\
+             Demo.Widget Count = myValue;\n\
+             Demo.Mode Output = myValue;\n",
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn extract_local_not_offered_without_a_selection() {
+        let src = "Demo.Out = (a - b) * c;\n";
+        let li = LineIndex::new(src);
+        // A bare cursor (empty range) is not an extraction.
+        let range = cursor(src, "(a - b)", &li);
+        let actions = refactors(src, &li, ENC, &uri(), range);
+        assert!(
+            action_edits(&actions, "Extract to local").is_none(),
+            "extract must require a non-empty selection"
+        );
+    }
+
+    #[test]
+    fn inline_local_replaces_uses_and_deletes_declaration() {
+        let src = "local myValue = Demo.Sensor Value * 2.0;\n\
+                   Demo.Widget Count = myValue;\n\
+                   Demo.Mode Output = myValue + 1;\n";
+        let li = LineIndex::new(src);
+        let range = cursor(src, "myValue", &li); // on the declaration
+        let actions = refactors(src, &li, ENC, &uri(), range);
+        let edits = action_edits(&actions, "Inline local")
+            .expect("an Inline local action should be offered");
+        let out = apply(src, &edits, &li);
+        assert_eq!(
+            out,
+            "Demo.Widget Count = Demo.Sensor Value * 2.0;\n\
+             Demo.Mode Output = Demo.Sensor Value * 2.0 + 1;\n",
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn inline_local_refused_when_reassigned() {
+        let src = "local myValue = 0;\n\
+                   myValue = myValue + 1;\n\
+                   Demo.Out = myValue;\n";
+        let li = LineIndex::new(src);
+        let range = cursor(src, "local myValue", &li);
+        let actions = refactors(src, &li, ENC, &uri(), range);
+        assert!(
+            action_edits(&actions, "Inline local").is_none(),
+            "a reassigned local must not be inlinable"
+        );
     }
 
     #[test]
