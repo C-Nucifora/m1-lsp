@@ -27,10 +27,15 @@
 //!    when a backing script can't be located — never a silent partial edit. The
 //!    edit is emitted as `document_changes` so it can carry the file renames.
 //!
-//! Out of scope (refused with a message): file-backed symbols (functions,
-//! methods, DBC signals — renaming them means renaming their own backing file);
-//! and a value-bearing channel/parameter that itself has children (rename its
-//! leaf members individually).
+//! A user-authored function/method (a `FuncUser`/`MethodUser` backed by its own
+//! `.m1scr`) is renamed across its `.m1prj` declaration, every call site, and its
+//! backing file (moved via a bundled `RenameFile`; an explicit `Filename=` is
+//! kept consistent when it encodes the leaf) — refused only when the backing file
+//! can't be located (#150).
+//!
+//! Out of scope (refused with a message): other file-backed symbols (DBC signals,
+//! firmware-generated scripts); and a value-bearing channel/parameter that itself
+//! has children (rename its leaf members individually).
 use crate::convert::range as to_range;
 use crate::features::locate::{
     build_scope, collect_locals, node_at_byte, path_at_byte, segment_at_byte, segment_nodes,
@@ -353,15 +358,25 @@ fn file_name_of(uri: &Url) -> Option<String> {
 enum Target<'p> {
     Leaf(&'p Symbol),
     Group(&'p Symbol),
+    /// A user-authored function/method backed by its own `.m1scr` script: renamed
+    /// across its `.m1prj` declaration and every call site, with the backing file
+    /// moved alongside (#150).
+    FileBacked(&'p Symbol),
 }
 
 /// Decide renameability of `sym` (independent of which entry point found it).
 /// `Ok(None)` is never returned here — callers map "no symbol" themselves; this
 /// returns the [`Target`] or the user-facing reason it can't be renamed.
 fn classify<'p>(project: &'p Project, sym: &'p Symbol) -> Result<Target<'p>, String> {
+    // A user-authored function/method is renameable, with its backing `.m1scr`
+    // moved alongside (#150). This holds whether the script is convention-named
+    // (`filename: None`) or carries an explicit `Filename=`.
+    if is_user_authored_script(sym) {
+        return Ok(Target::FileBacked(sym));
+    }
     if sym.filename.is_some() {
         return Err(format!(
-            "‘{}’ is defined in its own file; renaming file-backed symbols (functions, methods, DBC signals) is not supported",
+            "‘{}’ is defined in its own file; renaming file-backed symbols (DBC signals, firmware-generated scripts) is not supported",
             sym.path
         ));
     }
@@ -757,6 +772,162 @@ fn execute_group(
     })
 }
 
+/// Rewrite a trailing `<old_leaf>` token in a `.m1scr` filename
+/// (`Demo.Calculate.m1scr` + `Calculate`→`Recalculate` ⇒ `Demo.Recalculate.m1scr`).
+/// The leaf must be a whole token immediately before the `.m1scr` extension,
+/// optionally preceded by a `.`/` ` delimiter. `None` when the filename does not
+/// end with the leaf token — its location is then independent of the symbol name,
+/// so the file is left where it is (#150).
+fn rewrite_trailing_leaf(filename: &str, old_leaf: &str, new_name: &str) -> Option<String> {
+    let stem = filename.strip_suffix(".m1scr")?;
+    let head = stem.strip_suffix(old_leaf)?;
+    if head.is_empty() || head.ends_with('.') || head.ends_with(' ') {
+        Some(format!("{head}{new_name}.m1scr"))
+    } else {
+        None
+    }
+}
+
+/// `(old_basename, new_basename, rewrites_explicit_filename)` for a
+/// function/method's backing file when its leaf is renamed. `None` => no file
+/// move (an explicit `Filename=` that doesn't encode the leaf; its location is
+/// independent of the symbol name, so only the `Name=` is updated).
+fn func_backing_basenames(
+    sym: &Symbol,
+    parent: Option<&str>,
+    old_leaf: &str,
+    new_name: &str,
+) -> Option<(String, String, bool)> {
+    match sym.filename.as_deref() {
+        None => {
+            // Convention: the path minus `Root.` + `.m1scr`.
+            let rel = sym.path.strip_prefix("Root.").unwrap_or(&sym.path);
+            let old_base = format!("{rel}.m1scr");
+            let new_path = match parent {
+                Some(p) => format!("{p}.{new_name}"),
+                None => new_name.to_string(),
+            };
+            let new_rel = new_path.strip_prefix("Root.").unwrap_or(&new_path);
+            Some((old_base, format!("{new_rel}.m1scr"), false))
+        }
+        Some(f) => rewrite_trailing_leaf(f, old_leaf, new_name).map(|nf| (f.to_string(), nf, true)),
+    }
+}
+
+/// Execute a file-backed function/method rename: the `.m1prj` `Name=` (and an
+/// explicit `Filename=` when it encodes the leaf), every resolving call site, and
+/// a `RenameFile` op moving the backing `.m1scr` (#150).
+fn execute_func_method(
+    sym: &Symbol,
+    new_name: &str,
+    cursor_uri: &Url,
+    enc: PositionEncoding,
+    loaded: &LoadedProject,
+    open_text: &dyn Fn(&Url) -> Option<String>,
+) -> Result<WorkspaceEdit, String> {
+    let project = &loaded.project;
+    let target_path = sym.path.clone();
+    let (parent, old_leaf) = split_leaf(&target_path);
+    if new_name == old_leaf {
+        return Err("the new name is the same as the current name".to_string());
+    }
+    let new_full = match parent {
+        Some(p) => format!("{p}.{new_name}"),
+        None => new_name.to_string(),
+    };
+    if project.symbols().get(&new_full).is_some() {
+        return Err(format!(
+            "a symbol named ‘{new_name}’ already exists at ‘{new_full}’"
+        ));
+    }
+
+    // Resolve the backing-file rename first — it is the step that can refuse.
+    let mut rename_op: Option<RenameFile> = None;
+    let mut filename_attr: Option<(String, String)> = None; // (old, new) for the .m1prj edit
+    if let Some((old_base, new_base, rewrites_attr)) =
+        func_backing_basenames(sym, parent, old_leaf, new_name)
+    {
+        let disk = loaded.script_files.iter().find(|p| {
+            p.file_name()
+                .map(|f| f == old_base.as_str())
+                .unwrap_or(false)
+        });
+        match disk {
+            Some(disk) => {
+                if let (Ok(old_uri), Ok(new_uri)) = (
+                    Url::from_file_path(disk),
+                    Url::from_file_path(disk.with_file_name(&new_base)),
+                ) {
+                    rename_op = Some(RenameFile {
+                        old_uri,
+                        new_uri,
+                        options: None,
+                        annotation_id: None,
+                    });
+                }
+            }
+            None => {
+                return Err(format!(
+                    "‘{target_path}’ has no locatable backing script ({old_base}); rename that file before renaming the symbol so references aren't silently broken"
+                ));
+            }
+        }
+        if rewrites_attr {
+            filename_attr = Some((old_base, new_base));
+        }
+    }
+
+    let mut ops: Vec<DocumentChangeOperation> = Vec::new();
+
+    // 1) `.m1prj`: the declaration `Name=` (and an explicit `Filename=`).
+    let prj_uri = Url::from_file_path(&loaded.m1prj_path)
+        .map_err(|_| "cannot form a URL for the project file".to_string())?;
+    let prj_text = open_text(&prj_uri)
+        .or_else(|| crate::disk_read::read_disk(&loaded.m1prj_path))
+        .ok_or_else(|| "cannot read the project file".to_string())?;
+    let mut prj_edits = vec![
+        m1prj_name_edit(&prj_text, &target_path, old_leaf, new_name, enc).ok_or_else(|| {
+            format!("could not locate the declaration of ‘{target_path}’ in the project file")
+        })?,
+    ];
+    if let Some((old_f, new_f)) = &filename_attr {
+        let li = LineIndex::new(&prj_text);
+        let needle = format!("Filename=\"{old_f}\"");
+        if let Some(rel) = prj_text.find(&needle) {
+            let val_start = rel + "Filename=\"".len();
+            let val_end = val_start + old_f.len();
+            prj_edits.push(TextEdit {
+                range: to_range(&(val_start..val_end), &li, enc),
+                new_text: new_f.clone(),
+            });
+        }
+    }
+    ops.push(text_doc_edit(prj_uri, prj_edits));
+
+    // 2) Every resolving call site across every script.
+    for (su, stext) in project_scripts(loaded, cursor_uri, open_text) {
+        let scst = m1_core::parse(&stext);
+        let sli = LineIndex::new(&stext);
+        let sfname = file_name_of(&su);
+        let sscope = scope_for(scst.root(), project, sfname.as_deref());
+        let edits = collect_ref_edits(scst.root(), &target_path, new_name, &sscope, &sli, enc);
+        if !edits.is_empty() {
+            ops.push(text_doc_edit(su, edits));
+        }
+    }
+
+    // 3) Then the backing-file rename (applied after the text edits).
+    if let Some(rf) = rename_op {
+        ops.push(DocumentChangeOperation::Op(ResourceOp::Rename(rf)));
+    }
+
+    Ok(WorkspaceEdit {
+        changes: None,
+        document_changes: Some(DocumentChanges::Operations(ops)),
+        change_annotations: None,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Public entry points (dispatch local vs project).
 // ---------------------------------------------------------------------------
@@ -787,7 +958,7 @@ pub fn prepare(
     // group segment the cursor is on.
     let seg_idx = match target {
         Target::Group(_) => segment_at_byte(top, byte)?,
-        Target::Leaf(_) => {
+        Target::Leaf(_) | Target::FileBacked(_) => {
             let scope = scope_for(root, project, file_name);
             let (_, k) = resolve_prefix(&path, &scope)?;
             k - 1
@@ -859,9 +1030,13 @@ pub fn execute(
         ));
     }
 
-    // A group/object container cascades across the workspace + backing files.
+    // A group/object container cascades across the workspace + backing files; a
+    // file-backed function/method renames its declaration, call sites and file.
     let sym = match target {
         Target::Group(g) => return execute_group(g, new_name, &uri, enc, loaded, open_text),
+        Target::FileBacked(s) => {
+            return execute_func_method(s, new_name, &uri, enc, loaded, open_text);
+        }
         Target::Leaf(s) => s,
     };
     let target_path = sym.path.clone();
@@ -952,9 +1127,14 @@ fn symbol_renameable<'p>(project: &'p Project, path: &str) -> Result<&'p Symbol,
     let Some(sym) = project.symbols().get(path) else {
         return Err(format!("‘{path}’ is not a renameable project symbol"));
     };
+    // A user-authored function/method is renameable from the `.m1prj` too — its
+    // backing file moves alongside (#150).
+    if is_user_authored_script(sym) {
+        return Ok(sym);
+    }
     if sym.filename.is_some() {
         return Err(format!(
-            "‘{}’ is file-backed (function/method/DBC signal); renaming it is not supported",
+            "‘{}’ is file-backed (DBC signal / firmware-generated); renaming it is not supported",
             sym.path
         ));
     }
@@ -1011,13 +1191,17 @@ pub fn execute_m1prj(
     let project = &loaded.project;
     let (target_path, _) = name_attr_at(prj_text, byte)
         .ok_or_else(|| "place the cursor on a component Name in the project file".to_string())?;
-    symbol_renameable(project, &target_path)?;
+    let sym = symbol_renameable(project, &target_path)?;
 
     let new_name = new_name.trim();
     if !is_valid_symbol_name(new_name) {
         return Err(format!(
             "‘{new_name}’ is not a valid M1 symbol name (letters, digits, spaces, underscore; no dots or quotes)"
         ));
+    }
+    // A file-backed function/method cascades to its call sites and backing file.
+    if is_user_authored_script(sym) {
+        return execute_func_method(sym, new_name, &prj_uri, enc, loaded, open_text);
     }
     let (parent, old_leaf) = split_leaf(&target_path);
     if new_name == old_leaf {
@@ -1660,6 +1844,144 @@ mod tests {
                 .unwrap_or_default(),
             _ => Vec::new(),
         }
+    }
+
+    #[test]
+    fn rewrite_trailing_leaf_only_on_whole_trailing_token() {
+        assert_eq!(
+            rewrite_trailing_leaf("Demo.Calculate.m1scr", "Calculate", "Recalculate").as_deref(),
+            Some("Demo.Recalculate.m1scr")
+        );
+        assert_eq!(
+            rewrite_trailing_leaf("Calculate.m1scr", "Calculate", "Recalculate").as_deref(),
+            Some("Recalculate.m1scr")
+        );
+        // Not a whole trailing token → left alone.
+        assert_eq!(
+            rewrite_trailing_leaf("Demo.Miscalculate.m1scr", "Calculate", "Recalculate"),
+            None
+        );
+        assert_eq!(
+            rewrite_trailing_leaf("Demo.Calculate.txt", "Calculate", "Recalculate"),
+            None
+        );
+    }
+
+    /// Build a project with a method `Root.Demo.Calculate` (convention-named
+    /// backing script) and a caller, returning the loaded store.
+    fn setup_func() -> (tempfile::TempDir, ProjectStore) {
+        let prj = r#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Demo"/>
+  <Component Classname="BuiltIn.MethodUser" Name="Root.Demo.Calculate"/>
+  <Component Classname="BuiltIn.MethodUser" Name="Root.Demo.Other"/>
+</Project>"#;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Project.m1prj"), prj).unwrap();
+        std::fs::write(tmp.path().join("Demo.Calculate.m1scr"), "// calc\n").unwrap();
+        std::fs::write(tmp.path().join("Demo.Other.m1scr"), "Demo.Calculate();\n").unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+        (tmp, store)
+    }
+
+    #[test]
+    fn file_backed_method_is_renameable_from_call_site() {
+        let (tmp, store) = setup_func();
+        let src = "Demo.Calculate();\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find("Calculate").unwrap();
+        let pr = store.with_project(|p| {
+            prepare(
+                cst.root(),
+                byte,
+                &li,
+                PositionEncoding::Utf16,
+                Some(&p.unwrap().project),
+                Some("Demo.Other.m1scr"),
+            )
+        });
+        assert!(pr.is_some(), "file-backed method should be renameable");
+        drop(tmp);
+    }
+
+    #[test]
+    fn rename_file_backed_method_edits_decl_callsite_and_moves_file() {
+        let (tmp, store) = setup_func();
+        let src = "Demo.Calculate();\n";
+        let uri = Url::from_file_path(tmp.path().join("Demo.Other.m1scr")).unwrap();
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find("Calculate").unwrap();
+        let no_open = |_: &Url| None;
+
+        let we = store
+            .with_project(|p| {
+                execute(
+                    cst.root(),
+                    byte,
+                    "Recalculate",
+                    uri.clone(),
+                    &li,
+                    PositionEncoding::Utf16,
+                    Some(p.unwrap()),
+                    Some("Demo.Other.m1scr"),
+                    &no_open,
+                )
+            })
+            .expect("file-backed method rename should succeed");
+
+        // .m1prj declaration leaf rewritten.
+        let prj = doc_edits_for(&we, "Project.m1prj");
+        assert!(
+            prj.iter().any(|e| e.new_text == "Recalculate"),
+            "Name= leaf must be rewritten: {prj:?}"
+        );
+        // Call site rewritten.
+        let other = doc_edits_for(&we, "Demo.Other.m1scr");
+        assert!(
+            other.iter().any(|e| e.new_text == "Recalculate"),
+            "call site must be rewritten: {other:?}"
+        );
+        // Backing file moved.
+        let files = rename_files(&we);
+        assert!(
+            files
+                .iter()
+                .any(|(o, n)| o == "Demo.Calculate.m1scr" && n == "Demo.Recalculate.m1scr"),
+            "backing file must be renamed: {files:?}"
+        );
+    }
+
+    #[test]
+    fn rename_file_backed_method_refuses_when_backing_file_missing() {
+        let (tmp, store) = setup_func();
+        // Remove the backing file so the rename can't locate it.
+        std::fs::remove_file(tmp.path().join("Demo.Calculate.m1scr")).unwrap();
+        store.discover_and_load(tmp.path()).unwrap();
+        let src = "Demo.Calculate();\n";
+        let uri = Url::from_file_path(tmp.path().join("Demo.Other.m1scr")).unwrap();
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find("Calculate").unwrap();
+        let no_open = |_: &Url| None;
+
+        let res = store.with_project(|p| {
+            execute(
+                cst.root(),
+                byte,
+                "Recalculate",
+                uri.clone(),
+                &li,
+                PositionEncoding::Utf16,
+                Some(p.unwrap()),
+                Some("Demo.Other.m1scr"),
+                &no_open,
+            )
+        });
+        assert!(res.is_err(), "must refuse when backing file is missing");
     }
 
     #[test]
