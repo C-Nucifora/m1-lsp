@@ -92,7 +92,9 @@ optional sibling checkout.
   character), that object's methods. Project symbols carry their value type and
   unit in the completion `detail` (e.g. `Unsigned · ratio`, `Enum (Drive State)`).
 - **Signature help** (`textDocument/signatureHelp`): library-function overloads
-  with the active argument highlighted, triggered on `(` and `,`.
+  with the active argument highlighted (triggered on `(` and `,`), the
+  name + return type of a user function/method, and the parameter list of a
+  project-object method call (`Channel.Set`, `Table.Lookup`, `X.AsInteger`, …).
 - **Inlay hints** (`textDocument/inlayHint`): an inline `: Type` after each
   un-annotated `local`.
 - **Rename** (`textDocument/rename` + `prepareRename`): file-scoped rename of a
