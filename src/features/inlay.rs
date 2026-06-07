@@ -31,9 +31,12 @@ pub fn inlay_hints(
     file_name: Option<&str>,
 ) -> Vec<InlayHint> {
     let mut out = Vec::new();
-    collect(root, &range, li, enc, &mut out);
-    if let Some(project) = project {
-        let scope = crate::features::locate::build_scope(root, Some(project), file_name);
+    // One scope (project + group + declaration-order locals) drives both the
+    // local-type hints and the unit hints; with no project it still resolves
+    // literal and local-to-local-copy types (#153).
+    let scope = crate::features::locate::build_scope(root, project, file_name);
+    collect(root, &range, li, enc, &scope, &mut out);
+    if project.is_some() {
         collect_unit_hints(root, &range, li, enc, &scope, &mut out);
     }
     out
@@ -96,6 +99,7 @@ fn collect(
     range: &Range,
     li: &LineIndex,
     enc: PositionEncoding,
+    scope: &m1_typecheck::resolve::Scope,
     out: &mut Vec<InlayHint>,
 ) {
     // Iterate the tree with m1-core's explicit work-stack pre-order iterator
@@ -115,7 +119,7 @@ fn collect(
             .iter()
             .any(|c| c.kind() == Kind::TypeAnnotation);
         if !annotated && let Some(name) = n.child_by_field(Field::Name) {
-            let t = local_decl_type(n);
+            let t = local_decl_type(n, scope);
             if !matches!(t, ValueType::Unknown) {
                 let position = li.position(name.byte_range().end, enc);
                 if position.line >= range.start.line && position.line <= range.end.line {
@@ -236,6 +240,62 @@ mod tests {
         assert_eq!(h.len(), 1);
         assert_eq!(label(&h[0]), ": Integer");
         assert_eq!(h[0].kind, Some(InlayHintKind::TYPE));
+    }
+
+    #[test]
+    fn local_to_local_copy_propagates_type_without_project() {
+        // `copy` is initialised from another local; its type propagates even with
+        // no project loaded (#153).
+        let h = hints("local count = 0;\nlocal copy = count;\n");
+        let labels: Vec<String> = h.iter().map(label).collect();
+        assert!(
+            labels.iter().filter(|l| *l == ": Integer").count() >= 2,
+            "both the literal local and its copy should be hinted Integer: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn channel_read_and_copy_infer_type_with_project() {
+        use crate::project_store::ProjectStore;
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::File::create(tmp.path().join("Project.m1prj"))
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Demo"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Demo.Speed"><Props Qty="rad/s"/></Component>
+</Project>"#,
+            )
+            .unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+        // speed = channel read (Float); copy = local-to-local copy (Float).
+        let src = "local speed = Demo.Speed;\nlocal copy = speed;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let full = Range::new(Position::new(0, 0), Position::new(10_000, 0));
+        store.with_project(|p| {
+            let hs = inlay_hints(
+                cst.root(),
+                full,
+                &li,
+                PositionEncoding::Utf16,
+                p.map(|lp| &lp.project),
+                Some("Demo.Update.m1scr"),
+            );
+            let type_labels: Vec<String> = hs
+                .iter()
+                .filter(|h| h.kind == Some(InlayHintKind::TYPE))
+                .map(label)
+                .collect();
+            assert!(
+                type_labels.iter().filter(|l| *l == ": Float").count() >= 2,
+                "channel-read local and its copy should both hint Float: {type_labels:?}"
+            );
+        });
     }
 
     #[test]

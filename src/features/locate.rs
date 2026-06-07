@@ -92,32 +92,29 @@ pub fn segment_at_byte(top: Node, byte: usize) -> Option<usize> {
 /// expression (literals/arithmetic only, via an empty scope so there are no
 /// cross-local ordering hazards). Returns `Unknown` when there is no initializer
 /// or its type cannot be determined.
-pub fn local_decl_type(decl: Node) -> ValueType {
-    let Some(_name) = decl
-        .named_children()
-        .into_iter()
-        .find(|c| c.kind() == Kind::Identifier)
-    else {
-        return ValueType::Unknown;
-    };
-    let initializer = decl
-        .named_children()
-        .into_iter()
-        .find(|c| c.kind() != Kind::Identifier && c.kind() != Kind::TypeAnnotation);
-    if let Some(init) = initializer {
-        let empty_scope = Scope {
-            locals: HashMap::new(),
-            group: None,
-            project: None,
-        };
-        m1_typecheck::typer::type_of(init, &empty_scope)
-    } else {
-        ValueType::Unknown
+/// The inferred type of a `local`'s initializer, resolved in `scope` — so a
+/// channel read (`local s = Demo.Speed;`) types from the project model and a
+/// local-to-local copy (`local c = s;`) propagates from `scope.locals` (#153).
+/// `scope` should carry the locals declared *before* this one (declaration-order
+/// threading), the script's group, and the project, as [`build_scope`] provides.
+pub fn local_decl_type(decl: Node, scope: &Scope) -> ValueType {
+    // The grammar names the initializer `value`; using the field (rather than
+    // "first non-name child") correctly handles an *Identifier* initializer
+    // (`local copy = other;`), which the old kind-exclusion heuristic dropped.
+    match decl.child_by_field(Field::Value) {
+        Some(init) => m1_typecheck::typer::type_of(init, scope),
+        None => ValueType::Unknown,
     }
 }
 
-/// Collect locals (name -> inferred type) from the CST, mirroring m1-typecheck.
-pub fn collect_locals(root: Node) -> HashMap<String, ValueType> {
+/// Collect locals (name -> inferred type) from the CST in the context of
+/// `project`/`group`, threading declaration order so each local sees the ones
+/// declared before it (and channel reads resolve when a project is present).
+fn collect_locals_with(
+    root: Node,
+    project: Option<&Project>,
+    group: Option<&str>,
+) -> HashMap<String, ValueType> {
     // Iterate the tree with m1-core's explicit work-stack pre-order iterator
     // rather than recursion, so a pathologically deep document can't overflow the
     // call stack (#133). Same pre-order visit, same result.
@@ -129,10 +126,23 @@ pub fn collect_locals(root: Node) -> HashMap<String, ValueType> {
                 .into_iter()
                 .find(|c| c.kind() == Kind::Identifier)
         {
-            locals.insert(name.text().to_string(), local_decl_type(n));
+            let scope = Scope {
+                locals: locals.clone(),
+                group: group.map(str::to_string),
+                project,
+            };
+            let t = local_decl_type(n, &scope);
+            locals.insert(name.text().to_string(), t);
         }
     }
     locals
+}
+
+/// Collect locals (name -> inferred type) from the CST, mirroring m1-typecheck.
+/// Project-less: literal and local-to-local-copy types resolve; channel reads
+/// stay `Unknown` (callers that only test membership don't care).
+pub fn collect_locals(root: Node) -> HashMap<String, ValueType> {
+    collect_locals_with(root, None, None)
 }
 
 /// Build the resolution scope for `src` in the context of `project` (if any) and
@@ -147,7 +157,7 @@ pub fn build_scope<'p>(
         _ => None,
     };
     Scope {
-        locals: collect_locals(root),
+        locals: collect_locals_with(root, project, group.as_deref()),
         group,
         project,
     }
