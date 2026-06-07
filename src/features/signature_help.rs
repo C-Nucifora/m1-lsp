@@ -120,7 +120,26 @@ pub fn signature_help(
         {
             Some(user_fn_help(sym))
         }
-        _ => None,
+        // Project-object methods (`Channel.Set`, `Table.Lookup`, `X.AsInteger`, …):
+        // the call resolves opaquely, but the last path segment names a method the
+        // intrinsics model with parameter types — surface its overload(s) (#145).
+        _ => {
+            let method = path.rsplit_once('.').map_or(path.as_str(), |(_, m)| m);
+            let overloads = m1_typecheck::intrinsics::get().object_method(method);
+            if overloads.is_empty() {
+                return None;
+            }
+            let active = call
+                .child_by_field(Field::Arguments)
+                .map(|args| active_arg(args, byte))
+                .unwrap_or(0);
+            let signatures = overloads.iter().map(|ov| sig_info(&path, ov)).collect();
+            Some(SignatureHelp {
+                signatures,
+                active_signature: Some(pick_by_arity(&overloads, active) as u32),
+                active_parameter: Some(active as u32),
+            })
+        }
     }
 }
 
@@ -193,6 +212,25 @@ mod tests {
     #[test]
     fn no_help_outside_a_library_call() {
         assert!(help("local x = 1;\n", "local x =").is_none());
+    }
+
+    #[test]
+    fn object_method_call_shows_signature() {
+        // `.Lookup(` is a project-object method modelled by the intrinsics; it
+        // should get signature help even with no project loaded (#145).
+        let h = help("x = Engine.Map.Lookup(rpm, load);\n", "Engine.Map.Lookup(").unwrap();
+        assert!(
+            h.signatures[0].label.contains("Lookup("),
+            "got {}",
+            h.signatures[0].label
+        );
+        assert_eq!(h.active_parameter, Some(0));
+    }
+
+    #[test]
+    fn unknown_member_call_still_has_no_help() {
+        // A made-up method name is not a modelled object method -> no help.
+        assert!(help("x = Foo.Bar.Nonexistent(a);\n", "Nonexistent(").is_none());
     }
 
     #[test]
