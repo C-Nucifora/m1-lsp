@@ -397,6 +397,7 @@ impl LanguageServer for Backend {
                         code_action_kinds: Some(vec![
                             CodeActionKind::QUICKFIX,
                             CodeActionKind::SOURCE_FIX_ALL,
+                            CodeActionKind::SOURCE,
                         ]),
                         resolve_provider: Some(false),
                         work_done_progress_options: Default::default(),
@@ -1115,6 +1116,20 @@ impl LanguageServer for Backend {
             actions.push(code_action::fix_all_lint_action(
                 &uri, &text, &lindex, enc, fixed,
             ));
+        }
+        // Source-level format actions, offered independently of diagnostics (#161)
+        // so the menu can format clean code. "Format Document" appears when
+        // formatting would change the file; "Format Selection" when the request
+        // range spans more than one line.
+        if let Some(doc) = self.docs.get(&uri) {
+            if let Some(edits) = format_edits(&doc, enc, self.formatter.as_ref()) {
+                actions.push(code_action::format_action("Format Document", &uri, edits));
+            }
+            if params.range.start.line < params.range.end.line
+                && let Some(edits) = range_format_edits(&doc, params.range, self.formatter.as_ref())
+            {
+                actions.push(code_action::format_action("Format Selection", &uri, edits));
+            }
         }
         Ok((!actions.is_empty()).then_some(actions))
     }
