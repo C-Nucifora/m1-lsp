@@ -48,8 +48,9 @@ use m1_typecheck::resolve::{Resolution, Scope, resolve};
 use m1_typecheck::symbols::{Symbol, SymbolKind, SymbolTable};
 use std::collections::{HashMap, HashSet};
 use tower_lsp::lsp_types::{
-    DocumentChangeOperation, DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier,
-    PrepareRenameResponse, RenameFile, ResourceOp, TextDocumentEdit, TextEdit, Url, WorkspaceEdit,
+    AnnotatedTextEdit, ChangeAnnotation, DocumentChangeOperation, DocumentChanges, OneOf,
+    OptionalVersionedTextDocumentIdentifier, PrepareRenameResponse, RenameFile, ResourceOp,
+    TextDocumentEdit, TextEdit, Url, WorkspaceEdit,
 };
 
 // ---------------------------------------------------------------------------
@@ -926,6 +927,114 @@ fn execute_func_method(
         document_changes: Some(DocumentChanges::Operations(ops)),
         change_annotations: None,
     })
+}
+
+/// Attach a confirmation [`ChangeAnnotation`] to a rename that touches more than
+/// one file or moves any file, so a client advertising `changeAnnotationSupport`
+/// shows a preview/confirm step before applying (#151). Single-file edits (a
+/// local-variable rename, or a leaf rename that resolves within one script) and
+/// clients without support are returned unchanged.
+pub fn annotate_for_confirmation(
+    edit: WorkspaceEdit,
+    new_name: &str,
+    supported: bool,
+) -> WorkspaceEdit {
+    if !supported {
+        return edit;
+    }
+    // Count touched files and file-rename ops without consuming the edit.
+    let file_count = match (&edit.changes, &edit.document_changes) {
+        (Some(c), _) => c.len(),
+        (_, Some(DocumentChanges::Operations(ops))) => ops
+            .iter()
+            .filter(|o| matches!(o, DocumentChangeOperation::Edit(_)))
+            .count(),
+        (_, Some(DocumentChanges::Edits(e))) => e.len(),
+        _ => 0,
+    };
+    let rename_count = match &edit.document_changes {
+        Some(DocumentChanges::Operations(ops)) => ops
+            .iter()
+            .filter(|o| matches!(o, DocumentChangeOperation::Op(ResourceOp::Rename(_))))
+            .count(),
+        _ => 0,
+    };
+    // A single edited file with no file move applies immediately — no preview.
+    if file_count <= 1 && rename_count == 0 {
+        return edit;
+    }
+
+    const ANN_ID: &str = "m1.rename";
+    let id: tower_lsp::lsp_types::ChangeAnnotationIdentifier = ANN_ID.to_string();
+    let renamed = if rename_count > 0 {
+        format!(", {rename_count} file(s) renamed")
+    } else {
+        String::new()
+    };
+    let annotate_edits = |edits: Vec<OneOf<TextEdit, AnnotatedTextEdit>>| {
+        edits
+            .into_iter()
+            .map(|e| {
+                let text_edit = match e {
+                    OneOf::Left(te) => te,
+                    OneOf::Right(ate) => ate.text_edit,
+                };
+                OneOf::Right(AnnotatedTextEdit {
+                    text_edit,
+                    annotation_id: id.clone(),
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut ops: Vec<DocumentChangeOperation> = Vec::new();
+    if let Some(changes) = edit.changes {
+        for (uri, edits) in changes {
+            ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier { uri, version: None },
+                edits: annotate_edits(edits.into_iter().map(OneOf::Left).collect()),
+            }));
+        }
+    } else if let Some(DocumentChanges::Operations(existing)) = edit.document_changes {
+        for op in existing {
+            match op {
+                DocumentChangeOperation::Edit(tde) => {
+                    ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+                        text_document: tde.text_document,
+                        edits: annotate_edits(tde.edits),
+                    }));
+                }
+                DocumentChangeOperation::Op(ResourceOp::Rename(mut rf)) => {
+                    rf.annotation_id = Some(id.clone());
+                    ops.push(DocumentChangeOperation::Op(ResourceOp::Rename(rf)));
+                }
+                other => ops.push(other),
+            }
+        }
+    } else if let Some(DocumentChanges::Edits(edits)) = edit.document_changes {
+        for tde in edits {
+            ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+                text_document: tde.text_document,
+                edits: annotate_edits(tde.edits),
+            }));
+        }
+    }
+
+    let mut annotations = HashMap::new();
+    annotations.insert(
+        id,
+        ChangeAnnotation {
+            label: format!("Rename to ‘{new_name}’"),
+            needs_confirmation: Some(true),
+            description: Some(format!("{file_count} file(s) edited{renamed}")),
+        },
+    );
+
+    WorkspaceEdit {
+        changes: None,
+        document_changes: Some(DocumentChanges::Operations(ops)),
+        change_annotations: Some(annotations),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1844,6 +1953,110 @@ mod tests {
                 .unwrap_or_default(),
             _ => Vec::new(),
         }
+    }
+
+    fn te(s: u32) -> TextEdit {
+        TextEdit {
+            range: tower_lsp::lsp_types::Range::default(),
+            new_text: format!("x{s}"),
+        }
+    }
+
+    fn uri(name: &str) -> Url {
+        Url::parse(&format!("file:///{name}")).unwrap()
+    }
+
+    #[test]
+    fn annotate_skips_unsupported_client_and_single_file() {
+        // Unsupported client → returned verbatim (still a `changes` map).
+        let mut changes = HashMap::new();
+        changes.insert(uri("a.m1scr"), vec![te(1)]);
+        changes.insert(uri("b.m1scr"), vec![te(2)]);
+        let we = WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        };
+        let out = annotate_for_confirmation(we, "New", false);
+        assert!(out.changes.is_some() && out.change_annotations.is_none());
+
+        // Supported, but a single edited file with no file move → unchanged.
+        let mut one = HashMap::new();
+        one.insert(uri("a.m1scr"), vec![te(1)]);
+        let we1 = WorkspaceEdit {
+            changes: Some(one),
+            document_changes: None,
+            change_annotations: None,
+        };
+        let out1 = annotate_for_confirmation(we1, "New", true);
+        assert!(
+            out1.change_annotations.is_none(),
+            "single-file rename needs no preview"
+        );
+    }
+
+    #[test]
+    fn annotate_multi_file_attaches_confirmation() {
+        let mut changes = HashMap::new();
+        changes.insert(uri("a.m1scr"), vec![te(1)]);
+        changes.insert(uri("b.m1scr"), vec![te(2)]);
+        let we = WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        };
+        let out = annotate_for_confirmation(we, "New", true);
+        // Converted to document_changes carrying a confirmation annotation.
+        assert!(out.changes.is_none());
+        let anns = out.change_annotations.expect("annotations attached");
+        assert_eq!(anns.len(), 1);
+        assert_eq!(anns.values().next().unwrap().needs_confirmation, Some(true));
+        match out.document_changes {
+            Some(DocumentChanges::Operations(ops)) => {
+                assert_eq!(ops.len(), 2);
+                for op in ops {
+                    let DocumentChangeOperation::Edit(tde) = op else {
+                        panic!("expected edit op")
+                    };
+                    assert!(tde.edits.iter().all(|e| matches!(e, OneOf::Right(_))));
+                }
+            }
+            _ => panic!("expected operations"),
+        }
+    }
+
+    #[test]
+    fn annotate_file_rename_op_attaches_confirmation_even_single_edit() {
+        // One edited file but a RenameFile op → still needs confirmation.
+        let ops = vec![
+            DocumentChangeOperation::Edit(TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier {
+                    uri: uri("Project.m1prj"),
+                    version: None,
+                },
+                edits: vec![OneOf::Left(te(1))],
+            }),
+            DocumentChangeOperation::Op(ResourceOp::Rename(RenameFile {
+                old_uri: uri("Old.m1scr"),
+                new_uri: uri("New.m1scr"),
+                options: None,
+                annotation_id: None,
+            })),
+        ];
+        let we = WorkspaceEdit {
+            changes: None,
+            document_changes: Some(DocumentChanges::Operations(ops)),
+            change_annotations: None,
+        };
+        let out = annotate_for_confirmation(we, "New", true);
+        assert!(out.change_annotations.is_some());
+        let Some(DocumentChanges::Operations(ops)) = out.document_changes else {
+            panic!("expected operations")
+        };
+        let renamed = ops.iter().any(|o| {
+            matches!(o, DocumentChangeOperation::Op(ResourceOp::Rename(rf)) if rf.annotation_id.is_some())
+        });
+        assert!(renamed, "RenameFile must carry the annotation id");
     }
 
     #[test]
