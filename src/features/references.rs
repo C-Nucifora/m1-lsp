@@ -245,6 +245,7 @@ fn path_text_locations(
 /// spellings of the same channel collapse (#143), falling back to verbatim text
 /// matching for library members / opaque / unresolved paths. When `writes_only`,
 /// only producer (assignment-target) sites are kept.
+#[allow(clippy::too_many_arguments)]
 fn project_canonical_refs(
     writes_only: bool,
     project: &Project,
