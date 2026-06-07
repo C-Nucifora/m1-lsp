@@ -30,6 +30,10 @@ pub struct Backend {
     /// Whether the client supports dynamic registration of
     /// `workspace/didChangeWatchedFiles` (set during `initialize`).
     watch_dynamic: std::sync::atomic::AtomicBool,
+    /// Whether the client supports `WorkspaceEdit.changeAnnotations` (set during
+    /// `initialize`). When it does, multi-file / file-renaming renames are tagged
+    /// with a confirmation annotation so the client can preview them (#151).
+    change_annotation_support: std::sync::atomic::AtomicBool,
     /// The resolved unified config (lint/format/diagnostics) currently applied to
     /// the backends. Re-resolved on root discovery, `m1-tools.toml` change, and
     /// `didChangeConfiguration`; its `diagnostics` filter is read on every publish.
@@ -53,6 +57,7 @@ impl Backend {
             formatter: Box::new(NoFormat),
             store: Arc::new(ProjectStore::new()),
             watch_dynamic: std::sync::atomic::AtomicBool::new(false),
+            change_annotation_support: std::sync::atomic::AtomicBool::new(false),
             config: std::sync::RwLock::new(M1Config::default()),
             editor_settings: std::sync::RwLock::new(None),
             config_root: std::sync::RwLock::new(None),
@@ -78,6 +83,7 @@ impl Backend {
             formatter,
             store,
             watch_dynamic: std::sync::atomic::AtomicBool::new(false),
+            change_annotation_support: std::sync::atomic::AtomicBool::new(false),
             config: std::sync::RwLock::new(M1Config::default()),
             editor_settings: std::sync::RwLock::new(None),
             config_root: std::sync::RwLock::new(None),
@@ -334,6 +340,18 @@ impl LanguageServer for Backend {
             .unwrap_or(false);
         self.watch_dynamic
             .store(supports_watch, std::sync::atomic::Ordering::Relaxed);
+
+        // Record whether the client supports change annotations, so a multi-file /
+        // file-renaming rename can carry a confirmation preview (#151).
+        let supports_annotations = params
+            .capabilities
+            .workspace
+            .as_ref()
+            .and_then(|w| w.workspace_edit.as_ref())
+            .and_then(|we| we.change_annotation_support.as_ref())
+            .is_some();
+        self.change_annotation_support
+            .store(supports_annotations, std::sync::atomic::Ordering::Relaxed);
 
         // Capture editor settings (the middle config layer, beneath `m1-tools.toml`).
         // The client sends `{ "settings": { lint, format, diagnostics } }`; accept a
@@ -1043,7 +1061,14 @@ impl LanguageServer for Backend {
                 // Refresh the project model from the edit so the renamed symbol is
                 // live immediately, without waiting for a client file-watch event.
                 self.refresh_after_rename(&edit).await;
-                Ok(Some(edit))
+                // Tag multi-file / file-renaming edits with a confirmation
+                // annotation so capable clients can preview them (#151).
+                let supported = self
+                    .change_annotation_support
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                Ok(Some(rename::annotate_for_confirmation(
+                    edit, &new_name, supported,
+                )))
             }
             Err(e) => Err(Error::invalid_params(e)),
         }
