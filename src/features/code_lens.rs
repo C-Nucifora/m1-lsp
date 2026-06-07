@@ -27,23 +27,45 @@ pub fn code_lens(loaded: &LoadedProject, uri: &Url) -> Vec<CodeLens> {
     if !file_name.ends_with(".m1scr") {
         return Vec::new();
     }
-    let Some(rate) = script_symbol(loaded, &file_name).and_then(|s| s.call_rate_hz) else {
+    let Some(sym) = script_symbol(loaded, &file_name) else {
+        return Vec::new();
+    };
+    let Some(rate) = sym.call_rate_hz else {
         return Vec::new();
     };
     let title = format!("⚡ {} Hz", fmt_hz(rate));
-    // Informational badge (title-only, no command). The clickable variant (#175)
-    // was reverted: advertising `executeCommandProvider` made vscode-languageclient
-    // register the `m1.revealLocation` command per LanguageClient, and m1-vscode
-    // runs one client per project root, so a second client's registration collided
-    // and the client never reached the running state. A clickable lens needs a
-    // client-side command registration instead (tracked on #175).
-    vec![CodeLens {
-        range: Range::new(Position::new(0, 0), Position::new(0, 0)),
-        command: Some(Command {
+    // Make the badge clickable (#175): navigate to the script's own `<Component>`
+    // line in Project.m1prj, where its `<Props SelectedTrigger=…>` (the clock that
+    // set this rate) is declared. The command id `m1.revealLocation` is registered
+    // CLIENT-SIDE in m1-vscode and nvim-m1 — deliberately NOT via the server's
+    // executeCommandProvider, which the first attempt used and had to revert:
+    // vscode-languageclient registers an executeCommand handler per LanguageClient,
+    // and m1-vscode runs one client per project root, so the second registration
+    // collided and the client never reached the running state. A client-registered
+    // command has no such per-client collision. The target is computed eagerly here
+    // (it's free — we already have the symbol), so no codeLens/resolve round-trip
+    // is needed. When the trigger line is unknown, fall back to a title-only badge.
+    let command = sym
+        .def_line
+        .and_then(|line| {
+            let uri = Url::from_file_path(&loaded.m1prj_path).ok()?;
+            Some(Command {
+                title: title.clone(),
+                command: "m1.revealLocation".to_string(),
+                arguments: Some(vec![
+                    serde_json::Value::String(uri.to_string()),
+                    serde_json::Value::from(line),
+                ]),
+            })
+        })
+        .unwrap_or(Command {
             title,
             command: String::new(),
             arguments: None,
-        }),
+        });
+    vec![CodeLens {
+        range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+        command: Some(command),
         data: None,
     }]
 }
@@ -97,6 +119,28 @@ mod tests {
             assert_eq!(lenses.len(), 1);
             assert_eq!(lenses[0].command.as_ref().unwrap().title, "⚡ 500 Hz");
             assert_eq!(lenses[0].range.start.line, 0);
+        });
+    }
+
+    // #175: the rate lens is clickable — its command navigates to the script's
+    // own `<Component>` line in Project.m1prj (where `SelectedTrigger=` lives).
+    // The command id is client-registered (`m1.revealLocation`), NOT advertised
+    // via the server's executeCommandProvider (that collided across the per-root
+    // clients in multi-root VS Code, which is why the first attempt was reverted).
+    #[test]
+    fn lens_is_clickable_to_project_trigger_line() {
+        let (t, store) = load(M1PRJ, "Engine.Update.m1scr", "x = 1;\n");
+        let uri = Url::from_file_path(t.path().join("Scripts/Engine.Update.m1scr")).unwrap();
+        store.with_project(|p| {
+            let lenses = code_lens(p.unwrap(), &uri);
+            let cmd = lenses[0].command.as_ref().unwrap();
+            assert_eq!(cmd.command, "m1.revealLocation");
+            let args = cmd.arguments.as_ref().expect("reveal args");
+            // arg 0 = the Project.m1prj file URI; arg 1 = Root.Engine.Update's
+            // 0-based declaration line (5 in M1PRJ above).
+            let target = args[0].as_str().unwrap();
+            assert!(target.ends_with("Project.m1prj"), "target uri: {target}");
+            assert_eq!(args[1].as_u64().unwrap(), 5);
         });
     }
 

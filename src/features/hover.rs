@@ -114,6 +114,20 @@ fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
     if let Some(hz) = sym.call_rate_hz {
         s.push_str(&format!("  ·  call rate: `{} Hz`", fmt_num(hz)));
     }
+    // Default logging rate of a channel, from `<Props DefaultLogRate>` (#171).
+    if let Some(hz) = sym.log_rate_hz {
+        s.push_str(&format!("  ·  log rate: `{} Hz`", fmt_num(hz)));
+    }
+    // Tags (own + inherited) from `<Props SelectedTags>` (#170).
+    if !sym.tags.is_empty() {
+        let badge = sym
+            .tags
+            .iter()
+            .map(|t| format!("`{t}`"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        s.push_str(&format!("  ·  tags: {badge}"));
+    }
     if let Some(values) = enum_values {
         s.push_str(&format!("\n\nvalues: {values}"));
     }
@@ -751,6 +765,9 @@ mod tests {
             dbc_range: None,
             can: None,
             call_rate_hz: None,
+            log_rate_hz: None,
+            tags: Vec::new(),
+            return_type: None,
             table_meta: None,
         }
     }
@@ -812,6 +829,9 @@ mod tests {
             dbc_range: None,
             can: None,
             call_rate_hz: None,
+            log_rate_hz: None,
+            tags: Vec::new(),
+            return_type: None,
             table_meta: None,
         };
         let md = symbol_markdown(&sym, None);
@@ -835,10 +855,31 @@ mod tests {
             dbc_range: None,
             can: None,
             call_rate_hz: Some(100.0),
+            log_rate_hz: None,
+            tags: Vec::new(),
+            return_type: None,
             table_meta: None,
         };
         let md = symbol_markdown(&sym, None);
         assert!(md.contains("call rate: `100 Hz`"), "got: {md}");
+    }
+
+    // #171: a channel's default log rate (Hz) appears as a hover badge.
+    #[test]
+    fn hover_shows_default_log_rate() {
+        let mut sym = channel(ValueType::Unsigned, Some("u32"));
+        sym.log_rate_hz = Some(200.0);
+        let md = symbol_markdown(&sym, None);
+        assert!(md.contains("log rate: `200 Hz`"), "got: {md}");
+    }
+
+    // #170: a channel's tags appear as a hover badge, space-separated.
+    #[test]
+    fn hover_shows_tags() {
+        let mut sym = channel(ValueType::Unsigned, Some("u32"));
+        sym.tags = vec!["Engine".into(), "Normal".into()];
+        let md = symbol_markdown(&sym, None);
+        assert!(md.contains("tags: `Engine` `Normal`"), "got: {md}");
     }
 
     #[test]
@@ -859,6 +900,9 @@ mod tests {
             dbc_range: None,
             can: None,
             call_rate_hz: None,
+            log_rate_hz: None,
+            tags: Vec::new(),
+            return_type: None,
             table_meta: Some(TableMeta {
                 axes: vec![
                     TableAxis {
@@ -905,6 +949,9 @@ mod tests {
                 offset: Some(0.0),
             }),
             call_rate_hz: None,
+            log_rate_hz: None,
+            tags: Vec::new(),
+            return_type: None,
             table_meta: None,
         };
         let md = symbol_markdown(&sym, None);
