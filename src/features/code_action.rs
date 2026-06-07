@@ -34,6 +34,20 @@ fn is_unsupported_c_token(d: &Diagnostic) -> bool {
     matches!(&d.code, Some(NumberOrString::String(s)) if s == "unsupported-c-token")
 }
 
+/// True for a `missing-token` syntax diagnostic (m1-core inserted a zero-width
+/// MISSING node during recovery, e.g. for an absent statement terminator).
+fn is_missing_token(d: &Diagnostic) -> bool {
+    matches!(&d.code, Some(NumberOrString::String(s)) if s == "missing-token")
+}
+
+/// The token the parser expected, parsed from a `missing X` diagnostic message
+/// (`"missing ;"` → `";"`). `None` if the message isn't in that form or the token
+/// is implausible (empty, or long enough to suggest it isn't a punctuation token).
+fn expected_missing_token(message: &str) -> Option<&str> {
+    let tok = message.strip_prefix("missing ")?.trim();
+    (!tok.is_empty() && tok.len() <= 3 && !tok.contains(char::is_whitespace)).then_some(tok)
+}
+
 /// The lint rule code (`"L004"`, …) of a diagnostic, if it carries one.
 fn lint_code(d: &Diagnostic) -> Option<&str> {
     match &d.code {
@@ -141,6 +155,25 @@ pub fn code_actions(
                 Some(d),
             ));
         }
+    }
+
+    // Missing-token syntax error: the parser pinpoints a token it had to
+    // synthesise (`missing ;`, `missing )`, …) at a zero-width position. Offer a
+    // quick-fix that inserts the expected token there — the in-editor counterpart
+    // of `m1-lint --fix`'s missing-semicolon repair.
+    for d in diagnostics.iter().filter(|d| is_missing_token(d)) {
+        let Some(tok) = expected_missing_token(&d.message) else {
+            continue;
+        };
+        out.push(quickfix(
+            format!("Insert `{tok}`"),
+            uri,
+            vec![TextEdit {
+                range: Range::new(d.range.start, d.range.start),
+                new_text: tok.to_string(),
+            }],
+            Some(d),
+        ));
     }
 
     // L002 trailing-whitespace: delete the flagged span.
@@ -387,6 +420,52 @@ mod tests {
     #[test]
     fn spaces_tight_operator() {
         assert_eq!(fix("x = a==b;\n", "==").unwrap(), "x = a eq b;\n");
+    }
+
+    #[test]
+    fn missing_semicolon_offers_insert_quickfix() {
+        // The parser reports a zero-width `missing-token` diagnostic ("missing ;")
+        // at the spot the `;` should go. Offer a lightbulb quick-fix that inserts
+        // it, mirroring `m1-lint --fix`.
+        let src = "x = 1\n";
+        let li = LineIndex::new(src);
+        let enc = PositionEncoding::Utf16;
+        // Diagnostic at the end of `x = 1` (byte 5, zero-width).
+        let pos = li.position(5, enc);
+        let d = Diagnostic {
+            range: Range::new(pos, pos),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String("missing-token".into())),
+            source: Some("m1-core".into()),
+            message: "missing ;".into(),
+            ..Default::default()
+        };
+        let actions = code_actions(src, &li, enc, &uri(), &[d], None);
+        let action = actions
+            .into_iter()
+            .find_map(|a| match a {
+                CodeActionOrCommand::CodeAction(a) if a.title.contains(';') => Some(a),
+                _ => None,
+            })
+            .expect("a quick-fix inserting `;` should be offered");
+        let edit = action
+            .edit
+            .unwrap()
+            .changes
+            .unwrap()
+            .into_values()
+            .next()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(edit.new_text, ";");
+        // Applying it produces valid source.
+        let start = li.offset(edit.range.start, src, enc);
+        let mut s = src.to_string();
+        s.insert_str(start, &edit.new_text);
+        assert_eq!(s, "x = 1;\n");
+        assert!(m1_core::parse(&s).syntax_diagnostics().is_empty());
     }
 
     #[test]
