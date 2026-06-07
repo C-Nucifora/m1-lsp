@@ -93,12 +93,16 @@ fn local_ident_at(root: Node, byte: usize) -> Option<Node> {
     }
 }
 
-/// A local name must be a bare identifier: a leading letter/underscore, then
-/// letters/digits/underscores. (Locals never contain spaces.)
+/// A local name: a leading letter/underscore, then letters/digits/underscores,
+/// and — like other M1 names — optional *internal* spaces (`Torque Request`), but
+/// no leading/trailing space and no leading digit (#148).
 pub fn is_valid_identifier(name: &str) -> bool {
+    if name.is_empty() || name != name.trim() {
+        return false;
+    }
     let mut chars = name.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ')
 }
 
 fn collect_local_edits(
@@ -693,7 +697,7 @@ pub fn execute(
     if let Some(node) = local_ident_at(root, byte) {
         if !is_valid_identifier(new_name) {
             return Err(format!(
-                "‘{new_name}’ is not a valid local name (letters, digits, underscore; no leading digit or spaces)"
+                "‘{new_name}’ is not a valid local name (letters, digits, underscore and internal spaces; no leading digit or surrounding space)"
             ));
         }
         let name = node.text().to_string();
@@ -1077,9 +1081,38 @@ mod tests {
     }
 
     #[test]
+    fn renames_a_multi_word_local() {
+        // #148: M1 locals may contain spaces (`local Torque Request`); renaming
+        // one to another multi-word name must succeed, not be rejected.
+        let src = "local Torque Request = 0;\nTorque Request = Torque Request + 1;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let no_open = |_: &Url| None;
+        let byte = src.find("Torque Request").unwrap() + 6; // inside the name
+        let edit = execute(
+            cst.root(),
+            byte,
+            "Brake Force",
+            url(),
+            &li,
+            PositionEncoding::Utf16,
+            None,
+            None,
+            &no_open,
+        )
+        .expect("multi-word local rename should succeed");
+        let edits = edit.changes.unwrap().into_values().next().unwrap();
+        assert_eq!(edits.len(), 3, "declaration + two references: {edits:?}");
+        assert!(edits.iter().all(|e| e.new_text == "Brake Force"));
+    }
+
+    #[test]
     fn validates_names() {
         assert!(is_valid_identifier("total"));
-        assert!(!is_valid_identifier("has space"));
+        assert!(is_valid_identifier("Torque Request")); // internal spaces OK (#148)
+        assert!(!is_valid_identifier("9bad")); // no leading digit
+        assert!(!is_valid_identifier(" pad")); // no surrounding space
+        assert!(!is_valid_identifier("a.b")); // dots are structural, not a local
         assert!(is_valid_symbol_name("Drive State")); // spaces OK for symbols
         assert!(!is_valid_symbol_name("a.b")); // dots are structural
         assert!(!is_valid_symbol_name("")); // empty
