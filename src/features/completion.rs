@@ -137,6 +137,24 @@ fn member_parent(text: &str, byte: usize) -> Option<String> {
     Some(chain[..dot].to_string())
 }
 
+/// The dotted parent path before the cursor's `.`, allowing spaces *within*
+/// segments — DBC message/signal names commonly contain spaces (`Demo Frame`),
+/// unlike library objects. Scans back over path characters (alphanumerics, `_`,
+/// `.`, space), stopping at the first token that can't be part of an M1 path
+/// (`=`, `(`, an operator, line start), then drops the trailing leaf. `None` when
+/// there is no `.` in the run. Used only to detect a DBC-message parent (#169).
+fn member_parent_with_spaces(text: &str, byte: usize) -> Option<String> {
+    let before = &text[..byte.min(text.len())];
+    let start = before
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == ' '))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let chain = before[start..].trim_start();
+    let dot = chain.rfind('.')?;
+    let parent = chain[..dot].trim();
+    (!parent.is_empty()).then(|| parent.to_string())
+}
+
 /// Byte offset where the identifier/dot run ending at `byte` begins — i.e. the
 /// start of the dotted path the user is currently typing (`Control.AV.` →
 /// the `C`). Project-symbol completions replace from here so accepting a path
@@ -206,6 +224,39 @@ pub fn completions(
                 ..Default::default()
             })
             .collect();
+    }
+
+    // After `Bus.Frame.` where `Bus.Frame` is a DBC CAN message object: offer the
+    // frame's signals (its immediate children) as members (#169). DBC paths carry
+    // spaces, so the parent scan must allow them. The message symbol is looked up
+    // directly (DBC symbols are not `Root.`-prefixed), with a Root-prefixed
+    // fallback for safety.
+    if let Some(lp) = loaded
+        && let Some(parent) = member_parent_with_spaces(text, byte)
+    {
+        let table = lp.project.symbols();
+        if let Some(msg) = table
+            .get(&parent)
+            .or_else(|| table.get(&format!("Root.{parent}")))
+            && msg
+                .classname
+                .as_deref()
+                .is_some_and(|c| c.starts_with("BuiltIn.CAN.Message"))
+        {
+            return table
+                .immediate_children(&msg.path)
+                .into_iter()
+                .filter_map(|sig| {
+                    let leaf = sig.path.rsplit_once('.').map(|(_, l)| l)?;
+                    Some(CompletionItem {
+                        label: leaf.to_string(),
+                        kind: Some(CompletionItemKind::FIELD),
+                        detail: type_unit_detail(sig, &lp.project),
+                        ..Default::default()
+                    })
+                })
+                .collect();
+        }
     }
 
     // On the RHS of `enumChannel = <cursor>`: offer that channel's enum members
@@ -377,6 +428,64 @@ mod tests {
                 "local {local:?} should rank before symbol {sym:?}"
             );
             assert!(sym < kw, "symbol {sym:?} should rank before keyword {kw:?}");
+        });
+    }
+
+    // #169 gap 3: after a DBC message object's dot, completion offers the
+    // message's signals (its immediate children) as members.
+    #[test]
+    fn dbc_message_dot_completion_offers_its_signals() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::File::create(tmp.path().join("Project.m1prj"))
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+</Project>"#,
+            )
+            .unwrap();
+        let dbc_dir = tmp.path().join("dbc");
+        std::fs::create_dir_all(&dbc_dir).unwrap();
+        std::fs::write(
+            dbc_dir.join("Sensors.m1dbc"),
+            r#"<?xml version="1.0"?>
+<DBC>
+ <ComponentStream><List>
+  <Component Classname="BuiltIn.CAN.DBC" Name="Sensors"/>
+  <Component Classname="BuiltIn.CAN.Message" Name="Sensors.Demo Frame"><Props CANId="100" DLC="4"/></Component>
+  <Component Classname="BuiltIn.CAN.Signal" Name="Sensors.Demo Frame.Widget Count"><Props Type="u16" Qty="count" StartBit="0" Length="16"/></Component>
+  <Component Classname="BuiltIn.CAN.Signal" Name="Sensors.Demo Frame.Mode Raw"><Props Type="u16" StartBit="16" Length="16"/></Component>
+ </List></ComponentStream>
+</DBC>"#,
+        )
+        .unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        let src = "local v = Sensors.Demo Frame.\n";
+        let byte = src.find("Frame.").unwrap() + "Frame.".len();
+        let cst = m1_core::parse(src);
+        store.with_project(|p| {
+            let items = completions(
+                cst.root(),
+                p,
+                Some("Read.m1scr"),
+                src,
+                byte,
+                &crate::line_index::LineIndex::new(src),
+                crate::line_index::PositionEncoding::Utf16,
+            );
+            let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(
+                labels.contains(&"Widget Count") && labels.contains(&"Mode Raw"),
+                "DBC message dot-completion should offer its signals; got {labels:?}"
+            );
+            // Only the frame's own signals — not the global symbol soup.
+            assert!(
+                !labels.iter().any(|l| l.contains("Sensors.Demo Frame")),
+                "members should be bare leaf names, not full paths; got {labels:?}"
+            );
         });
     }
 
