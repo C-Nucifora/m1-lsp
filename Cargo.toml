@@ -24,7 +24,7 @@ toml = "1.1"
 m1-core = { git = "https://github.com/C-Nucifora/m1-core.git", tag = "v0.6.0" }
 m1-lint = { git = "https://github.com/C-Nucifora/m1-lint.git", tag = "v0.10.0" }
 m1-fmt = { git = "https://github.com/C-Nucifora/m1-fmt.git", tag = "v0.6.0" }
-m1-typecheck = { git = "https://github.com/C-Nucifora/m1-typecheck.git", tag = "v0.20.2" }
+m1-typecheck = { git = "https://github.com/C-Nucifora/m1-typecheck.git", tag = "v0.21.0" }
 m1-workspace = { git = "https://github.com/nedlane/m1-workspace.git", tag = "v0.4.1" }
 
 [dev-dependencies]
