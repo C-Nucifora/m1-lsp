@@ -59,7 +59,10 @@ async fn initialize_advertises_capabilities() {
     assert_eq!(caps["referencesProvider"], json!(true));
     assert_eq!(caps["documentHighlightProvider"], json!(true));
     assert_eq!(caps["foldingRangeProvider"], json!(true));
-    assert_eq!(caps["codeActionProvider"], json!(true));
+    assert_eq!(
+        caps["codeActionProvider"]["codeActionKinds"],
+        json!(["quickfix", "source.fixAll"])
+    );
     assert_eq!(caps["documentSymbolProvider"], json!(true));
     assert!(caps.get("completionProvider").is_some());
     // `.` is registered so library-member completion auto-triggers.

@@ -45,6 +45,13 @@ pub trait LintProvider: Send + Sync {
     /// no-op (providers without config). Supersedes `reload_config`'s own
     /// discovery when the backend drives configuration centrally.
     fn set_lint_config(&self, _cfg: &m1_lint::config::Config) {}
+
+    /// Apply every enabled auto-fixable rule to `src`, returning the fully-fixed
+    /// source — or `None` when there is nothing to fix. Backs the editor
+    /// "fix all auto-fixable lint issues" action (#158). Default: `None`.
+    fn fix(&self, _src: &str) -> Option<String> {
+        None
+    }
 }
 
 /// A no-op lint provider (syntax diagnostics only).

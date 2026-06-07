@@ -390,7 +390,18 @@ impl LanguageServer for Backend {
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
-                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                // Advertise the kinds we emit so editors can wire fix-all-on-save
+                // (the whole-file m1-lint fixer, #158) and group quick-fixes.
+                code_action_provider: Some(CodeActionProviderCapability::Options(
+                    CodeActionOptions {
+                        code_action_kinds: Some(vec![
+                            CodeActionKind::QUICKFIX,
+                            CodeActionKind::SOURCE_FIX_ALL,
+                        ]),
+                        resolve_provider: Some(false),
+                        work_done_progress_options: Default::default(),
+                    },
+                )),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![".".into()]),
@@ -1085,7 +1096,7 @@ impl LanguageServer for Backend {
         };
         let enc = self.enc();
         // The project model backs the T020 "did you mean" enum-member fix (#159).
-        let actions = self.store.with_project(|p| {
+        let mut actions = self.store.with_project(|p| {
             code_action::code_actions(
                 &text,
                 &lindex,
@@ -1095,6 +1106,16 @@ impl LanguageServer for Backend {
                 p.map(|lp| &lp.project),
             )
         });
+        // Whole-file "fix all auto-fixable lint issues" via the shared m1-lint
+        // fixer — covers every fixable rule (L003/L007/L011/L018…), not just the
+        // hand-ported few (#158).
+        if let Some(fixed) = self.lint.fix(&text)
+            && fixed != text
+        {
+            actions.push(code_action::fix_all_lint_action(
+                &uri, &text, &lindex, enc, fixed,
+            ));
+        }
         Ok((!actions.is_empty()).then_some(actions))
     }
 
