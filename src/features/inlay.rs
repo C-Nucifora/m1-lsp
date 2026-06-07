@@ -42,6 +42,10 @@ fn collect(
     // rather than recursion, so a pathologically deep document can't overflow the
     // call stack (#133). Same pre-order visit, same result.
     for n in root.descendants() {
+        if n.kind() == Kind::CallExpression {
+            collect_param_hints(n, range, li, enc, out);
+            continue;
+        }
         if n.kind() != Kind::LocalDeclaration {
             continue;
         }
@@ -71,6 +75,82 @@ fn collect(
     }
 }
 
+/// `paramName:` hints before each argument of a library / object-method call,
+/// drawn from the intrinsics model — the same param names signature help shows,
+/// surfaced inline without opening the popup (#155). Project-independent: the
+/// intrinsics are global.
+fn collect_param_hints(
+    call: Node,
+    range: &Range,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    out: &mut Vec<InlayHint>,
+) {
+    let intr = m1_typecheck::intrinsics::get();
+    let Some(callee) = call.child_by_field(Field::Function) else {
+        return;
+    };
+    let path = callee.text();
+    let (head, method) = path.rsplit_once('.').unwrap_or(("", path));
+    // Candidate overloads: a library object's function, or a modelled object
+    // method (`X.Lookup`).
+    let overloads: Vec<&m1_typecheck::intrinsics::Overload> = match intr.library_object(head) {
+        Some(obj) => obj.functions.iter().filter(|f| f.name == method).collect(),
+        None => intr.object_method(method),
+    };
+    if overloads.is_empty() {
+        return;
+    }
+    let Some(args_node) = call.child_by_field(Field::Arguments) else {
+        return;
+    };
+    let arg_exprs: Vec<Node> = args_node
+        .named_children()
+        .into_iter()
+        .filter(|c| is_arg_expr(c.kind()))
+        .collect();
+    // Pick the overload whose arity covers the call, else the widest.
+    let Some(ov) = overloads
+        .iter()
+        .find(|o| o.params.len() >= arg_exprs.len())
+        .or_else(|| overloads.iter().max_by_key(|o| o.params.len()))
+    else {
+        return;
+    };
+    for (i, arg) in arg_exprs.iter().enumerate() {
+        let Some(p) = ov.params.get(i) else { break };
+        let position = li.position(arg.byte_range().start, enc);
+        if position.line < range.start.line || position.line > range.end.line {
+            continue;
+        }
+        out.push(InlayHint {
+            position,
+            label: InlayHintLabel::String(format!("{}:", p.name)),
+            kind: Some(InlayHintKind::PARAMETER),
+            text_edits: None,
+            tooltip: None,
+            padding_left: Some(false),
+            padding_right: Some(true),
+            data: None,
+        });
+    }
+}
+
+fn is_arg_expr(k: Kind) -> bool {
+    matches!(
+        k,
+        Kind::Identifier
+            | Kind::MemberExpression
+            | Kind::CallExpression
+            | Kind::UnaryExpression
+            | Kind::BinaryExpression
+            | Kind::TernaryExpression
+            | Kind::ParenthesizedExpression
+            | Kind::Number
+            | Kind::String
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,6 +176,23 @@ mod tests {
         assert_eq!(h.len(), 1);
         assert_eq!(label(&h[0]), ": Integer");
         assert_eq!(h[0].kind, Some(InlayHintKind::TYPE));
+    }
+
+    #[test]
+    fn param_name_hints_at_library_call_args() {
+        // #155: a library call shows `paramName:` before each argument, from the
+        // intrinsics model (no project needed).
+        let h = hints("x = Calculate.Max(a, b);\n");
+        let params: Vec<String> = h
+            .iter()
+            .filter(|h| h.kind == Some(InlayHintKind::PARAMETER))
+            .map(label)
+            .collect();
+        assert!(
+            params.iter().any(|p| p.ends_with(':')),
+            "expected `name:` parameter hints, got {params:?}"
+        );
+        assert_eq!(params.len(), 2, "one hint per argument: {params:?}");
     }
 
     #[test]
