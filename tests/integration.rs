@@ -61,7 +61,7 @@ async fn initialize_advertises_capabilities() {
     assert_eq!(caps["foldingRangeProvider"], json!(true));
     assert_eq!(
         caps["codeActionProvider"]["codeActionKinds"],
-        json!(["quickfix", "source.fixAll"])
+        json!(["quickfix", "source.fixAll", "source"])
     );
     assert_eq!(caps["documentSymbolProvider"], json!(true));
     assert!(caps.get("completionProvider").is_some());
@@ -303,6 +303,62 @@ async fn goto_definition_resolves_a_local_without_project() {
         "goto on a local should return its declaration on line 0: {resp}"
     );
     assert_eq!(resp["result"]["uri"], json!(uri.as_str()));
+}
+
+#[tokio::test]
+async fn code_action_offers_format_document_without_diagnostics() {
+    use tower_lsp::lsp_types::Url;
+
+    // A real formatter backend (Backend::new wires NoFormat, which never
+    // reformats) so "Format Document" has edits to offer.
+    let (service, socket) = LspService::new(|client| {
+        m1_lsp::backend::Backend::with_backends(
+            client,
+            Box::new(m1_lsp::analysis::NoLint),
+            Box::new(m1_lsp::analysis::NoTypes),
+            Box::new(m1_lsp::fmt_backend::M1Fmt::new()),
+            std::sync::Arc::new(m1_lsp::project_store::ProjectStore::new()),
+        )
+    });
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+    write_msg(&mut client, &initialize_msg(1)).await;
+    let _ = read_response(&mut client, 1).await;
+
+    // Unformatted but syntactically valid (K&R braces → reformats to Allman).
+    let uri = Url::parse("file:///tmp/Fmt.m1scr").unwrap();
+    let src = "if (a) {\nx = 1;\n}\n";
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":uri,"languageId":"m1","version":1,"text":src}}}),
+    )
+    .await;
+    // Code-action request with NO diagnostics in context (#161).
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":2,"method":"textDocument/codeAction","params":{
+            "textDocument":{"uri":uri},
+            "range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},
+            "context":{"diagnostics":[]}}}),
+    )
+    .await;
+    let resp = read_response(&mut client, 2).await;
+    let titles: Vec<String> = resp["result"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x["title"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        titles.iter().any(|t| t == "Format Document"),
+        "expected a Format Document action with no diagnostics; got {titles:?}"
+    );
 }
 
 // Direct-call tests of the pure analysis path (no transport needed).

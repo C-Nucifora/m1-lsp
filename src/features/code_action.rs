@@ -277,6 +277,24 @@ pub fn code_actions(
     out
 }
 
+/// A source-level "Format Document" / "Format Selection" action (kind `SOURCE`)
+/// that applies `edits` to the document. Surfaced independently of diagnostics so
+/// the code-action menu offers formatting even on clean code (#161).
+pub fn format_action(title: &str, uri: &Url, edits: Vec<TextEdit>) -> CodeActionOrCommand {
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), edits);
+    CodeActionOrCommand::CodeAction(CodeAction {
+        title: title.to_string(),
+        kind: Some(CodeActionKind::SOURCE),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        }),
+        ..Default::default()
+    })
+}
+
 /// A whole-document "fix all auto-fixable lint issues" action that replaces the
 /// buffer with `fixed` (the output of the shared `m1-lint` fixer). Kind
 /// `SOURCE_FIX_ALL` so editors can run it on save and offer it from the lightbulb
