@@ -860,7 +860,21 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let cst = m1_core::parse(&text);
-        let hints = inlay::inlay_hints(cst.root(), params.range, &lindex, self.enc());
+        let file_name = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let enc = self.enc();
+        let hints = self.store.with_project(|p| {
+            inlay::inlay_hints(
+                cst.root(),
+                params.range,
+                &lindex,
+                enc,
+                p.map(|lp| &lp.project),
+                file_name.as_deref(),
+            )
+        });
         Ok(Some(hints))
     }
 

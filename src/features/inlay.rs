@@ -19,16 +19,76 @@ fn value_type_str(t: &ValueType) -> &'static str {
     }
 }
 
-/// Inline type hints for `local` declarations within `range`.
+/// Inline hints within `range`: `: Type` after unannotated `local`s, `paramName:`
+/// at call-site arguments, and — when a `project` is loaded — `[unit]` after each
+/// channel/parameter reference that carries a unit (#154).
 pub fn inlay_hints(
     root: Node,
     range: Range,
     li: &LineIndex,
     enc: PositionEncoding,
+    project: Option<&m1_typecheck::project::Project>,
+    file_name: Option<&str>,
 ) -> Vec<InlayHint> {
     let mut out = Vec::new();
     collect(root, &range, li, enc, &mut out);
+    if let Some(project) = project {
+        let scope = crate::features::locate::build_scope(root, Some(project), file_name);
+        collect_unit_hints(root, &range, li, enc, &scope, &mut out);
+    }
     out
+}
+
+/// `[unit]` hints after each channel/parameter reference that carries a unit. Only
+/// outermost dotted references (a `MemberExpression` not nested in another and not
+/// a call callee) are considered, so we don't double-hint sub-paths or label a
+/// `Foo.Bar(…)` call name.
+fn collect_unit_hints(
+    root: Node,
+    range: &Range,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    scope: &m1_typecheck::resolve::Scope,
+    out: &mut Vec<InlayHint>,
+) {
+    use m1_typecheck::resolve::{Resolution, resolve};
+    for n in root.descendants() {
+        if n.kind() != Kind::MemberExpression {
+            continue;
+        }
+        if let Some(parent) = n.parent() {
+            // Sub-path of a larger reference, or the callee of a call → skip.
+            if parent.kind() == Kind::MemberExpression {
+                continue;
+            }
+            if parent.kind() == Kind::CallExpression
+                && parent
+                    .child_by_field(Field::Function)
+                    .map(|f| f.byte_range())
+                    == Some(n.byte_range())
+            {
+                continue;
+            }
+        }
+        if let Resolution::Symbol(sym) = resolve(n.text(), scope)
+            && let Some(unit) = &sym.unit
+        {
+            let position = li.position(n.byte_range().end, enc);
+            if position.line < range.start.line || position.line > range.end.line {
+                continue;
+            }
+            out.push(InlayHint {
+                position,
+                label: InlayHintLabel::String(format!("[{unit}]")),
+                kind: Some(InlayHintKind::TYPE),
+                text_edits: None,
+                tooltip: None,
+                padding_left: Some(true),
+                padding_right: Some(false),
+                data: None,
+            });
+        }
+    }
 }
 
 fn collect(
@@ -160,7 +220,7 @@ mod tests {
         let cst = m1_core::parse(src);
         let li = LineIndex::new(src);
         let full = Range::new(Position::new(0, 0), Position::new(10_000, 0));
-        inlay_hints(cst.root(), full, &li, PositionEncoding::Utf16)
+        inlay_hints(cst.root(), full, &li, PositionEncoding::Utf16, None, None)
     }
 
     fn label(h: &InlayHint) -> String {
@@ -176,6 +236,48 @@ mod tests {
         assert_eq!(h.len(), 1);
         assert_eq!(label(&h[0]), ": Integer");
         assert_eq!(h[0].kind, Some(InlayHintKind::TYPE));
+    }
+
+    #[test]
+    fn unit_hints_at_channel_references() {
+        use crate::project_store::ProjectStore;
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Demo"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Demo.Speed"><Props Qty="rad/s"/></Component>
+</Project>"#,
+            )
+            .unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+        let src = "x = Demo.Speed + 1;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let full = Range::new(Position::new(0, 0), Position::new(10_000, 0));
+        store.with_project(|p| {
+            let hs = inlay_hints(
+                cst.root(),
+                full,
+                &li,
+                PositionEncoding::Utf16,
+                p.map(|lp| &lp.project),
+                Some("X.m1scr"),
+            );
+            // base unit of rad/s is deg/s per the manual's angle exception.
+            assert!(
+                hs.iter()
+                    .any(|h| label(h).contains('[') && label(h).contains("/s")),
+                "expected a unit hint at the channel reference: {:?}",
+                hs.iter().map(label).collect::<Vec<_>>()
+            );
+        });
     }
 
     #[test]
