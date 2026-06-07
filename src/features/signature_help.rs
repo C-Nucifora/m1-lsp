@@ -1,13 +1,18 @@
 //! textDocument/signatureHelp: show the signature(s) of the call the cursor is
 //! inside and highlight the active argument as you type within `( … )`.
 //!
-//! Two sources of signatures:
+//! Sources of signatures, in priority order:
 //!  * **Library functions** — the intrinsics' overload set (parameter names,
 //!    types, return type, doc).
-//!  * **User-defined functions / methods** (#30) — M1 user functions declare no
-//!    parameters in the project model or the script grammar (they read/write
-//!    channels directly), so their signature is `Name() -> ReturnType`: there
-//!    are simply no parameters to list, but the callable is no longer silent.
+//!  * **Object / firmware methods** — a method modelled in the object-method
+//!    catalogue (`Set`, `Lookup`, the CAN/timer accessors, …) shows its real
+//!    signature, even when the call also resolves to a project `Symbol{Method}`
+//!    (a firmware group-object method) (#105).
+//!  * **User-defined functions / methods** (#30) — M1 user functions/methods
+//!    declare no parameters (they read/write channels directly), so their
+//!    signature is `Name() -> ReturnType`. An *unmodelled* firmware method, by
+//!    contrast, has an unknown parameter list — it is not asserted to be
+//!    parameterless (#105).
 use crate::features::locate::{build_scope, node_at_byte};
 use m1_core::{Field, Kind, Node};
 use m1_typecheck::intrinsics::Overload;
@@ -114,11 +119,29 @@ pub fn signature_help(
                 active_parameter: Some(active as u32),
             })
         }
-        // User-defined functions/methods: name + return type, no parameters (#30).
+        // Functions/methods that resolve to a project symbol. A firmware object
+        // method (timer/CAN group-object) can resolve to a `Symbol{Method}` yet
+        // still be modelled in the object-method catalogue — prefer its real
+        // signature over the parameterless user-function fallback (#105).
         Resolution::Symbol(sym)
             if matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) =>
         {
-            Some(user_fn_help(sym))
+            let method = path.rsplit_once('.').map_or(path.as_str(), |(_, m)| m);
+            let overloads = m1_typecheck::intrinsics::get().object_method(method);
+            if sym.kind == SymbolKind::Method && !overloads.is_empty() {
+                let active = call
+                    .child_by_field(Field::Arguments)
+                    .map(|args| active_arg(args, byte))
+                    .unwrap_or(0);
+                let signatures = overloads.iter().map(|ov| sig_info(&path, ov)).collect();
+                Some(SignatureHelp {
+                    signatures,
+                    active_signature: Some(pick_by_arity(&overloads, active) as u32),
+                    active_parameter: Some(active as u32),
+                })
+            } else {
+                Some(user_fn_help(sym))
+            }
         }
         // Project-object methods (`Channel.Set`, `Table.Lookup`, `X.AsInteger`, …):
         // the call resolves opaquely, but the last path segment names a method the
@@ -157,14 +180,9 @@ fn return_type_str(t: ValueType) -> Option<&'static str> {
     }
 }
 
-/// Signature help for a user-defined function/method. M1 user functions take no
-/// declared parameters, so this surfaces the name and (when known) return type.
+/// Signature help for a symbol that resolves as a function/method but carries no
+/// modelled signature: surfaces the name and (when known) return type.
 fn user_fn_help(sym: &Symbol) -> SignatureHelp {
-    let kind_word = if sym.kind == SymbolKind::Method {
-        "method"
-    } else {
-        "function"
-    };
     let label = match return_type_str(sym.value_type) {
         Some(ret) => format!("{}() -> {ret}", sym.path),
         None => format!("{}()", sym.path),
@@ -172,14 +190,37 @@ fn user_fn_help(sym: &Symbol) -> SignatureHelp {
     SignatureHelp {
         signatures: vec![SignatureInformation {
             label,
-            documentation: Some(Documentation::String(format!(
-                "user-defined {kind_word} — M1 user functions take no declared parameters"
+            documentation: Some(Documentation::String(user_fn_doc(
+                sym.kind,
+                sym.classname.as_deref(),
             ))),
             parameters: Some(vec![]),
             active_parameter: None,
         }],
         active_signature: Some(0),
         active_parameter: None,
+    }
+}
+
+/// Documentation line for a function/method with no modelled signature. Only
+/// *user-authored* functions/methods (`BuiltIn.FuncUser` / `BuiltIn.MethodUser`)
+/// are known to be parameterless in M1; for anything else — notably an
+/// unmodelled firmware method (a timer/CAN group-object method) — we must not
+/// assert "no declared parameters", since its parameter list is simply unknown,
+/// not empty (#105).
+fn user_fn_doc(kind: SymbolKind, classname: Option<&str>) -> String {
+    let kind_word = if kind == SymbolKind::Method {
+        "method"
+    } else {
+        "function"
+    };
+    if matches!(
+        classname,
+        Some("BuiltIn.FuncUser") | Some("BuiltIn.MethodUser")
+    ) {
+        format!("user-defined {kind_word} — M1 user {kind_word}s take no declared parameters")
+    } else {
+        format!("{kind_word} — parameter list not modelled")
     }
 }
 
@@ -191,6 +232,30 @@ mod tests {
         let cst = m1_core::parse(src);
         let byte = src.find(cursor_after).unwrap() + cursor_after.len();
         signature_help(cst.root(), byte, None, None)
+    }
+
+    #[test]
+    fn user_fn_doc_only_asserts_no_params_for_user_authored() {
+        // User-authored functions/methods are parameterless by design — keep the
+        // clear assertion.
+        assert!(
+            user_fn_doc(SymbolKind::Function, Some("BuiltIn.FuncUser"))
+                .contains("no declared parameters")
+        );
+        assert!(
+            user_fn_doc(SymbolKind::Method, Some("BuiltIn.MethodUser"))
+                .contains("no declared parameters")
+        );
+        // An unmodelled firmware method (or any non-user-authored symbol) must
+        // NOT claim zero parameters — its list is unknown, not empty (#105).
+        let fw = user_fn_doc(SymbolKind::Method, Some("MoTeC Output.Switched Output"));
+        assert!(!fw.contains("no declared parameters"), "got: {fw}");
+        assert!(fw.contains("not modelled"), "got: {fw}");
+        let unknown = user_fn_doc(SymbolKind::Method, None);
+        assert!(
+            !unknown.contains("no declared parameters"),
+            "got: {unknown}"
+        );
     }
 
     #[test]
