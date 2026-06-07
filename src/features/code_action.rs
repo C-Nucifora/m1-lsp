@@ -5,6 +5,7 @@
 //! - L002 trailing-whitespace (delete the span);
 //! - `while`/`for`/`do`, which have no mechanical rewrite (M1 has no iteration) but
 //!   get a `WhenStatement` skeleton inserted above them as a starting point (#83).
+use crate::features::locate::in_type_annotation;
 use crate::line_index::{LineIndex, PositionEncoding};
 use m1_core::{Field, Kind, Node};
 use m1_typecheck::project::Project;
@@ -352,19 +353,6 @@ fn within_assignment_target(n: Node) -> bool {
     false
 }
 
-/// True when `n` is inside a `<Type>` annotation (e.g. `local <Integer>`), where
-/// an identifier names a type, not a value.
-fn within_type_annotation(n: Node) -> bool {
-    let mut cur = n;
-    while let Some(p) = cur.parent() {
-        if p.kind() == Kind::TypeAnnotation {
-            return true;
-        }
-        cur = p;
-    }
-    false
-}
-
 /// True when `n` is the `name` identifier of a `local` declaration.
 fn is_local_decl_name(n: Node) -> bool {
     n.parent()
@@ -380,7 +368,7 @@ fn is_local_decl_name(n: Node) -> bool {
 fn is_value_expression(n: Node) -> bool {
     is_expression_kind(n.kind())
         && !within_assignment_target(n)
-        && !within_type_annotation(n)
+        && !in_type_annotation(n)
         && !is_local_decl_name(n)
 }
 

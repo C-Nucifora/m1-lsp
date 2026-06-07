@@ -38,15 +38,16 @@
 //! has children (rename its leaf members individually).
 use crate::convert::range as to_range;
 use crate::features::locate::{
-    build_scope, collect_locals, node_at_byte, path_at_byte, segment_at_byte, segment_nodes,
+    build_scope, collect_locals, file_name_of, in_type_annotation, is_member_property, is_top_path,
+    node_at_byte, path_at_byte, segment_at_byte, segment_nodes,
 };
 use crate::line_index::{LineIndex, PositionEncoding};
 use crate::project_store::LoadedProject;
-use m1_core::{Field, Kind, Node};
+use m1_core::{Kind, Node};
 use m1_typecheck::project::Project;
 use m1_typecheck::resolve::{Resolution, Scope, resolve};
 use m1_typecheck::symbols::{Symbol, SymbolKind, SymbolTable};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tower_lsp::lsp_types::{
     AnnotatedTextEdit, ChangeAnnotation, DocumentChangeOperation, DocumentChanges, OneOf,
     OptionalVersionedTextDocumentIdentifier, PrepareRenameResponse, RenameFile, ResourceOp,
@@ -56,27 +57,6 @@ use tower_lsp::lsp_types::{
 // ---------------------------------------------------------------------------
 // Locals (file-scoped) — unchanged behaviour.
 // ---------------------------------------------------------------------------
-
-/// True when `n` is the `property` half of a `member_expression` (the part after
-/// the `.`), which is a channel/field access — never a local.
-fn is_member_property(n: Node) -> bool {
-    n.parent()
-        .filter(|p| p.kind() == Kind::MemberExpression)
-        .and_then(|p| p.child_by_field(Field::Property))
-        .map(|prop| prop.byte_range() == n.byte_range())
-        .unwrap_or(false)
-}
-
-fn in_type_annotation(n: Node) -> bool {
-    let mut cur = n;
-    while let Some(p) = cur.parent() {
-        if p.kind() == Kind::TypeAnnotation {
-            return true;
-        }
-        cur = p;
-    }
-    false
-}
 
 /// An identifier that refers to the local named `name` (declaration or reference).
 /// Public so the extract/inline-local refactors (#174) can collect a local's
@@ -251,17 +231,6 @@ fn resolve_prefix<'p>(path: &str, scope: &Scope<'p>) -> Option<(&'p Symbol, usiz
     None
 }
 
-/// True for the outermost node of a dotted path (an `identifier` /
-/// `member_expression` not itself the child of a `member_expression`), excluding
-/// type-annotation names.
-fn is_top_path(n: Node) -> bool {
-    matches!(n.kind(), Kind::Identifier | Kind::MemberExpression)
-        && n.parent()
-            .map(|p| p.kind() != Kind::MemberExpression)
-            .unwrap_or(true)
-        && !in_type_annotation(n)
-}
-
 /// Collect the edits in one parsed script that rewrite every reference resolving
 /// to `target_path`, changing only the segment at the symbol's depth.
 fn collect_ref_edits(
@@ -314,45 +283,15 @@ fn m1prj_name_edit(
 
 /// `(uri, text)` for every project script: the cursor file first (always, using
 /// its open buffer), then every other `*.m1scr` under the project root, deduped
-/// by URI, preferring open buffers over disk.
+/// by URI, preferring open buffers over disk. Thin wrapper over
+/// `project_store::gather_project_scripts` that reads the cursor file itself
+/// (rename only holds the cursor URI, not its text).
 fn project_scripts(
     loaded: &LoadedProject,
     cursor_uri: &Url,
     open_text: &dyn Fn(&Url) -> Option<String>,
 ) -> Vec<(Url, String)> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    let read = |u: &Url| -> Option<String> {
-        open_text(u).or_else(|| {
-            u.to_file_path()
-                .ok()
-                .and_then(|p| crate::disk_read::read_disk(&p))
-        })
-    };
-    if let Some(t) = read(cursor_uri) {
-        seen.insert(cursor_uri.clone());
-        out.push((cursor_uri.clone(), t));
-    }
-    for p in &loaded.script_files {
-        let Ok(u) = Url::from_file_path(p) else {
-            continue;
-        };
-        if seen.contains(&u) {
-            continue;
-        }
-        if let Some(t) = open_text(&u).or_else(|| crate::disk_read::read_disk(p)) {
-            seen.insert(u.clone());
-            out.push((u, t));
-        }
-    }
-    out
-}
-
-fn file_name_of(uri: &Url) -> Option<String> {
-    uri.to_file_path()
-        .ok()?
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
+    crate::project_store::gather_project_scripts(&loaded.script_files, cursor_uri, None, open_text)
 }
 
 /// What the cursor is renaming. The *segment the cursor sits on* decides: the
