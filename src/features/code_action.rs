@@ -40,6 +40,17 @@ fn is_missing_token(d: &Diagnostic) -> bool {
     matches!(&d.code, Some(NumberOrString::String(s)) if s == "missing-token")
 }
 
+/// The corrected form of an L016-flagged local name: spaces become underscores
+/// and the first letter is lowercased (M1 locals are conventionally lowerCamel).
+/// `None` when the name already conforms (nothing to fix).
+fn corrected_local_name(name: &str) -> Option<String> {
+    let snake = name.replace(' ', "_");
+    let mut chars = snake.chars();
+    let first = chars.next()?;
+    let corrected = format!("{}{}", first.to_ascii_lowercase(), chars.as_str());
+    (corrected != name).then_some(corrected)
+}
+
 /// The token the parser expected, parsed from a `missing X` diagnostic message
 /// (`"missing ;"` → `";"`). `None` if the message isn't in that form or the token
 /// is implausible (empty, or long enough to suggest it isn't a punctuation token).
@@ -154,6 +165,37 @@ pub fn code_actions(
                 vec![edit],
                 Some(d),
             ));
+        }
+    }
+
+    // L016 local-variable-naming: offer a one-click rename to the corrected name
+    // across the whole file, reusing the rename machinery (#162).
+    let l016: Vec<&Diagnostic> = diagnostics
+        .iter()
+        .filter(|d| lint_code(d) == Some("L016"))
+        .collect();
+    if !l016.is_empty() {
+        let cst = m1_core::parse(text);
+        for d in l016 {
+            let start = li.offset(d.range.start, text, enc);
+            let end = li.offset(d.range.end, text, enc);
+            let Some(name) = text.get(start..end) else {
+                continue;
+            };
+            let Some(corrected) = corrected_local_name(name) else {
+                continue;
+            };
+            if let Some(edits) =
+                crate::features::rename::local_rename_edits(cst.root(), start, &corrected, li, enc)
+                && !edits.is_empty()
+            {
+                out.push(quickfix(
+                    format!("Rename `{name}` to `{corrected}`"),
+                    uri,
+                    edits,
+                    Some(d),
+                ));
+            }
         }
     }
 
@@ -420,6 +462,36 @@ mod tests {
     #[test]
     fn spaces_tight_operator() {
         assert_eq!(fix("x = a==b;\n", "==").unwrap(), "x = a eq b;\n");
+    }
+
+    #[test]
+    fn l016_offers_rename_to_corrected_local_name() {
+        // #162: an L016 naming warning on `local Count` should offer a one-click
+        // rename to the corrected name, applied to every reference in the file.
+        let src = "local Count = 0;\nCount = Count + 1;\n";
+        let li = LineIndex::new(src);
+        let enc = PositionEncoding::Utf16;
+        // L016 diagnostic on the declaration's `Count`.
+        let d = lint_diag(src, "Count", "L016", &li);
+        let action = code_actions(src, &li, enc, &uri(), &[d], None)
+            .into_iter()
+            .find_map(|a| match a {
+                CodeActionOrCommand::CodeAction(a) if a.title.contains("count") => Some(a),
+                _ => None,
+            })
+            .expect("an L016 rename quick-fix should be offered");
+        assert_eq!(action.is_preferred, Some(true));
+        let edits = action
+            .edit
+            .unwrap()
+            .changes
+            .unwrap()
+            .into_values()
+            .next()
+            .unwrap();
+        // Declaration + two references = 3 edits, all renaming to `count`.
+        assert_eq!(edits.len(), 3, "all occurrences renamed: {edits:?}");
+        assert!(edits.iter().all(|e| e.new_text == "count"));
     }
 
     #[test]

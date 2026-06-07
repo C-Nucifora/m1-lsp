@@ -93,6 +93,27 @@ fn local_ident_at(root: Node, byte: usize) -> Option<Node> {
     }
 }
 
+/// Edits that rename the local declared/referenced at `byte` to `new_name`
+/// across the whole document — the same set `textDocument/rename` produces.
+/// Returns `None` when `byte` isn't on a local, or `new_name` isn't a valid
+/// identifier. Public so code actions (e.g. the L016 naming quick-fix) can reuse
+/// the rename machinery instead of re-deriving the reference set (#162).
+pub fn local_rename_edits(
+    root: Node,
+    byte: usize,
+    new_name: &str,
+    li: &LineIndex,
+    enc: PositionEncoding,
+) -> Option<Vec<TextEdit>> {
+    let ident = local_ident_at(root, byte)?;
+    if !is_valid_identifier(new_name) {
+        return None;
+    }
+    let mut out = Vec::new();
+    collect_local_edits(root, ident.text(), new_name, li, enc, &mut out);
+    Some(out)
+}
+
 /// A local name: a leading letter/underscore, then letters/digits/underscores,
 /// and — like other M1 names — optional *internal* spaces (`Torque Request`), but
 /// no leading/trailing space and no leading digit (#148).
