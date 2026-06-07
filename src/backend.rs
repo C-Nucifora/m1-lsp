@@ -436,6 +436,8 @@ impl LanguageServer for Backend {
                     CodeActionOptions {
                         code_action_kinds: Some(vec![
                             CodeActionKind::QUICKFIX,
+                            CodeActionKind::REFACTOR_EXTRACT,
+                            CodeActionKind::REFACTOR_INLINE,
                             CodeActionKind::SOURCE_FIX_ALL,
                             CodeActionKind::SOURCE,
                         ]),
@@ -1299,6 +1301,15 @@ impl LanguageServer for Backend {
                 &uri, &text, &lindex, enc, fixed,
             ));
         }
+        // Selection-driven refactors, offered independently of diagnostics (#174):
+        // "Extract to local" on a selected expression, "Inline local" on a local.
+        actions.extend(code_action::refactors(
+            &text,
+            &lindex,
+            enc,
+            &uri,
+            params.range,
+        ));
         // Source-level format actions, offered independently of diagnostics (#161)
         // so the menu can format clean code. "Format Document" appears when
         // formatting would change the file; "Format Selection" when the request

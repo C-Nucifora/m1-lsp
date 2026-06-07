@@ -79,15 +79,18 @@ fn in_type_annotation(n: Node) -> bool {
 }
 
 /// An identifier that refers to the local named `name` (declaration or reference).
-fn is_local_ref(n: Node, name: &str) -> bool {
+/// Public so the extract/inline-local refactors (#174) can collect a local's
+/// occurrences with the same member-property / type-annotation exclusions.
+pub fn is_local_ref(n: Node, name: &str) -> bool {
     n.kind() == Kind::Identifier
         && n.text() == name
         && !is_member_property(n)
         && !in_type_annotation(n)
 }
 
-/// The renameable local identifier under `byte`, if any.
-fn local_ident_at(root: Node, byte: usize) -> Option<Node> {
+/// The renameable local identifier under `byte`, if any. Public so the
+/// inline-local refactor (#174) can confirm the cursor lands on a local.
+pub fn local_ident_at(root: Node, byte: usize) -> Option<Node> {
     let node = node_at_byte(root, byte)?;
     if node.kind() != Kind::Identifier || is_member_property(node) || in_type_annotation(node) {
         return None;

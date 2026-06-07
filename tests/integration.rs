@@ -61,7 +61,13 @@ async fn initialize_advertises_capabilities() {
     assert_eq!(caps["foldingRangeProvider"], json!(true));
     assert_eq!(
         caps["codeActionProvider"]["codeActionKinds"],
-        json!(["quickfix", "source.fixAll", "source"])
+        json!([
+            "quickfix",
+            "refactor.extract",
+            "refactor.inline",
+            "source.fixAll",
+            "source"
+        ])
     );
     assert_eq!(caps["documentSymbolProvider"], json!(true));
     assert!(caps.get("completionProvider").is_some());
