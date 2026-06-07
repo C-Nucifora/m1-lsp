@@ -447,12 +447,6 @@ impl LanguageServer for Backend {
                 code_lens_provider: Some(CodeLensOptions {
                     resolve_provider: Some(false),
                 }),
-                // The clickable rate code lens (#175) invokes `m1.revealLocation`,
-                // which the server services via `window/showDocument`.
-                execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec!["m1.revealLocation".to_string()],
-                    work_done_progress_options: Default::default(),
-                }),
                 call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
@@ -907,30 +901,6 @@ impl LanguageServer for Backend {
         Ok(self
             .store
             .with_project(|p| p.map(|lp| code_lens::code_lens(lp, &uri))))
-    }
-
-    async fn execute_command(
-        &self,
-        params: ExecuteCommandParams,
-    ) -> Result<Option<serde_json::Value>> {
-        // `m1.revealLocation` backs the clickable rate code lens (#175): the lens
-        // carries a `Location` argument and we ask the client to navigate to it
-        // via `window/showDocument` — client-agnostic (LSP 3.16).
-        if params.command == "m1.revealLocation"
-            && let Some(arg) = params.arguments.first()
-            && let Ok(loc) = serde_json::from_value::<Location>(arg.clone())
-        {
-            let _ = self
-                .client
-                .show_document(ShowDocumentParams {
-                    uri: loc.uri,
-                    external: Some(false),
-                    take_focus: Some(true),
-                    selection: Some(loc.range),
-                })
-                .await;
-        }
-        Ok(None)
     }
 
     async fn prepare_call_hierarchy(
