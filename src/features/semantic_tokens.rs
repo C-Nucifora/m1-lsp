@@ -182,6 +182,15 @@ fn walk(root: Node, scope: &Scope, li: &LineIndex, enc: PositionEncoding, out: &
                         push(node, TT_VARIABLE, TM_DEFINITION, li, enc, out);
                         continue;
                     }
+                    // Subject of an `is (...)` clause: a bare enumerator literal
+                    // (`is (Driving)`). It resolves to nothing as an identifier, so
+                    // it would fall through to a plain variable; it is an enum
+                    // member -> property, matching the dotted `is (ASM.Off)` case
+                    // (which already classifies as a member). (#157)
+                    if parent.kind() == Kind::IsClause {
+                        push(node, TT_PROPERTY, 0, li, enc, out);
+                        continue;
+                    }
                 }
                 // General identifier: resolve against scope.
                 let (tt, tm) = classify_path(node.text(), scope, false);
@@ -485,6 +494,43 @@ mod tests {
             props.len(),
             1,
             "expected exactly one property token for Foo.Bar"
+        );
+    }
+
+    /// Reconstruct absolute (line, col, type) triples from the delta stream.
+    fn absolute(toks: &[SemanticToken]) -> Vec<(u32, u32, u32)> {
+        let mut line = 0u32;
+        let mut col = 0u32;
+        let mut out = Vec::new();
+        for t in toks {
+            if t.delta_line == 0 {
+                col += t.delta_start;
+            } else {
+                line += t.delta_line;
+                col = t.delta_start;
+            }
+            out.push((line, col, t.token_type));
+        }
+        out
+    }
+
+    #[test]
+    fn bare_enum_subject_of_is_clause_is_not_a_plain_variable() {
+        // #157: `is (Driving)` — the bare enumerator literal `Driving` resolves to
+        // nothing as an identifier, so it used to highlight as a plain variable,
+        // visually identical to a local. It is an enum member; classify it as a
+        // property so it matches the dotted `is (ASM.Off)` member case.
+        let src = "when (Mode) {\nis (Driving) {\nx = 1;\n}\n}\n";
+        let toks = tokens(src);
+        let abs = absolute(&toks);
+        // `Driving` starts at line 1, column 4 (`is (` is 4 chars).
+        let driving = abs
+            .iter()
+            .find(|(l, c, _)| *l == 1 && *c == 4)
+            .expect("a token at the `Driving` position");
+        assert_eq!(
+            driving.2, TT_PROPERTY,
+            "bare enum subject of `is(...)` should be a property, not a variable: {abs:?}"
         );
     }
 
