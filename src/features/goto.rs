@@ -23,7 +23,10 @@ pub fn goto(
     let (_, path) = path_at_byte(root, byte)?;
     let scope = build_scope(root, Some(&loaded.project), file_name);
     let Resolution::Symbol(sym) = resolve(&path, &scope) else {
-        return None;
+        // Not a project symbol — but it may be an enum type / member literal
+        // (`Color` / `Color.Red`), which lives in `<DataTypes>` off the channel
+        // table. Jump to its `<Type>` / `<Enum>` line (#142).
+        return goto_enum(root, byte, loaded);
     };
     let (target, line) = match &sym.filename {
         // Script/DBC-backed: open the body file at its start. The Filename comes
@@ -78,6 +81,55 @@ fn enum_type_decl_line(xml: &str, enum_name: &str) -> Option<u32> {
     xml.lines()
         .position(|line| line.contains("<Type") && line.contains(&needle))
         .map(|i| i as u32)
+}
+
+/// The 0-based line of the `<Enum Name="<member>">` belonging to enum `<type>`:
+/// the first `<Enum Name="<member>">` at or after the type's `<Type>` line. Scopes
+/// the search to that type so a member of the same name in another enum can't win.
+fn enum_member_decl_line(xml: &str, enum_name: &str, member: &str) -> Option<u32> {
+    let type_line = enum_type_decl_line(xml, enum_name)? as usize;
+    let needle = format!("Name=\"{member}\"");
+    xml.lines()
+        .enumerate()
+        .skip(type_line)
+        .find(|(_, line)| line.contains("<Enum") && line.contains(&needle))
+        .map(|(i, _)| i as u32)
+}
+
+/// Go to Definition for an enum literal segment under the cursor (#142): the enum
+/// *type* name (`Color`) jumps to its `<Type>` block; an enum *member* (`Red`)
+/// jumps to its `<Enum>` line. Mirrors hover's enum-segment resolution.
+fn goto_enum(root: m1_core::Node, byte: usize, loaded: &LoadedProject) -> Option<Location> {
+    use crate::features::locate::{segment_at_byte, segment_nodes};
+    let (top, _) = path_at_byte(root, byte)?;
+    let segs = segment_nodes(top);
+    let i = segment_at_byte(top, byte).unwrap_or(segs.len().saturating_sub(1));
+    let seg = segs.get(i)?.text();
+    let table = loaded.project.symbols();
+    let xml = crate::disk_read::read_disk(&loaded.m1prj_path)?;
+
+    // Enum member: the preceding segment names the enum (`Color.Red`), or the
+    // bare member is declared by exactly one enum.
+    let member_target = |enum_name: &str| enum_member_decl_line(&xml, enum_name, seg);
+    let line = if let Some(prev) = i.checked_sub(1).and_then(|p| segs.get(p))
+        && let Some(id) = table.enum_by_name(prev.text())
+        && table.enum_has_member(id, seg)
+    {
+        member_target(&table.enum_type(id).name)?
+    } else if let Some(id) = table.enum_by_name(seg) {
+        // The segment itself names an enum type.
+        enum_type_decl_line(&xml, &table.enum_type(id).name)?
+    } else if let [only] = table.enums_with_member(seg) {
+        // A bare member declared by exactly one enum.
+        member_target(&table.enum_type(*only).name)?
+    } else {
+        return None;
+    };
+    let uri = Url::from_file_path(&loaded.m1prj_path).ok()?;
+    Some(Location {
+        uri,
+        range: Range::new(Position::new(line, 0), Position::new(line, 0)),
+    })
 }
 
 /// If `byte` sits on a bare reference to a `local` variable, the [`Location`] of
@@ -262,6 +314,38 @@ mod tests {
                 loc.range.start.line, 3,
                 "should point at the declaration line"
             );
+        });
+    }
+
+    #[test]
+    fn goto_enum_type_and_member() {
+        // #142: Go to Definition on an enum type name jumps to its `<Type>` block;
+        // on an enum member, to that member's `<Enum>` line.
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        // 0-based lines: 3 = <Type Name="Color">, 4 = <Enum Name="Red">.
+        let xml = "<?xml version=\"1.0\"?>\n<Project>\n  <DataTypes>\n    <Type Name=\"Color\" Storage=\"enum\" Default=\"Red\">\n      <Enum Name=\"Red\" ContainerOrder=\"0\"/>\n      <Enum Name=\"Green\" ContainerOrder=\"1\"/>\n    </Type>\n  </DataTypes>\n  <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root\"/>\n</Project>";
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(xml.as_bytes())
+            .unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        let src = "x = Color.Red;\n";
+        let cst = m1_core::parse(src);
+        store.with_project(|p| {
+            let lp = p.unwrap();
+            // Cursor on `Color` (the type).
+            let on_color = src.find("Color").unwrap();
+            let loc = goto(cst.root(), on_color, lp, Some("X.m1scr"))
+                .expect("enum type name should resolve");
+            assert_eq!(loc.range.start.line, 3, "Color <Type> line");
+            // Cursor on `Red` (the member).
+            let on_red = src.find("Red").unwrap();
+            let loc =
+                goto(cst.root(), on_red, lp, Some("X.m1scr")).expect("enum member should resolve");
+            assert_eq!(loc.range.start.line, 4, "Red <Enum> line");
         });
     }
 
