@@ -69,11 +69,43 @@ impl LintProvider for M1Lint {
         // (thresholds + enabled set), replacing any file-discovered one.
         *self.runner.write().unwrap() = Runner::new(Registry::from_config(cfg));
     }
+
+    fn fix(&self, src: &str) -> Option<String> {
+        // Apply every enabled fixable rule until stable (idempotent in one pass),
+        // matching `m1-lint --fix`. An unsafe fix is dropped rather than corrupt
+        // the buffer.
+        self.runner
+            .read()
+            .unwrap()
+            .fix_source_stable(src)
+            .ok()
+            .flatten()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fix_applies_fixable_lint_rules() {
+        // #158: a comment-style (L011) issue is fixable but had no LSP quick-fix.
+        // The provider's `fix` should return the corrected source.
+        let l = M1Lint::new();
+        let fixed = l
+            .fix("//x\n")
+            .expect("a fixable comment-style issue should produce a fix");
+        assert!(fixed.contains("// x"), "expected `// x`, got {fixed:?}");
+    }
+
+    #[test]
+    fn fix_returns_none_when_already_clean() {
+        let l = M1Lint::new();
+        assert!(
+            l.fix("x = 1;\n").is_none(),
+            "clean source should yield no fix"
+        );
+    }
 
     #[test]
     fn flags_eq_eq() {

@@ -62,7 +62,10 @@ optional sibling checkout.
   `unsupported-c-token` operators, a quick-fix replaces them with the M1
   keyword (`==`→`eq`, `!=`→`neq`, `&&`→`and`, `||`→`or`, `!`→`not`); for a
   `T020` enum-non-member, a "did you mean" fix replaces the typo with the nearest
-  valid enum member (e.g. `Drive State.Of`→`Drive State.Off`).
+  valid enum member (e.g. `Drive State.Of`→`Drive State.Off`). A whole-file
+  **Fix all auto-fixable lint issues** action (`source.fixAll`) applies the shared
+  `m1-lint` fixer, covering every fixable rule (L002/L003/L007/L011/L018, …) so
+  editors can clean a file on save.
 - **Formatting** (`textDocument/formatting`): whole-document reformat via
   `m1-fmt`, returned as a single full-document `TextEdit`. No edits are returned
   when the document is already formatted or has syntax errors (pass-through
