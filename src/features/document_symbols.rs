@@ -60,6 +60,7 @@ fn collect(n: Node, li: &LineIndex, enc: PositionEncoding) -> Vec<DocumentSymbol
                         SymbolKind::VARIABLE,
                         child,
                         name,
+                        rhs_detail(child),
                         li,
                         enc,
                     ));
@@ -67,7 +68,15 @@ fn collect(n: Node, li: &LineIndex, enc: PositionEncoding) -> Vec<DocumentSymbol
             }
             Kind::AssignmentStatement => {
                 if let Some(name) = name_of(child) {
-                    out.push(leaf(name.text(), SymbolKind::FIELD, child, name, li, enc));
+                    out.push(leaf(
+                        name.text(),
+                        SymbolKind::FIELD,
+                        child,
+                        name,
+                        rhs_detail(child),
+                        li,
+                        enc,
+                    ));
                 }
             }
             // A bare call statement (`Output.SetState(1);`, `Timer.Start();`) is
@@ -81,6 +90,7 @@ fn collect(n: Node, li: &LineIndex, enc: PositionEncoding) -> Vec<DocumentSymbol
                     SymbolKind::METHOD,
                     child,
                     callee,
+                    None,
                     li,
                     enc,
                 )),
@@ -108,18 +118,38 @@ fn collect(n: Node, li: &LineIndex, enc: PositionEncoding) -> Vec<DocumentSymbol
     out
 }
 
+/// The right-hand side of an assignment / `local` declaration, as outline detail
+/// (`= 1`, `= a + b`) — whitespace-collapsed and truncated. Disambiguates several
+/// writes to the same target, which otherwise share a label (#156).
+fn rhs_detail(node: Node) -> Option<String> {
+    let text = node.text();
+    let eq = text.find('=')?;
+    let rhs = text[eq + 1..].trim().trim_end_matches(';').trim();
+    if rhs.is_empty() {
+        return None;
+    }
+    let rhs = rhs.split_whitespace().collect::<Vec<_>>().join(" ");
+    let rhs = if rhs.chars().count() > 40 {
+        format!("{}…", rhs.chars().take(40).collect::<String>())
+    } else {
+        rhs
+    };
+    Some(format!("= {rhs}"))
+}
+
 #[allow(deprecated)]
 fn leaf(
     name: &str,
     kind: SymbolKind,
     full: Node,
     sel: Node,
+    detail: Option<String>,
     li: &LineIndex,
     enc: PositionEncoding,
 ) -> DocumentSymbol {
     DocumentSymbol {
         name: name.to_string(),
-        detail: None,
+        detail,
         kind,
         tags: None,
         deprecated: None,
@@ -165,6 +195,25 @@ mod tests {
         let names: Vec<_> = syms.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"fGain"));
         assert!(names.contains(&"Ratio"));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn assignment_leaves_carry_distinguishing_detail() {
+        // #156: two writes to the same channel share a label, so without detail
+        // they're indistinguishable in the outline. The RHS disambiguates them.
+        let src = "Out = 1;\nOut = 2;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let syms = document_symbols(cst.root(), &li, PositionEncoding::Utf16);
+        let outs: Vec<_> = syms.iter().filter(|s| s.name == "Out").collect();
+        assert_eq!(outs.len(), 2, "two assignments to Out: {syms:?}");
+        assert!(outs[0].detail.is_some(), "leaves should carry detail");
+        assert_ne!(
+            outs[0].detail, outs[1].detail,
+            "the two writes should be distinguishable: {outs:?}"
+        );
+        assert!(outs[0].detail.as_deref().unwrap().contains('1'));
     }
 
     #[test]
