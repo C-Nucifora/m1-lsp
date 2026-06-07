@@ -538,6 +538,71 @@ fn is_user_authored_script(sym: &m1_typecheck::symbols::Symbol) -> bool {
     )
 }
 
+/// If `filename` begins with the path token `old_leaf` — a *whole* leading
+/// segment, delimited by a space, a dot, or the start of the `.m1scr` extension —
+/// return the filename with that leading token replaced by `new_name`. Returns
+/// `None` when the group segment is not the leading token, so an unrelated
+/// filename (`Democracy.m1scr` vs leaf `Demo`) or one whose group segment is
+/// deeper than the lead is never rewritten — the `.m1prj` is left untouched
+/// rather than corrupted (#149).
+fn rewrite_filename_group_segment(
+    filename: &str,
+    old_leaf: &str,
+    new_name: &str,
+) -> Option<String> {
+    let rest = filename.strip_prefix(old_leaf)?;
+    match rest.chars().next() {
+        Some(' ') | Some('.') => Some(format!("{new_name}{rest}")),
+        _ => None,
+    }
+}
+
+/// `.m1prj` text edits keeping explicit `Filename="…"` attributes consistent with
+/// a group rename: for each script symbol under the group whose explicit filename
+/// leads with the renamed group segment, rewrite that leading segment in place.
+/// Symbol-driven (not a blind text scan) so only the filenames of scripts that
+/// actually live under the renamed group are touched — a same-named filename
+/// under a different group is left alone (#149).
+fn m1prj_filename_edits(
+    prj_text: &str,
+    project: &Project,
+    group_path: &str,
+    old_leaf: &str,
+    new_name: &str,
+    enc: PositionEncoding,
+) -> Vec<TextEdit> {
+    let li = LineIndex::new(prj_text);
+    let prefix = format!("{group_path}.");
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for sym in project.symbols().iter() {
+        if !sym.path.starts_with(&prefix) {
+            continue;
+        }
+        let Some(fname) = sym.filename.as_deref() else {
+            continue;
+        };
+        let Some(new_fname) = rewrite_filename_group_segment(fname, old_leaf, new_name) else {
+            continue;
+        };
+        let needle = format!("Filename=\"{fname}\"");
+        if !seen.insert(needle.clone()) {
+            continue; // a filename shared by several components is edited once
+        }
+        let mut search = 0;
+        while let Some(rel) = prj_text[search..].find(&needle) {
+            let val_start = search + rel + "Filename=\"".len();
+            let val_end = val_start + fname.len();
+            out.push(TextEdit {
+                range: to_range(&(val_start..val_end), &li, enc),
+                new_text: new_fname.clone(),
+            });
+            search = val_end + 1;
+        }
+    }
+    out
+}
+
 fn group_file_renames(
     loaded: &LoadedProject,
     project: &Project,
@@ -554,16 +619,24 @@ fn group_file_renames(
         if !sym.path.starts_with(&prefix) {
             continue;
         }
-        // An explicit Filename doesn't encode the group, so it needs no rename.
-        if sym.filename.is_some() {
-            continue;
-        }
-        // Derived basename convention: the path minus the `Root.` prefix + `.m1scr`.
-        let rel = sym.path.strip_prefix("Root.").unwrap_or(&sym.path);
-        let old_base = format!("{rel}.m1scr");
-        let new_path = rename_group_segment(&sym.path, group_path, old_leaf, new_name);
-        let new_rel = new_path.strip_prefix("Root.").unwrap_or(&new_path);
-        let new_base = format!("{new_rel}.m1scr");
+        let (old_base, new_base) = match sym.filename.as_deref() {
+            // Explicit `Filename=`: rename the file only when the filename leads
+            // with the renamed group segment (so it actually encodes the group).
+            // Otherwise the file location is independent of the group name and
+            // needs no move (#149).
+            Some(f) => match rewrite_filename_group_segment(f, old_leaf, new_name) {
+                Some(nf) => (f.to_string(), nf),
+                None => continue,
+            },
+            // Derived basename convention: the path minus `Root.` + `.m1scr`.
+            None => {
+                let rel = sym.path.strip_prefix("Root.").unwrap_or(&sym.path);
+                let old_base = format!("{rel}.m1scr");
+                let new_path = rename_group_segment(&sym.path, group_path, old_leaf, new_name);
+                let new_rel = new_path.strip_prefix("Root.").unwrap_or(&new_path);
+                (old_base, format!("{new_rel}.m1scr"))
+            }
+        };
         let Some(disk) = loaded.script_files.iter().find(|p| {
             p.file_name()
                 .map(|f| f == old_base.as_str())
@@ -635,12 +708,21 @@ fn execute_group(
     let prj_text = open_text(&prj_uri)
         .or_else(|| crate::disk_read::read_disk(&loaded.m1prj_path))
         .ok_or_else(|| "cannot read the project file".to_string())?;
-    let prj_edits = m1prj_group_edits(&prj_text, &group_path, old_leaf, new_name, enc);
+    let mut prj_edits = m1prj_group_edits(&prj_text, &group_path, old_leaf, new_name, enc);
     if prj_edits.is_empty() {
         return Err(format!(
             "could not locate the declaration of ‘{group_path}’ in the project file"
         ));
     }
+    // Keep any explicit `Filename=` attributes consistent with the renamed group.
+    prj_edits.extend(m1prj_filename_edits(
+        &prj_text,
+        project,
+        &group_path,
+        old_leaf,
+        new_name,
+        enc,
+    ));
     ops.push(text_doc_edit(prj_uri, prj_edits));
 
     // 2) References across every script (text edits use the current URIs).
@@ -1578,6 +1660,88 @@ mod tests {
                 .unwrap_or_default(),
             _ => Vec::new(),
         }
+    }
+
+    #[test]
+    fn rewrite_filename_group_segment_only_on_leading_whole_token() {
+        // Space- and dot-delimited leading group token → rewritten.
+        assert_eq!(
+            rewrite_filename_group_segment("Demo Run.m1scr", "Demo", "Widget").as_deref(),
+            Some("Widget Run.m1scr")
+        );
+        assert_eq!(
+            rewrite_filename_group_segment("Demo.Run.m1scr", "Demo", "Widget").as_deref(),
+            Some("Widget.Run.m1scr")
+        );
+        assert_eq!(
+            rewrite_filename_group_segment("Demo.m1scr", "Demo", "Widget").as_deref(),
+            Some("Widget.m1scr")
+        );
+        // Not a whole leading token → left untouched (no corruption).
+        assert_eq!(
+            rewrite_filename_group_segment("Democracy.m1scr", "Demo", "Widget"),
+            None
+        );
+        assert_eq!(
+            rewrite_filename_group_segment("Other Run.m1scr", "Demo", "Widget"),
+            None
+        );
+    }
+
+    #[test]
+    fn group_rename_rewrites_explicit_filename_and_moves_the_file() {
+        // A project with an *explicit* `Filename=` that embeds the group segment.
+        let prj = r#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Demo"/>
+  <Component Classname="BuiltIn.FuncUser" Name="Root.Demo.Run" Filename="Demo Run.m1scr"/>
+</Project>"#;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Project.m1prj"), prj).unwrap();
+        std::fs::write(tmp.path().join("Demo Run.m1scr"), "// demo\n").unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        // Rename group Demo -> Widget, cursor on `Demo` in the script's own ref.
+        let src = "local x = Root.Demo.Run;\n";
+        let uri = Url::from_file_path(tmp.path().join("Demo Run.m1scr")).unwrap();
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find("Demo").unwrap();
+        let no_open = |_: &Url| None;
+
+        let we = store
+            .with_project(|p| {
+                execute(
+                    cst.root(),
+                    byte,
+                    "Widget",
+                    uri.clone(),
+                    &li,
+                    PositionEncoding::Utf16,
+                    Some(p.unwrap()),
+                    Some("Demo Run.m1scr"),
+                    &no_open,
+                )
+            })
+            .expect("group rename should succeed");
+
+        // The `.m1prj` edits include the Filename value rewrite (Demo Run -> Widget Run).
+        let prj_edits = doc_edits_for(&we, "Project.m1prj");
+        assert!(
+            prj_edits.iter().any(|e| e.new_text == "Widget Run.m1scr"),
+            "Filename= must be rewritten: {prj_edits:?}"
+        );
+        // And a RenameFile op moves the backing file (URI paths are percent-encoded).
+        let files = rename_files(&we);
+        let decode = |s: &str| s.replace("%20", " ");
+        assert!(
+            files
+                .iter()
+                .any(|(o, n)| decode(o) == "Demo Run.m1scr" && decode(n) == "Widget Run.m1scr"),
+            "explicit-filename script must be renamed on disk: {files:?}"
+        );
     }
 
     #[test]
