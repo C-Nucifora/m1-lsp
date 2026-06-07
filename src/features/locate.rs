@@ -4,6 +4,7 @@ use m1_typecheck::project::Project;
 use m1_typecheck::resolve::Scope;
 use m1_typecheck::types::ValueType;
 use std::collections::HashMap;
+use tower_lsp::lsp_types::Url;
 
 /// The deepest node whose byte range contains `byte`.
 pub fn node_at_byte(root: Node, byte: usize) -> Option<Node> {
@@ -78,6 +79,49 @@ pub fn segment_nodes(top: Node) -> Vec<Node> {
     }
     out.extend(props.into_iter().rev());
     out
+}
+
+/// True when `n` is the `property` half of a `member_expression` (the part after
+/// the `.`), which is a channel/field access — never a local.
+pub(crate) fn is_member_property(n: Node) -> bool {
+    n.parent()
+        .filter(|p| p.kind() == Kind::MemberExpression)
+        .and_then(|p| p.child_by_field(Field::Property))
+        .map(|prop| prop.byte_range() == n.byte_range())
+        .unwrap_or(false)
+}
+
+/// True when `n` is inside a `<Type>` annotation (e.g. `local <Integer>`), where
+/// an identifier names a type, not a value.
+pub(crate) fn in_type_annotation(n: Node) -> bool {
+    let mut cur = n;
+    while let Some(p) = cur.parent() {
+        if p.kind() == Kind::TypeAnnotation {
+            return true;
+        }
+        cur = p;
+    }
+    false
+}
+
+/// True for the outermost node of a dotted path (an `identifier` /
+/// `member_expression` not itself the child of a `member_expression`), excluding
+/// type-annotation names. This is the `is_path && is_top && !in_type_annotation`
+/// guard that gates every project-symbol reference scan.
+pub(crate) fn is_top_path(n: Node) -> bool {
+    matches!(n.kind(), Kind::Identifier | Kind::MemberExpression)
+        && n.parent()
+            .map(|p| p.kind() != Kind::MemberExpression)
+            .unwrap_or(true)
+        && !in_type_annotation(n)
+}
+
+/// The file name (basename) of a `file://` URI, for group-relative resolution.
+pub(crate) fn file_name_of(uri: &Url) -> Option<String> {
+    uri.to_file_path()
+        .ok()?
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
 }
 
 /// Index of the dotted-path segment whose text span contains `byte`.

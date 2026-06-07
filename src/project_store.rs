@@ -35,6 +35,51 @@ impl LoadedProject {
     }
 }
 
+/// `(uri, text)` for every project script that a cross-file rename or
+/// reference-search loop walks: the **cursor file first** (so it's always
+/// present and processed first), then every other `*.m1scr` in `script_files`,
+/// deduped by URI, preferring an open editor buffer over the on-disk text.
+///
+/// `cursor_text` lets the caller skip an I/O round-trip when it already holds the
+/// cursor file's text (the references/highlight path): pass `Some(text)` to use
+/// it verbatim, or `None` to read the cursor file like any other (open buffer,
+/// then disk — the rename path, which only has the URI).
+///
+/// Takes the script-path slice by reference (rather than a `&LoadedProject`) so
+/// the caller can clone the small `Vec<PathBuf>` and drop the project `RwLock`
+/// guard *before* this read+parse-every-script loop runs (#135).
+pub(crate) fn gather_project_scripts(
+    script_files: &[PathBuf],
+    cursor_uri: &Url,
+    cursor_text: Option<&str>,
+    open_text: &dyn Fn(&Url) -> Option<String>,
+) -> Vec<(Url, String)> {
+    let mut out: Vec<(Url, String)> = Vec::new();
+    let cursor = cursor_text.map(str::to_string).or_else(|| {
+        open_text(cursor_uri).or_else(|| {
+            cursor_uri
+                .to_file_path()
+                .ok()
+                .and_then(|p| crate::disk_read::read_disk(&p))
+        })
+    });
+    if let Some(t) = cursor {
+        out.push((cursor_uri.clone(), t));
+    }
+    for p in script_files {
+        let Ok(uri) = Url::from_file_path(p) else {
+            continue;
+        };
+        if out.iter().any(|(u, _)| *u == uri) {
+            continue;
+        }
+        if let Some(t) = open_text(&uri).or_else(|| crate::disk_read::read_disk(p)) {
+            out.push((uri, t));
+        }
+    }
+    out
+}
+
 /// Maximum directory depth [`walk_scripts`] descends (defense-in-depth against a
 /// pathologically deep tree).
 const MAX_WALK_DEPTH: usize = 64;

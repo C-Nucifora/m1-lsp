@@ -8,7 +8,10 @@
 //! (`script_files`), enumerated from the filesystem since a real `.m1prj` omits
 //! `Filename=` attributes and the symbol-table list would be empty.
 use crate::convert::range;
-use crate::features::locate::{build_scope, collect_locals, node_at_byte, path_at_byte};
+use crate::features::locate::{
+    build_scope, collect_locals, file_name_of, in_type_annotation, is_member_property, is_top_path,
+    node_at_byte, path_at_byte,
+};
 use crate::line_index::{LineIndex, PositionEncoding};
 use m1_core::{Field, Kind, Node};
 use m1_typecheck::project::Project;
@@ -29,14 +32,6 @@ fn canonical(scope: &Scope, path: &str) -> Option<String> {
     }
 }
 
-/// The file name (basename) of a `file://` URI, for group-relative resolution.
-fn file_name_of(uri: &Url) -> Option<String> {
-    uri.to_file_path()
-        .ok()?
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-}
-
 /// Every top-level path occurrence in `root` whose canonical symbol path equals
 /// `target`, resolved through this file's group `scope`. When `writes_only`, keep
 /// only assignment-target (producer) sites — the go-to-implementation case.
@@ -54,12 +49,7 @@ fn canonical_locations(
     let scope = build_scope(root, Some(project), Some(file_name));
     let mut out = Vec::new();
     for n in root.descendants() {
-        let is_path = matches!(n.kind(), Kind::Identifier | Kind::MemberExpression);
-        let is_top = n
-            .parent()
-            .map(|p| p.kind() != Kind::MemberExpression)
-            .unwrap_or(true);
-        if !is_path || !is_top || in_type_annotation(n) {
+        if !is_top_path(n) {
             continue;
         }
         if writes_only && !is_write(n) {
@@ -73,26 +63,6 @@ fn canonical_locations(
         }
     }
     out
-}
-
-/// True when `n` is the `property` half of a `member_expression` (after the `.`).
-fn is_member_property(n: Node) -> bool {
-    n.parent()
-        .filter(|p| p.kind() == Kind::MemberExpression)
-        .and_then(|p| p.child_by_field(Field::Property))
-        .map(|prop| prop.byte_range() == n.byte_range())
-        .unwrap_or(false)
-}
-
-fn in_type_annotation(n: Node) -> bool {
-    let mut cur = n;
-    while let Some(p) = cur.parent() {
-        if p.kind() == Kind::TypeAnnotation {
-            return true;
-        }
-        cur = p;
-    }
-    false
 }
 
 /// The outermost path node (`identifier` / `member_expression`) at `n`: climb out
@@ -130,12 +100,7 @@ fn collect_local_idents<'a>(root: Node<'a>, name: &str, out: &mut Vec<Node<'a>>)
 /// traversal (see [`collect_local_idents`]) — stack-safe on deep input (#133).
 fn collect_path_matches<'a>(root: Node<'a>, path: &str, out: &mut Vec<Node<'a>>) {
     for n in root.descendants() {
-        let is_path = matches!(n.kind(), Kind::Identifier | Kind::MemberExpression);
-        let is_top = n
-            .parent()
-            .map(|p| p.kind() != Kind::MemberExpression)
-            .unwrap_or(true);
-        if is_path && is_top && !in_type_annotation(n) && n.text() == path {
+        if is_top_path(n) && n.text() == path {
             out.push(n);
         }
     }
@@ -192,12 +157,7 @@ pub(crate) fn path_occurrences(root: Node) -> Vec<(String, std::ops::Range<usize
     // recursion, so a pathologically deep tree can't overflow the stack (#133).
     let mut out = Vec::new();
     for n in root.descendants() {
-        let is_path = matches!(n.kind(), Kind::Identifier | Kind::MemberExpression);
-        let is_top = n
-            .parent()
-            .map(|p| p.kind() != Kind::MemberExpression)
-            .unwrap_or(true);
-        if is_path && is_top && !in_type_annotation(n) {
+        if is_top_path(n) {
             out.push((n.text().to_string(), n.byte_range(), is_write(n)));
         }
     }
@@ -248,18 +208,22 @@ pub fn ref_target(root: Node, byte: usize) -> Option<RefTarget> {
     Some(RefTarget::Path(path))
 }
 
-/// All Locations of the dotted `path` within one already-parsed file.
-fn path_locations(
+/// Locations of the dotted `path` within one already-parsed file, matched by
+/// verbatim text. When `writes_only`, keep only producer (assignment-target)
+/// sites — the go-to-implementation fallback for non-project paths.
+fn path_text_locations(
     root: Node,
     path: &str,
     uri: &Url,
     li: &LineIndex,
     enc: PositionEncoding,
+    writes_only: bool,
 ) -> Vec<Location> {
     let mut nodes = Vec::new();
     collect_path_matches(root, path, &mut nodes);
     nodes
         .into_iter()
+        .filter(|n| !writes_only || is_write(*n))
         .map(|n| Location {
             uri: uri.clone(),
             range: range(&n.byte_range(), li, enc),
@@ -274,33 +238,16 @@ fn path_locations(
 /// buffer for a file when one is open (newer than disk); files not open are read
 /// from disk. The cursor's own file is always included.
 ///
-/// Takes the script-path slice by reference (rather than `&LoadedProject`) so the
-/// caller can clone the small `Vec<PathBuf>` and release the project `RwLock`
-/// guard *before* this read+parse-every-script loop runs (#135).
-/// (uri, text) for the cursor file first, then every other project script
-/// (deduped by uri), preferring open buffers over on-disk text.
-fn gather_files(
-    script_files: &[std::path::PathBuf],
-    cursor_uri: &Url,
-    cursor_text: &str,
-    open_text: &dyn Fn(&Url) -> Option<String>,
-) -> Vec<(Url, String)> {
-    let mut files: Vec<(Url, String)> = vec![(cursor_uri.clone(), cursor_text.to_string())];
-    for p in script_files {
-        let Ok(uri) = Url::from_file_path(p) else {
-            continue;
-        };
-        if files.iter().any(|(u, _)| *u == uri) {
-            continue;
-        }
-        if let Some(t) = open_text(&uri).or_else(|| crate::disk_read::read_disk(p)) {
-            files.push((uri, t));
-        }
-    }
-    files
-}
-
-pub fn project_references(
+/// Project-wide canonical reference search, shared by [`project_references`]
+/// (`writes_only = false`) and [`project_implementations`] (`writes_only =
+/// true`). A local stays file-local; a project symbol is searched across every
+/// `.m1scr`, matched by resolved canonical path so group-relative and full-path
+/// spellings of the same channel collapse (#143), falling back to verbatim text
+/// matching for library members / opaque / unresolved paths. When `writes_only`,
+/// only producer (assignment-target) sites are kept.
+#[allow(clippy::too_many_arguments)]
+fn project_canonical_refs(
+    writes_only: bool,
     project: &Project,
     script_files: &[std::path::PathBuf],
     cursor_uri: &Url,
@@ -311,18 +258,28 @@ pub fn project_references(
 ) -> Option<Vec<Location>> {
     let cursor_cst = m1_core::parse(cursor_text);
     match ref_target(cursor_cst.root(), byte)? {
-        // Locals are file-scoped: reuse the single-file finder.
-        RefTarget::Local(_) => {
+        // Locals are file-scoped.
+        RefTarget::Local(name) => {
             let li = LineIndex::new(cursor_text);
-            references(cursor_cst.root(), byte, cursor_uri.clone(), &li, enc)
+            let mut nodes = Vec::new();
+            collect_local_idents(cursor_cst.root(), &name, &mut nodes);
+            let locs: Vec<Location> = nodes
+                .into_iter()
+                .filter(|n| !writes_only || is_write(*n))
+                .map(|n| Location {
+                    uri: cursor_uri.clone(),
+                    range: range(&n.byte_range(), &li, enc),
+                })
+                .collect();
+            (!locs.is_empty()).then_some(locs)
         }
         RefTarget::Path(path) => {
-            let files = gather_files(script_files, cursor_uri, cursor_text, open_text);
-            // Resolve the cursor's path to a canonical project symbol through its
-            // own group scope, then match every file's occurrences by canonical
-            // path so group-relative and full-path spellings of the same channel
-            // collapse (#143). Fall back to verbatim text matching when it isn't a
-            // project symbol (library member / opaque / unresolved).
+            let files = crate::project_store::gather_project_scripts(
+                script_files,
+                cursor_uri,
+                Some(cursor_text),
+                open_text,
+            );
             let cursor_scope = build_scope(
                 cursor_cst.root(),
                 Some(project),
@@ -342,9 +299,16 @@ pub fn project_references(
                         uri,
                         &li,
                         enc,
-                        false,
+                        writes_only,
                     )),
-                    None => locs.extend(path_locations(cst.root(), &path, uri, &li, enc)),
+                    None => locs.extend(path_text_locations(
+                        cst.root(),
+                        &path,
+                        uri,
+                        &li,
+                        enc,
+                        writes_only,
+                    )),
                 }
             }
             (!locs.is_empty()).then_some(locs)
@@ -352,25 +316,25 @@ pub fn project_references(
     }
 }
 
-/// Locations of the dotted `path` within one file that are **writes** (an
-/// assignment target) — the producer sites that back go-to-implementation.
-fn path_write_locations(
-    root: Node,
-    path: &str,
-    uri: &Url,
-    li: &LineIndex,
+pub fn project_references(
+    project: &Project,
+    script_files: &[std::path::PathBuf],
+    cursor_uri: &Url,
+    cursor_text: &str,
+    byte: usize,
     enc: PositionEncoding,
-) -> Vec<Location> {
-    let mut nodes = Vec::new();
-    collect_path_matches(root, path, &mut nodes);
-    nodes
-        .into_iter()
-        .filter(|n| is_write(*n))
-        .map(|n| Location {
-            uri: uri.clone(),
-            range: range(&n.byte_range(), li, enc),
-        })
-        .collect()
+    open_text: &dyn Fn(&Url) -> Option<String>,
+) -> Option<Vec<Location>> {
+    project_canonical_refs(
+        false,
+        project,
+        script_files,
+        cursor_uri,
+        cursor_text,
+        byte,
+        enc,
+        open_text,
+    )
 }
 
 /// textDocument/implementation: jump to where the symbol under the cursor is
@@ -388,52 +352,16 @@ pub fn project_implementations(
     enc: PositionEncoding,
     open_text: &dyn Fn(&Url) -> Option<String>,
 ) -> Option<Vec<Location>> {
-    let cursor_cst = m1_core::parse(cursor_text);
-    match ref_target(cursor_cst.root(), byte)? {
-        RefTarget::Local(name) => {
-            let li = LineIndex::new(cursor_text);
-            let mut nodes = Vec::new();
-            collect_local_idents(cursor_cst.root(), &name, &mut nodes);
-            let locs: Vec<Location> = nodes
-                .into_iter()
-                .filter(|n| is_write(*n))
-                .map(|n| Location {
-                    uri: cursor_uri.clone(),
-                    range: range(&n.byte_range(), &li, enc),
-                })
-                .collect();
-            (!locs.is_empty()).then_some(locs)
-        }
-        RefTarget::Path(path) => {
-            let files = gather_files(script_files, cursor_uri, cursor_text, open_text);
-            // Canonicalize like `project_references`, but keep only writes (#143).
-            let cursor_scope = build_scope(
-                cursor_cst.root(),
-                Some(project),
-                file_name_of(cursor_uri).as_deref(),
-            );
-            let target = canonical(&cursor_scope, &path);
-            let mut locs = Vec::new();
-            for (uri, text) in &files {
-                let li = LineIndex::new(text);
-                let cst = m1_core::parse(text);
-                match &target {
-                    Some(t) => locs.extend(canonical_locations(
-                        project,
-                        file_name_of(uri).as_deref().unwrap_or_default(),
-                        cst.root(),
-                        t,
-                        uri,
-                        &li,
-                        enc,
-                        true,
-                    )),
-                    None => locs.extend(path_write_locations(cst.root(), &path, uri, &li, enc)),
-                }
-            }
-            (!locs.is_empty()).then_some(locs)
-        }
-    }
+    project_canonical_refs(
+        true,
+        project,
+        script_files,
+        cursor_uri,
+        cursor_text,
+        byte,
+        enc,
+        open_text,
+    )
 }
 
 pub fn document_highlights(
@@ -488,12 +416,7 @@ pub fn document_highlights_scoped(
         if let Some(target) = canonical(&scope, &path) {
             let mut out = Vec::new();
             for n in root.descendants() {
-                let is_path = matches!(n.kind(), Kind::Identifier | Kind::MemberExpression);
-                let is_top = n
-                    .parent()
-                    .map(|p| p.kind() != Kind::MemberExpression)
-                    .unwrap_or(true);
-                if !is_path || !is_top || in_type_annotation(n) {
+                if !is_top_path(n) {
                     continue;
                 }
                 if canonical(&scope, n.text()).as_deref() == Some(target.as_str()) {

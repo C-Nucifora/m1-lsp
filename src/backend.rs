@@ -48,20 +48,13 @@ pub struct Backend {
 
 impl Backend {
     pub fn new(client: Client) -> Self {
-        Self {
+        Self::with_backends(
             client,
-            docs: DashMap::new(),
-            encoding: std::sync::RwLock::new(PositionEncoding::Utf16),
-            lint: Box::new(NoLint),
-            types: Box::new(NoTypes),
-            formatter: Box::new(NoFormat),
-            store: Arc::new(ProjectStore::new()),
-            watch_dynamic: std::sync::atomic::AtomicBool::new(false),
-            change_annotation_support: std::sync::atomic::AtomicBool::new(false),
-            config: std::sync::RwLock::new(M1Config::default()),
-            editor_settings: std::sync::RwLock::new(None),
-            config_root: std::sync::RwLock::new(None),
-        }
+            Box::new(NoLint),
+            Box::new(NoTypes),
+            Box::new(NoFormat),
+            Arc::new(ProjectStore::new()),
+        )
     }
 
     /// Inject lint, type provider, formatter, and a shared project store (the
@@ -114,6 +107,15 @@ impl Backend {
 
     fn enc(&self) -> PositionEncoding {
         *self.encoding.read().unwrap()
+    }
+
+    /// The current text and line index of an open document, cloned out so the
+    /// `DashMap` entry guard is released before parsing. `None` when the document
+    /// isn't open. Every request handler that needs the buffer goes through this.
+    fn get_doc(&self, uri: &Url) -> Option<(String, crate::line_index::LineIndex)> {
+        self.docs
+            .get(uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
     }
 
     /// Fallback project discovery (#73). `initialize` loads the project from the
@@ -217,13 +219,14 @@ impl Backend {
     /// project's file, surface the project-scope audit (T041/T050/…) anchored to
     /// it (#139); any other `.m1prj` reports nothing.
     fn diagnostics_for(&self, uri: &Url) -> Option<Vec<Diagnostic>> {
-        let (text, lindex) = if let Some(d) = self.docs.get(uri) {
-            (d.text.clone(), d.line_index.clone())
-        } else {
-            let path = uri.to_file_path().ok()?;
-            let text = crate::disk_read::read_disk(&path)?;
-            let li = crate::line_index::LineIndex::new(&text);
-            (text, li)
+        let (text, lindex) = match self.get_doc(uri) {
+            Some(doc) => doc,
+            None => {
+                let path = uri.to_file_path().ok()?;
+                let text = crate::disk_read::read_disk(&path)?;
+                let li = crate::line_index::LineIndex::new(&text);
+                (text, li)
+            }
         };
         let enc = self.enc();
         if is_m1prj(uri) {
@@ -313,6 +316,89 @@ fn is_m1prj(uri: &Url) -> bool {
 /// [`crate::config::M1Config::resolve`].
 fn editor_settings(v: serde_json::Value) -> serde_json::Value {
     v.get("settings").cloned().unwrap_or(v)
+}
+
+/// The static set of LSP capabilities the server advertises in `initialize`.
+/// `encoding` is the position encoding negotiated with the client; everything
+/// else is fixed at build time.
+fn server_capabilities(encoding: PositionEncodingKind) -> ServerCapabilities {
+    ServerCapabilities {
+        position_encoding: Some(encoding),
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        document_formatting_provider: Some(OneOf::Left(true)),
+        document_range_formatting_provider: Some(OneOf::Left(true)),
+        workspace_symbol_provider: Some(OneOf::Left(true)),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
+        // Go to Declaration (== definition for project symbols) and Go to
+        // Type Definition (enum-typed channel → its <Type> block) (#168).
+        declaration_provider: Some(DeclarationCapability::Simple(true)),
+        type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
+        // Hyperlink `Filename="…"` attributes in Project.m1prj (#175).
+        document_link_provider: Some(DocumentLinkOptions {
+            resolve_provider: Some(false),
+            work_done_progress_options: Default::default(),
+        }),
+        // Hierarchical "expand selection" (#173).
+        selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+        implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
+        references_provider: Some(OneOf::Left(true)),
+        document_highlight_provider: Some(OneOf::Left(true)),
+        folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+        // Advertise the kinds we emit so editors can wire fix-all-on-save
+        // (the whole-file m1-lint fixer, #158) and group quick-fixes.
+        code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
+            code_action_kinds: Some(vec![
+                CodeActionKind::QUICKFIX,
+                CodeActionKind::REFACTOR_EXTRACT,
+                CodeActionKind::REFACTOR_INLINE,
+                CodeActionKind::SOURCE_FIX_ALL,
+                CodeActionKind::SOURCE,
+            ]),
+            resolve_provider: Some(false),
+            work_done_progress_options: Default::default(),
+        })),
+        document_symbol_provider: Some(OneOf::Left(true)),
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec![".".into()]),
+            ..Default::default()
+        }),
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".into(), ",".into()]),
+            retrigger_characters: None,
+            work_done_progress_options: Default::default(),
+        }),
+        inlay_hint_provider: Some(OneOf::Left(true)),
+        // Pull diagnostics (#140): answer `textDocument/diagnostic` and
+        // `workspace/diagnostic` so pull-capable clients (Neovim's
+        // vim.diagnostic, Helix) and unopened files get full coverage,
+        // not just the push path's open buffers. No inter-file deps — a
+        // script's diagnostics depend only on itself plus the static
+        // project model, so editing one script can't change another's.
+        diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
+            identifier: Some("m1-lsp".into()),
+            inter_file_dependencies: false,
+            workspace_diagnostics: true,
+            work_done_progress_options: Default::default(),
+        })),
+        code_lens_provider: Some(CodeLensOptions {
+            resolve_provider: Some(false),
+        }),
+        call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
+                legend: semantic_tokens::legend(),
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+                range: Some(true),
+                work_done_progress_options: Default::default(),
+            },
+        )),
+        ..Default::default()
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -405,91 +491,7 @@ impl LanguageServer for Backend {
                 name: "m1-lsp".into(),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
             }),
-            capabilities: ServerCapabilities {
-                position_encoding: Some(chosen.1),
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
-                )),
-                document_formatting_provider: Some(OneOf::Left(true)),
-                document_range_formatting_provider: Some(OneOf::Left(true)),
-                workspace_symbol_provider: Some(OneOf::Left(true)),
-                hover_provider: Some(HoverProviderCapability::Simple(true)),
-                definition_provider: Some(OneOf::Left(true)),
-                // Go to Declaration (== definition for project symbols) and Go to
-                // Type Definition (enum-typed channel → its <Type> block) (#168).
-                declaration_provider: Some(DeclarationCapability::Simple(true)),
-                type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
-                // Hyperlink `Filename="…"` attributes in Project.m1prj (#175).
-                document_link_provider: Some(DocumentLinkOptions {
-                    resolve_provider: Some(false),
-                    work_done_progress_options: Default::default(),
-                }),
-                // Hierarchical "expand selection" (#173).
-                selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
-                implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
-                references_provider: Some(OneOf::Left(true)),
-                document_highlight_provider: Some(OneOf::Left(true)),
-                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
-                // Advertise the kinds we emit so editors can wire fix-all-on-save
-                // (the whole-file m1-lint fixer, #158) and group quick-fixes.
-                code_action_provider: Some(CodeActionProviderCapability::Options(
-                    CodeActionOptions {
-                        code_action_kinds: Some(vec![
-                            CodeActionKind::QUICKFIX,
-                            CodeActionKind::REFACTOR_EXTRACT,
-                            CodeActionKind::REFACTOR_INLINE,
-                            CodeActionKind::SOURCE_FIX_ALL,
-                            CodeActionKind::SOURCE,
-                        ]),
-                        resolve_provider: Some(false),
-                        work_done_progress_options: Default::default(),
-                    },
-                )),
-                document_symbol_provider: Some(OneOf::Left(true)),
-                completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![".".into()]),
-                    ..Default::default()
-                }),
-                signature_help_provider: Some(SignatureHelpOptions {
-                    trigger_characters: Some(vec!["(".into(), ",".into()]),
-                    retrigger_characters: None,
-                    work_done_progress_options: Default::default(),
-                }),
-                inlay_hint_provider: Some(OneOf::Left(true)),
-                // Pull diagnostics (#140): answer `textDocument/diagnostic` and
-                // `workspace/diagnostic` so pull-capable clients (Neovim's
-                // vim.diagnostic, Helix) and unopened files get full coverage,
-                // not just the push path's open buffers. No inter-file deps — a
-                // script's diagnostics depend only on itself plus the static
-                // project model, so editing one script can't change another's.
-                diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
-                    DiagnosticOptions {
-                        identifier: Some("m1-lsp".into()),
-                        inter_file_dependencies: false,
-                        workspace_diagnostics: true,
-                        work_done_progress_options: Default::default(),
-                    },
-                )),
-                code_lens_provider: Some(CodeLensOptions {
-                    resolve_provider: Some(false),
-                }),
-                call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
-                rename_provider: Some(OneOf::Right(RenameOptions {
-                    prepare_provider: Some(true),
-                    work_done_progress_options: Default::default(),
-                })),
-                semantic_tokens_provider: Some(
-                    SemanticTokensServerCapabilities::SemanticTokensOptions(
-                        SemanticTokensOptions {
-                            legend: semantic_tokens::legend(),
-                            full: Some(SemanticTokensFullOptions::Bool(true)),
-                            range: Some(true),
-                            work_done_progress_options: Default::default(),
-                        },
-                    ),
-                ),
-                ..Default::default()
-            },
+            capabilities: server_capabilities(chosen.1),
         })
     }
 
@@ -616,11 +618,7 @@ impl LanguageServer for Backend {
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let tdp = params.text_document_position_params;
         let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let byte = lindex.offset(tdp.position, &text, self.enc());
@@ -649,11 +647,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<GotoDefinitionResponse>> {
         let tdp = params.text_document_position_params;
         let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let byte = lindex.offset(tdp.position, &text, self.enc());
@@ -683,11 +677,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<request::GotoDeclarationResponse>> {
         let tdp = params.text_document_position_params;
         let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let byte = lindex.offset(tdp.position, &text, self.enc());
@@ -713,11 +703,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<request::GotoTypeDefinitionResponse>> {
         let tdp = params.text_document_position_params;
         let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let byte = lindex.offset(tdp.position, &text, self.enc());
@@ -736,11 +722,7 @@ impl LanguageServer for Backend {
     /// `Project.m1prj` to the script they name, relative to the project dir (#175).
     async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
         let uri = params.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let Some(root) = uri
@@ -761,11 +743,7 @@ impl LanguageServer for Backend {
         params: SelectionRangeParams,
     ) -> Result<Option<Vec<SelectionRange>>> {
         let uri = params.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let enc = self.enc();
@@ -787,11 +765,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<GotoImplementationResponse>> {
         let tdp = params.text_document_position_params;
         let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let byte = lindex.offset(tdp.position, &text, self.enc());
@@ -825,11 +799,7 @@ impl LanguageServer for Backend {
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = params.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let cst = m1_core::parse(&text);
@@ -840,11 +810,7 @@ impl LanguageServer for Backend {
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let tdp = params.text_document_position;
         let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let enc = self.enc();
@@ -871,11 +837,7 @@ impl LanguageServer for Backend {
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
         let tdp = params.text_document_position_params;
         let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let byte = lindex.offset(tdp.position, &text, self.enc());
@@ -896,11 +858,7 @@ impl LanguageServer for Backend {
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let uri = params.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let cst = m1_core::parse(&text);
@@ -934,11 +892,7 @@ impl LanguageServer for Backend {
         params: CallHierarchyPrepareParams,
     ) -> Result<Option<Vec<CallHierarchyItem>>> {
         let uri = params.text_document_position_params.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let byte = lindex.offset(
@@ -992,11 +946,7 @@ impl LanguageServer for Backend {
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
         let uri = params.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let byte = lindex.offset(params.position, &text, self.enc());
@@ -1028,11 +978,7 @@ impl LanguageServer for Backend {
         let new_name = params.new_name;
         let tdp = params.text_document_position;
         let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let byte = lindex.offset(tdp.position, &text, self.enc());
@@ -1105,11 +1051,7 @@ impl LanguageServer for Backend {
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
         let uri = params.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let cst = m1_core::parse(&text);
@@ -1139,11 +1081,7 @@ impl LanguageServer for Backend {
         params: SemanticTokensRangeParams,
     ) -> Result<Option<SemanticTokensRangeResult>> {
         let uri = params.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let cst = m1_core::parse(&text);
@@ -1173,11 +1111,7 @@ impl LanguageServer for Backend {
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let tdp = params.text_document_position;
         let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let byte = lindex.offset(tdp.position, &text, self.enc());
@@ -1225,11 +1159,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<Vec<DocumentHighlight>>> {
         let tdp = params.text_document_position_params;
         let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let byte = lindex.offset(tdp.position, &text, self.enc());
@@ -1255,11 +1185,7 @@ impl LanguageServer for Backend {
 
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
         let uri = params.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let cst = m1_core::parse(&text);
@@ -1272,11 +1198,7 @@ impl LanguageServer for Backend {
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         let uri = params.text_document.uri;
-        let Some((text, lindex)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-        else {
+        let Some((text, lindex)) = self.get_doc(&uri) else {
             return Ok(None);
         };
         let enc = self.enc();
