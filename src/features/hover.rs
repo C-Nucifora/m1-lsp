@@ -392,6 +392,35 @@ fn language_keyword_doc(kind: Kind) -> Option<&'static str> {
     })
 }
 
+/// Documentation for an M1 primitive type name appearing inside a `<…>` type
+/// annotation (#164), drawn from the M1 Development Manual. Without this, the
+/// type name resolves as an opaque project path and hovers as "type not
+/// modelled". `None` for a non-primitive (e.g. an enum-type annotation), so the
+/// caller can fall through to the enum-type description.
+fn primitive_type_doc(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "Boolean" => {
+            "**Boolean** `primitive type`\n\nA truth value (`true` / `false`). Restricted to local variables."
+        }
+        "Integer" => {
+            "**Integer** `primitive type`\n\nA signed whole number (positive, negative, or zero)."
+        }
+        "Unsigned Integer" => {
+            "**Unsigned Integer** `primitive type`\n\nA non-negative whole number."
+        }
+        "Floating Point" => {
+            "**Floating Point** `primitive type`\n\nA real number, supporting a wide range of values with fractional precision."
+        }
+        "Fixed Point 7dps" => {
+            "**Fixed Point 7dps** `primitive type`\n\nAn integer scaled by 1e-7 — a signed number with seven fixed decimal places."
+        }
+        "String" => {
+            "**String** `primitive type`\n\nA text value, used for display in information windows. Restricted to local variables."
+        }
+        _ => return None,
+    })
+}
+
 /// Documentation for an M1 reference/scope keyword used at the head of an object
 /// reference (#167), drawn from the M1 Development Manual. Matched by exact text,
 /// since these are ordinary identifier segments in the grammar.
@@ -463,12 +492,21 @@ pub fn hover(
     // the enum type often shares its name with a group/channel, so resolving the
     // segment alone would describe that shadowing symbol. Decided by the following
     // member segment, so it never misfires on a real group-relative path.
+    // Primitive type name inside a `<…>` annotation (#164): `local <Integer>`.
+    // The type name resolves as an opaque project path and would hover as "type
+    // not modelled"; describe the primitive instead. A non-primitive annotation
+    // (an enum type) returns None here and falls through to the enum handling.
+    let md = if seg.parent().map(|p| p.kind()) == Some(Kind::TypeAnnotation)
+        && let Some(doc) = primitive_type_doc(seg_text)
+    {
+        doc.to_string()
+    }
     // Reference/scope keyword at the head of the reference (#167): `Root`,
     // `Parent`, `This`, `In`, `Out`, `Library`. These resolve to unhelpful or
     // misleading hovers (Root → "group / Unknown", Parent → the parent group's
     // own hover), so when the cursor is on the anchor itself, describe the
     // keyword's meaning instead.
-    let md = if i == 0
+    else if i == 0
         && let Some(doc) = reference_keyword_doc(seg_text)
     {
         doc.to_string()
@@ -547,6 +585,33 @@ mod tests {
                 _ => String::new(),
             }
         })
+    }
+
+    #[test]
+    fn primitive_type_name_in_annotation_has_doc_not_unmodelled() {
+        // #164: the type name inside `local <Integer>` resolved as an opaque path
+        // and hovered as "built-in symbol — type not modelled". It is a primitive
+        // type; describe it.
+        let md = kw_hover("local <Integer> myValue = 0;\n", "Integer").unwrap();
+        assert!(md.contains("primitive type"), "got: {md}");
+        assert!(
+            !md.contains("not modelled"),
+            "should not show the unmodelled fallback: {md}"
+        );
+    }
+
+    #[test]
+    fn multiword_primitive_type_name_has_doc() {
+        let md = kw_hover("local <Floating Point> r = 0.0;\n", "Floating Point").unwrap();
+        assert!(md.to_lowercase().contains("floating point"), "got: {md}");
+        assert!(md.contains("primitive type"), "got: {md}");
+    }
+
+    #[test]
+    fn unsigned_integer_primitive_has_doc() {
+        let md = kw_hover("local <Unsigned Integer> u = 0;\n", "Unsigned Integer").unwrap();
+        assert!(md.contains("primitive type"), "got: {md}");
+        assert!(md.to_lowercase().contains("non-negative"), "got: {md}");
     }
 
     #[test]
