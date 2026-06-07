@@ -11,8 +11,8 @@ use crate::analysis::{LintProvider, NoLint, NoTypes, TypeProvider, analyze};
 use crate::config::M1Config;
 use crate::document::Document;
 use crate::features::{
-    call_hierarchy, code_action, code_lens, completion, document_symbols, folding, goto, hover,
-    inlay, references, rename, semantic_tokens, signature_help, workspace_symbol,
+    call_hierarchy, code_action, code_lens, completion, document_link, document_symbols, folding,
+    goto, hover, inlay, references, rename, semantic_tokens, signature_help, workspace_symbol,
 };
 use crate::format::{Formatter, NoFormat, format_edits, range_format_edits};
 use crate::line_index::PositionEncoding;
@@ -390,6 +390,11 @@ impl LanguageServer for Backend {
                 // Type Definition (enum-typed channel → its <Type> block) (#168).
                 declaration_provider: Some(DeclarationCapability::Simple(true)),
                 type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
+                // Hyperlink `Filename="…"` attributes in Project.m1prj (#175).
+                document_link_provider: Some(DocumentLinkOptions {
+                    resolve_provider: Some(false),
+                    work_done_progress_options: Default::default(),
+                }),
                 implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
@@ -678,6 +683,28 @@ impl LanguageServer for Backend {
             p.and_then(|lp| goto::goto_type_definition(cst.root(), byte, lp, file_name.as_deref()))
         });
         Ok(loc.map(request::GotoTypeDefinitionResponse::Scalar))
+    }
+
+    /// textDocument/documentLink: hyperlink `Filename="…"` attributes in an open
+    /// `Project.m1prj` to the script they name, relative to the project dir (#175).
+    async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
+        let uri = params.text_document.uri;
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
+            return Ok(None);
+        };
+        let Some(root) = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        else {
+            return Ok(None);
+        };
+        let links = document_link::document_links(&text, &lindex, self.enc(), &root);
+        Ok((!links.is_empty()).then_some(links))
     }
 
     async fn goto_implementation(
