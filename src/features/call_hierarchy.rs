@@ -232,22 +232,27 @@ pub fn prepare(
     // through the cursor file's scope so a group-relative reference still maps to
     // the canonical channel.
     let cst = m1_core::parse(text);
-    if let Some((_, path)) = crate::features::locate::path_at_byte(cst.root(), byte) {
-        let scope = build_scope(cst.root(), Some(&loaded.project), file_name.as_deref());
-        if let Some(canon) = channel_path(&scope, &path)
-            && let Some(item) = channel_item(loaded, &canon)
-        {
-            return Some(vec![item]);
+    // Only a meaningful target under the cursor yields an item — a channel, or a
+    // reference to a user function/method (its backing script). A local, keyword,
+    // or whitespace yields nothing, instead of mis-attributing the enclosing
+    // script's call rate to an unrelated token (#144).
+    let (_, path) = crate::features::locate::path_at_byte(cst.root(), byte)?;
+    let scope = build_scope(cst.root(), Some(&loaded.project), file_name.as_deref());
+    if let Some(canon) = channel_path(&scope, &path)
+        && let Some(item) = channel_item(loaded, &canon)
+    {
+        return Some(vec![item]);
+    }
+    // A call to a user function/method → that callable's backing script item.
+    if let Resolution::Symbol(s) = resolve(&path, &scope)
+        && matches!(s.kind, SymbolKind::Function | SymbolKind::Method)
+    {
+        let graph = CallGraph::build(loaded, enc, open_text);
+        if let Some(node) = graph.script_by_file(&backing_file(s)) {
+            return Some(vec![graph.script_item(node)]);
         }
     }
-    // Otherwise, the script file the cursor is in.
-    let file_name = file_name?;
-    if !file_name.ends_with(".m1scr") {
-        return None;
-    }
-    let graph = CallGraph::build(loaded, enc, open_text);
-    let node = graph.script_by_file(&file_name)?;
-    Some(vec![graph.script_item(node)])
+    None
 }
 
 /// `callHierarchy/incomingCalls`: who depends on this item.
@@ -485,6 +490,25 @@ mod tests {
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].name, "Root.Engine.Speed");
             assert_eq!(items[0].kind, LspKind::FIELD);
+        });
+    }
+
+    #[test]
+    fn prepare_on_a_local_yields_no_hierarchy() {
+        // #144: the cursor on a local (or keyword/whitespace) must NOT fall back
+        // to the enclosing script — that mis-attributes the script's call rate to
+        // an unrelated token. Only channels and callable references get an item.
+        let (_t, store) = fixture();
+        let uri =
+            Url::from_file_path(_t.path().join("Scripts").join("Engine.Control.m1scr")).unwrap();
+        let text = "local myValue = 42;\n";
+        store.with_project(|p| {
+            // Cursor on `myValue` (byte 6).
+            let got = prepare(p.unwrap(), &uri, text, 6, PositionEncoding::Utf16, &no_open);
+            assert!(
+                got.is_none(),
+                "a local should yield no call hierarchy: {got:?}"
+            );
         });
     }
 }
