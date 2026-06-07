@@ -12,7 +12,8 @@ use crate::config::M1Config;
 use crate::document::Document;
 use crate::features::{
     call_hierarchy, code_action, code_lens, completion, document_link, document_symbols, folding,
-    goto, hover, inlay, references, rename, semantic_tokens, signature_help, workspace_symbol,
+    goto, hover, inlay, references, rename, selection_range, semantic_tokens, signature_help,
+    workspace_symbol,
 };
 use crate::format::{Formatter, NoFormat, format_edits, range_format_edits};
 use crate::line_index::PositionEncoding;
@@ -395,6 +396,8 @@ impl LanguageServer for Backend {
                     resolve_provider: Some(false),
                     work_done_progress_options: Default::default(),
                 }),
+                // Hierarchical "expand selection" (#173).
+                selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
                 implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
@@ -705,6 +708,33 @@ impl LanguageServer for Backend {
         };
         let links = document_link::document_links(&text, &lindex, self.enc(), &root);
         Ok((!links.is_empty()).then_some(links))
+    }
+
+    /// textDocument/selectionRange: hierarchical "expand selection" — one range
+    /// chain per requested position (#173).
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> Result<Option<Vec<SelectionRange>>> {
+        let uri = params.text_document.uri;
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
+            return Ok(None);
+        };
+        let enc = self.enc();
+        let cst = m1_core::parse(&text);
+        let ranges: Vec<SelectionRange> = params
+            .positions
+            .iter()
+            .filter_map(|pos| {
+                let byte = lindex.offset(*pos, &text, enc);
+                selection_range::selection_range(cst.root(), byte, &lindex, enc)
+            })
+            .collect();
+        Ok((ranges.len() == params.positions.len()).then_some(ranges))
     }
 
     async fn goto_implementation(

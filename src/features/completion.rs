@@ -10,6 +10,20 @@ use tower_lsp::lsp_types::{
     TextEdit,
 };
 
+/// The construct skeleton inserted when an M1 control-flow / declaration keyword
+/// is accepted from completion — Allman braces + tabs, with `${n}` tab stops and
+/// a final `$0` cursor (#173). `None` for keywords that are not construct heads.
+fn construct_snippet(kw: &str) -> Option<&'static str> {
+    Some(match kw {
+        "if" => "if (${1:condition})\n{\n\t$0\n}",
+        "when" => "when (${1:subject})\n{\n\tis (${2:Value})\n\t{\n\t\t$0\n\t}\n}",
+        "expand" => "expand (${1:i} = ${2:0} to ${3:count})\n{\n\t$0\n}",
+        "local" => "local ${1:name} = ${2:0};$0",
+        "static" => "static local ${1:name} = ${2:0};$0",
+        _ => return None,
+    })
+}
+
 /// A `${N:param}` snippet body for a function call, e.g.
 /// `Max(${1:a}, ${2:b})`, so the client tabs through the argument
 /// placeholders (#28). No-arg functions insert `Name()`.
@@ -227,10 +241,15 @@ pub fn completions(
     }
     for words in intr.language.keywords.values() {
         for kw in words {
+            // Control-flow / declaration keywords expand to a full construct
+            // skeleton with tab stops; plain keywords insert their text (#173).
+            let snippet = construct_snippet(kw);
             items.push(CompletionItem {
                 label: kw.clone(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 sort_text: Some(format!("3{kw}")),
+                insert_text: snippet.map(str::to_string),
+                insert_text_format: snippet.map(|_| InsertTextFormat::SNIPPET),
                 ..Default::default()
             });
         }
@@ -678,5 +697,40 @@ mod tests {
         let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"Calculate"), "library object offered");
         assert!(labels.contains(&"if"), "keyword offered");
+    }
+
+    #[test]
+    fn construct_keywords_carry_a_snippet_body() {
+        // #173: accepting `if`/`when`/`expand`/`local` inserts the full construct.
+        let src = "x = \n";
+        let cst = m1_core::parse(src);
+        let items = completions(
+            cst.root(),
+            None,
+            None,
+            src,
+            src.len(),
+            &crate::line_index::LineIndex::new(src),
+            crate::line_index::PositionEncoding::Utf16,
+        );
+        let if_item = items
+            .iter()
+            .find(|i| i.label == "if")
+            .expect("`if` offered");
+        assert_eq!(if_item.insert_text_format, Some(InsertTextFormat::SNIPPET));
+        let body = if_item.insert_text.as_deref().unwrap_or("");
+        assert!(
+            body.starts_with("if (") && body.contains("${1:"),
+            "got {body:?}"
+        );
+        let when_item = items.iter().find(|i| i.label == "when").unwrap();
+        assert!(
+            when_item
+                .insert_text
+                .as_deref()
+                .unwrap_or("")
+                .contains("is (${2:"),
+            "when expands to a when…is skeleton"
+        );
     }
 }
