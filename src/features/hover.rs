@@ -1,7 +1,10 @@
 //! textDocument/hover: describe the symbol/local/opaque under the cursor.
 use crate::convert::range;
-use crate::features::locate::{build_scope, path_at_byte, segment_at_byte, segment_nodes};
+use crate::features::locate::{
+    build_scope, node_at_byte, path_at_byte, segment_at_byte, segment_nodes,
+};
 use crate::line_index::{LineIndex, PositionEncoding};
+use m1_core::Kind;
 use m1_typecheck::project::Project;
 use m1_typecheck::resolve::{Resolution, resolve};
 use m1_typecheck::symbols::{Symbol, SymbolKind, TableMeta};
@@ -355,6 +358,67 @@ fn builtin_fn_markdown(path: &str, overloads: &[&Overload]) -> String {
 /// segment decides what is described — `Control` the group, `Drive State` the
 /// enum channel, `AsInteger` the built-in accessor method — rather than treating
 /// the whole dotted expression as one opaque object.
+/// Documentation for an M1 language keyword/construct token (#166), drawn from
+/// the M1 Development Manual. Keyword tokens are not part of a dotted path, so
+/// without this the hover provider returns nothing over them. `None` for any
+/// non-documented kind.
+fn language_keyword_doc(kind: Kind) -> Option<&'static str> {
+    Some(match kind {
+        Kind::If => {
+            "**if** `keyword`\n\nTests the parenthesised condition and, when true, executes the braced block. Combine with `else` / `else if` for alternative branches."
+        }
+        Kind::Else => {
+            "**else** `keyword`\n\nThe alternative branch of an `if`: its block runs when the `if` condition (and any `else if` conditions) are false."
+        }
+        Kind::When => {
+            "**when** `keyword`\n\nBegins a `when … is` construct — a multi-branch match on an enumerated value. Each `is (Value)` block runs when the argument equals that enumerator. It is an enum match, not a fall-through C `switch`."
+        }
+        Kind::Is => {
+            "**is** `keyword`\n\nIntroduces one branch of a `when … is` construct: `is (Value) { … }` runs when the `when` argument equals `Value`."
+        }
+        Kind::Expand => {
+            "**expand** `keyword`\n\nBegins an `expand ([name] = [start] to [end])` construct: the body is unrolled at **compile time**, once per value in the range. It is code generation, not a runtime loop."
+        }
+        Kind::To => {
+            "**to** `keyword`\n\nSeparates the start and end bounds of an `expand ([name] = [start] to [end])` range."
+        }
+        Kind::Local => {
+            "**local** `keyword`\n\nDefines a local variable inside a function. Locals are not visible outside the function and cannot be logged in M1 Tune; a local must be defined before it is used."
+        }
+        Kind::Static => {
+            "**static** `keyword`\n\nWith `local`, makes a local variable retain its value across executions: it is assigned its initial value on the first run and keeps the last value on subsequent runs (a plain `local` is re-initialised every execution)."
+        }
+        _ => return None,
+    })
+}
+
+/// Documentation for an M1 reference/scope keyword used at the head of an object
+/// reference (#167), drawn from the M1 Development Manual. Matched by exact text,
+/// since these are ordinary identifier segments in the grammar.
+fn reference_keyword_doc(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "Root" => {
+            "**Root** `reference keyword`\n\nThe root group of the Project — the first constituent of an absolute object reference (`Root.Group.Channel`). Use it to disambiguate when a nearer object shares the same name."
+        }
+        "Parent" => {
+            "**Parent** `reference keyword`\n\nThe object containing the current one. Unqualified, it resolves to the parent of the group the current object is stored in (`Parent.Channel`)."
+        }
+        "This" => {
+            "**This** `reference keyword`\n\nThe group the current object is stored within. Use it to disambiguate when an object of the same name exists in an enclosing scope (`This.Channel`)."
+        }
+        "In" => {
+            "**In** `reference keyword`\n\nThe object holding a function's input arguments; reference them with the `.` operator (`In.Argument`)."
+        }
+        "Out" => {
+            "**Out** `reference keyword`\n\nThe object holding a function's return value; assign it with `=` (`Out.Result = …`)."
+        }
+        "Library" => {
+            "**Library** `reference keyword`\n\nForms a library-function reference (`Library.Calculate.Max(…)`). Use it to disambiguate when an object name conflicts with a library-function name."
+        }
+        _ => return None,
+    })
+}
+
 pub fn hover(
     root: m1_core::Node,
     byte: usize,
@@ -363,6 +427,21 @@ pub fn hover(
     li: &LineIndex,
     enc: PositionEncoding,
 ) -> Option<Hover> {
+    // Language-keyword/construct docs (#166). Keyword tokens (`if`, `when`,
+    // `expand`, `local`, …) are not part of a dotted path, so `path_at_byte`
+    // below would miss them; handle them up front.
+    if let Some(node) = node_at_byte(root, byte)
+        && let Some(doc) = language_keyword_doc(node.kind())
+    {
+        return Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: doc.to_string(),
+            }),
+            range: Some(range(&node.byte_range(), li, enc)),
+        });
+    }
+
     let (top, _full) = path_at_byte(root, byte)?;
     let segs = segment_nodes(top);
     if segs.is_empty() {
@@ -384,7 +463,16 @@ pub fn hover(
     // the enum type often shares its name with a group/channel, so resolving the
     // segment alone would describe that shadowing symbol. Decided by the following
     // member segment, so it never misfires on a real group-relative path.
-    let md = if let Some(md) = enum_literal_head_markdown(i, &segs, project) {
+    // Reference/scope keyword at the head of the reference (#167): `Root`,
+    // `Parent`, `This`, `In`, `Out`, `Library`. These resolve to unhelpful or
+    // misleading hovers (Root → "group / Unknown", Parent → the parent group's
+    // own hover), so when the cursor is on the anchor itself, describe the
+    // keyword's meaning instead.
+    let md = if i == 0
+        && let Some(doc) = reference_keyword_doc(seg_text)
+    {
+        doc.to_string()
+    } else if let Some(md) = enum_literal_head_markdown(i, &segs, project) {
         md
     } else {
         match resolve(&prefix, &scope) {
@@ -447,6 +535,84 @@ pub fn hover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hover markdown at the first occurrence of `find`, with no project loaded.
+    fn kw_hover(src: &str, find: &str) -> Option<String> {
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find(find).unwrap();
+        hover(cst.root(), byte, None, None, &li, PositionEncoding::Utf16).map(|h| {
+            match h.contents {
+                HoverContents::Markup(m) => m.value,
+                _ => String::new(),
+            }
+        })
+    }
+
+    #[test]
+    fn language_keyword_local_has_doc() {
+        // #166: a keyword token is not part of a path, so hover used to return null.
+        let md = kw_hover("local x = 1;\n", "local").expect("local should have a doc");
+        assert!(md.contains("local variable"), "got: {md}");
+        assert!(md.to_lowercase().contains("function"), "got: {md}");
+    }
+
+    #[test]
+    fn language_keyword_when_explains_enum_match() {
+        let md = kw_hover("when (Mode)\n{\nis (Red)\n{\n}\n}\n", "when").unwrap();
+        assert!(md.contains("when"), "got: {md}");
+        assert!(md.to_lowercase().contains("match"), "got: {md}");
+    }
+
+    #[test]
+    fn language_keyword_expand_explains_compile_time_unroll() {
+        let md = kw_hover("expand (i = 1 to 3)\n{\n}\n", "expand").unwrap();
+        assert!(md.to_lowercase().contains("compile"), "got: {md}");
+    }
+
+    #[test]
+    fn language_keyword_static_explains_persistence() {
+        let md = kw_hover("static local x = 1;\n", "static").unwrap();
+        assert!(
+            md.to_lowercase().contains("across executions") || md.to_lowercase().contains("retain"),
+            "got: {md}"
+        );
+    }
+
+    #[test]
+    fn reference_keyword_root_has_doc() {
+        // #167: `Root` used to show only "group / type: Unknown".
+        let md = kw_hover("Root.Demo.X = 0;\n", "Root").unwrap();
+        assert!(md.to_lowercase().contains("root group"), "got: {md}");
+    }
+
+    #[test]
+    fn reference_keyword_in_explains_input_args() {
+        let md = kw_hover("In.Widget Count = 0;\n", "In").unwrap();
+        assert!(md.to_lowercase().contains("input"), "got: {md}");
+    }
+
+    #[test]
+    fn reference_keyword_parent_explains_container() {
+        let md = kw_hover("Parent.X = 0;\n", "Parent").unwrap();
+        assert!(
+            md.to_lowercase().contains("containing") || md.to_lowercase().contains("parent"),
+            "got: {md}"
+        );
+    }
+
+    #[test]
+    fn reference_keyword_doc_only_at_head_not_on_trailing_member() {
+        // Hovering `Demo` (a real-ish group segment, not the anchor) must NOT
+        // produce the Root keyword doc — the ref-keyword doc is head-only.
+        let md = kw_hover("Root.Demo.X = 0;\n", "Demo");
+        assert!(
+            md.as_deref()
+                .map(|m| !m.contains("root group"))
+                .unwrap_or(true),
+            "trailing segment wrongly got the Root doc: {md:?}"
+        );
+    }
 
     #[test]
     fn hovers_local_with_inferred_type() {
