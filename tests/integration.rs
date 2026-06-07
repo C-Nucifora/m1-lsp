@@ -361,6 +361,155 @@ async fn code_action_offers_format_document_without_diagnostics() {
     );
 }
 
+// #140: pull diagnostics. The server must advertise `diagnosticProvider` so
+// pull-capable clients (Neovim's vim.diagnostic, Helix) know it answers
+// `textDocument/diagnostic` and `workspace/diagnostic`.
+#[tokio::test]
+async fn initialize_advertises_diagnostic_provider() {
+    let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+    write_msg(&mut client, &initialize_msg(1)).await;
+    let resp = read_response(&mut client, 1).await;
+    let dp = &resp["result"]["capabilities"]["diagnosticProvider"];
+    assert_eq!(dp["interFileDependencies"], json!(false), "got {dp:?}");
+    assert_eq!(dp["workspaceDiagnostics"], json!(true), "got {dp:?}");
+    assert_eq!(dp["identifier"], json!("m1-lsp"), "got {dp:?}");
+}
+
+// #140: `textDocument/diagnostic` must run the analysis pass on demand for a
+// file that has NOT been opened (read from disk), returning a full report.
+#[tokio::test]
+async fn pull_diagnostic_reports_findings_for_unopened_script() {
+    use std::io::Write;
+    use tower_lsp::lsp_types::Url;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let scripts = tmp.path().join("Scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    std::fs::File::create(tmp.path().join("Project.m1prj"))
+        .unwrap()
+        .write_all(b"<?xml version=\"1.0\"?>\n<Project>\n  <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root\"/>\n</Project>")
+        .unwrap();
+    // `==` is a C operator M1 rejects -> always a `unsupported-c-token` ERROR,
+    // independent of any project model, so it's a reliable pull-path signal.
+    let script = scripts.join("Widget.m1scr");
+    std::fs::write(&script, "local x = 0;\nx = a == b;\n").unwrap();
+
+    let root_uri = Url::from_file_path(tmp.path()).unwrap();
+    let script_uri = Url::from_file_path(&script).unwrap();
+
+    let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+            "params":{"capabilities":{},"processId":null,"rootUri":root_uri}}),
+    )
+    .await;
+    let _ = read_response(&mut client, 1).await;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+
+    // Pull diagnostics for the script that was never opened.
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":2,"method":"textDocument/diagnostic","params":{
+            "textDocument":{"uri":script_uri}}}),
+    )
+    .await;
+    let resp = read_response(&mut client, 2).await;
+    assert_eq!(resp["result"]["kind"], json!("full"), "got {resp}");
+    let items = resp["result"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        items
+            .iter()
+            .any(|d| d["code"] == json!("unsupported-c-token")),
+        "expected the unopened script's findings in the pull report; got {items:?}"
+    );
+}
+
+// #140: `workspace/diagnostic` must aggregate findings across every script in
+// the loaded project, including files that were never opened.
+#[tokio::test]
+async fn workspace_diagnostic_covers_all_project_scripts() {
+    use std::io::Write;
+    use tower_lsp::lsp_types::Url;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let scripts = tmp.path().join("Scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    std::fs::File::create(tmp.path().join("Project.m1prj"))
+        .unwrap()
+        .write_all(b"<?xml version=\"1.0\"?>\n<Project>\n  <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root\"/>\n</Project>")
+        .unwrap();
+    std::fs::write(scripts.join("Alpha.m1scr"), "local x = 0;\nx = a == b;\n").unwrap();
+    std::fs::write(scripts.join("Beta.m1scr"), "local y = 0;\ny = c == d;\n").unwrap();
+
+    let root_uri = Url::from_file_path(tmp.path()).unwrap();
+    let alpha_uri = Url::from_file_path(scripts.join("Alpha.m1scr")).unwrap();
+    let beta_uri = Url::from_file_path(scripts.join("Beta.m1scr")).unwrap();
+
+    let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+            "params":{"capabilities":{},"processId":null,"rootUri":root_uri}}),
+    )
+    .await;
+    let _ = read_response(&mut client, 1).await;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":2,"method":"workspace/diagnostic","params":{
+            "previousResultIds":[]}}),
+    )
+    .await;
+    let resp = read_response(&mut client, 2).await;
+    let items = resp["result"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let uris: Vec<&str> = items.iter().filter_map(|r| r["uri"].as_str()).collect();
+    assert!(
+        uris.contains(&alpha_uri.as_str()) && uris.contains(&beta_uri.as_str()),
+        "workspace report must cover every script; got {uris:?}"
+    );
+    // Each report carries that file's findings.
+    for r in &items {
+        if r["uri"] == json!(alpha_uri.as_str()) || r["uri"] == json!(beta_uri.as_str()) {
+            let found = r["items"]
+                .as_array()
+                .map(|a| a.iter().any(|d| d["code"] == json!("unsupported-c-token")))
+                .unwrap_or(false);
+            assert!(found, "expected findings for {}; got {r}", r["uri"]);
+        }
+    }
+}
+
 // Direct-call tests of the pure analysis path (no transport needed).
 #[test]
 fn analyze_reports_syntax_error() {

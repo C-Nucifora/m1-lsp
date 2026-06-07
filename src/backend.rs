@@ -205,27 +205,32 @@ impl Backend {
         self.publish_project_diagnostics().await;
     }
 
-    async fn publish(&self, uri: Url) {
-        // Snapshot the doc and drop the shard guard before parsing, so a
-        // concurrent did_change on the same shard isn't blocked for the parse.
-        let Some((text, lindex, version)) = self
-            .docs
-            .get(&uri)
-            .map(|d| (d.text.clone(), d.line_index.clone(), d.version))
-        else {
-            return;
+    /// Compute the full diagnostic set for `uri`, sourcing the text from the open
+    /// buffer if present, else reading it from disk (tolerant decode). Returns
+    /// `None` only when neither source yields text (the file vanished). This is
+    /// the single source of truth shared by the push path ([`publish`]) and the
+    /// pull handlers (`textDocument/diagnostic`, `workspace/diagnostic`, #140) so
+    /// all three report identically.
+    ///
+    /// The `.m1prj` is XML, not M1 script — running the script analysis on it
+    /// would emit bogus syntax diagnostics. Instead, when it is the active
+    /// project's file, surface the project-scope audit (T041/T050/…) anchored to
+    /// it (#139); any other `.m1prj` reports nothing.
+    fn diagnostics_for(&self, uri: &Url) -> Option<Vec<Diagnostic>> {
+        let (text, lindex) = if let Some(d) = self.docs.get(uri) {
+            (d.text.clone(), d.line_index.clone())
+        } else {
+            let path = uri.to_file_path().ok()?;
+            let text = crate::disk_read::read_disk(&path)?;
+            let li = crate::line_index::LineIndex::new(&text);
+            (text, li)
         };
-        // The `.m1prj` is XML, not an M1 script — don't run the script analysis
-        // on it (it would emit bogus syntax diagnostics). Instead, when it is the
-        // active project's file, surface the project-scope audit (T041/T050/…)
-        // anchored to it so opening/editing the `.m1prj` shows — and doesn't wipe
-        // — those diagnostics (#139). Any other `.m1prj` gets cleared.
-        if is_m1prj(&uri) {
+        let enc = self.enc();
+        if is_m1prj(uri) {
             let active = self
                 .store
                 .with_project(|p| p.and_then(|lp| Url::from_file_path(&lp.m1prj_path).ok()));
-            let diags = if active.as_ref() == Some(&uri) {
-                let enc = self.enc();
+            return Some(if active.as_ref() == Some(uri) {
                 self.store
                     .project_diagnostics()
                     .iter()
@@ -233,21 +238,26 @@ impl Backend {
                     .collect()
             } else {
                 vec![]
-            };
-            self.client
-                .publish_diagnostics(uri, diags, Some(version))
-                .await;
-            return;
+            });
         }
-        let diags = analyze(
-            &uri,
+        Some(analyze(
+            uri,
             &text,
             &lindex,
-            self.enc(),
+            enc,
             self.lint.as_ref(),
             self.types.as_ref(),
             &self.config.read().unwrap().diagnostics,
-        );
+        ))
+    }
+
+    async fn publish(&self, uri: Url) {
+        // Push is only for open buffers; the version comes from the open doc.
+        // (Closed-file coverage is the pull path's job, #140.)
+        let Some(version) = self.docs.get(&uri).map(|d| d.version) else {
+            return;
+        };
+        let diags = self.diagnostics_for(&uri).unwrap_or_default();
         self.client
             .publish_diagnostics(uri, diags, Some(version))
             .await;
@@ -444,6 +454,20 @@ impl LanguageServer for Backend {
                     work_done_progress_options: Default::default(),
                 }),
                 inlay_hint_provider: Some(OneOf::Left(true)),
+                // Pull diagnostics (#140): answer `textDocument/diagnostic` and
+                // `workspace/diagnostic` so pull-capable clients (Neovim's
+                // vim.diagnostic, Helix) and unopened files get full coverage,
+                // not just the push path's open buffers. No inter-file deps — a
+                // script's diagnostics depend only on itself plus the static
+                // project model, so editing one script can't change another's.
+                diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
+                    DiagnosticOptions {
+                        identifier: Some("m1-lsp".into()),
+                        inter_file_dependencies: false,
+                        workspace_diagnostics: true,
+                        work_done_progress_options: Default::default(),
+                    },
+                )),
                 code_lens_provider: Some(CodeLensOptions {
                     resolve_provider: Some(false),
                 }),
@@ -1378,6 +1402,77 @@ impl LanguageServer for Backend {
         for uri in uris {
             self.publish(uri).await;
         }
+    }
+
+    /// Pull diagnostics for a single document (#140). Runs the same analysis as
+    /// the push path, on demand, sourcing the text from the open buffer or disk —
+    /// so a file the client has never opened still gets full coverage.
+    async fn diagnostic(
+        &self,
+        params: DocumentDiagnosticParams,
+    ) -> Result<DocumentDiagnosticReportResult> {
+        let items = self
+            .diagnostics_for(&params.text_document.uri)
+            .unwrap_or_default();
+        Ok(DocumentDiagnosticReportResult::Report(
+            DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
+                related_documents: None,
+                full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                    result_id: None,
+                    items,
+                },
+            }),
+        ))
+    }
+
+    /// Workspace-wide pull diagnostics (#140): run the analysis over every script
+    /// in the loaded project (the `LoadedProject::script_files` cache) plus the
+    /// active `.m1prj`, so whole-project lint and type findings are visible even
+    /// for files that were never opened. A no-op (empty report) when no project
+    /// is loaded.
+    async fn workspace_diagnostic(
+        &self,
+        _params: WorkspaceDiagnosticParams,
+    ) -> Result<WorkspaceDiagnosticReportResult> {
+        // Snapshot the paths to report: every discovered script, and the project
+        // file itself (for the project-scope audit).
+        let mut paths = self
+            .store
+            .with_project(|p| p.map(|lp| lp.script_files.clone()))
+            .unwrap_or_default();
+        if let Some(prj) = self
+            .store
+            .with_project(|p| p.map(|lp| lp.m1prj_path.clone()))
+        {
+            paths.push(prj);
+        }
+
+        let mut items = Vec::with_capacity(paths.len());
+        for path in paths {
+            let Ok(uri) = Url::from_file_path(&path) else {
+                continue;
+            };
+            let Some(diags) = self.diagnostics_for(&uri) else {
+                continue;
+            };
+            // Report the in-editor version for open buffers so the client can
+            // reconcile against its edits; `None` for closed files.
+            let version = self.docs.get(&uri).map(|d| d.version as i64);
+            items.push(WorkspaceDocumentDiagnosticReport::Full(
+                WorkspaceFullDocumentDiagnosticReport {
+                    uri,
+                    version,
+                    full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                        result_id: None,
+                        items: diags,
+                    },
+                },
+            ));
+        }
+
+        Ok(WorkspaceDiagnosticReportResult::Report(
+            WorkspaceDiagnosticReport { items },
+        ))
     }
 
     async fn shutdown(&self) -> Result<()> {
