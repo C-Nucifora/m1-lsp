@@ -92,6 +92,17 @@ fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
         other => value_type_str(other).to_string(),
     };
     s.push_str(&format!("type: `{type_str}`"));
+    // Distinguish *why* a type is Unknown (#177): a declared-but-unresolvable
+    // type (e.g. a cross-module `MoTeC Types.*` / `::Hardware.*` enum the model
+    // can't resolve) preserves what the project wrote; no declaration at all is a
+    // genuine inference gap. Only annotate the truly-Unknown case — a resolved
+    // type renders unchanged.
+    if sym.value_type == ValueType::Unknown {
+        match &sym.declared_type {
+            Some(decl) => s.push_str(&format!(" (declared: `{decl}`, not resolved by the model)")),
+            None => s.push_str(" (no type declared — not inferred)"),
+        }
+    }
     if let Some(unit) = &sym.unit {
         s.push_str(&format!("  ·  unit: `{unit}`"));
     }
@@ -692,6 +703,67 @@ mod tests {
         } else {
             panic!("expected markup");
         }
+    }
+
+    #[allow(clippy::field_reassign_with_default)]
+    fn channel(value_type: ValueType, declared_type: Option<&str>) -> Symbol {
+        Symbol {
+            path: "Root.Demo.X".into(),
+            kind: SymbolKind::Channel,
+            value_type,
+            declared_type: declared_type.map(Into::into),
+            unit: None,
+            security: None,
+            filename: None,
+            enum_assoc: None,
+            class: None,
+            classname: None,
+            def_line: None,
+            dbc_range: None,
+            can: None,
+            call_rate_hz: None,
+            table_meta: None,
+        }
+    }
+
+    #[test]
+    fn hover_unknown_with_declared_type_shows_the_declaration() {
+        // #177: a channel whose declared type the model cannot resolve should say
+        // so — the declared string is preserved — instead of a bare `Unknown`.
+        let sym = channel(
+            ValueType::Unknown,
+            Some("MoTeC Types.Direction Enumeration"),
+        );
+        let md = symbol_markdown(&sym, None);
+        assert!(md.contains("Unknown"), "got: {md}");
+        assert!(
+            md.contains("declared:") && md.contains("MoTeC Types.Direction Enumeration"),
+            "should surface the unresolved declared type: {md}"
+        );
+    }
+
+    #[test]
+    fn hover_unknown_without_declaration_says_not_inferred() {
+        // #177: no declared type at all is a different case — say so, so the two
+        // are distinguishable in hover.
+        let sym = channel(ValueType::Unknown, None);
+        let md = symbol_markdown(&sym, None);
+        assert!(md.contains("Unknown"), "got: {md}");
+        assert!(
+            md.to_lowercase().contains("not inferred") || md.contains("no type declared"),
+            "should indicate nothing was declared/inferred: {md}"
+        );
+        assert!(!md.contains("declared:"), "no declaration to show: {md}");
+    }
+
+    #[test]
+    fn hover_known_type_is_unaffected_by_declared_type() {
+        // A resolved type renders exactly as before, with no Unknown annotation.
+        let sym = channel(ValueType::Float, Some("f32"));
+        let md = symbol_markdown(&sym, None);
+        assert!(md.contains("type: `Float`"), "got: {md}");
+        assert!(!md.contains("declared:"), "got: {md}");
+        assert!(!md.to_lowercase().contains("not inferred"), "got: {md}");
     }
 
     #[test]
