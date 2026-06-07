@@ -6,7 +6,7 @@ use crate::features::locate::{
 use crate::line_index::{LineIndex, PositionEncoding};
 use m1_core::Kind;
 use m1_typecheck::project::Project;
-use m1_typecheck::resolve::{Resolution, resolve};
+use m1_typecheck::resolve::{Resolution, Scope, resolve};
 use m1_typecheck::symbols::{Symbol, SymbolKind, TableMeta};
 use m1_typecheck::types::ValueType;
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
@@ -211,14 +211,43 @@ fn enum_literal_head_markdown(
     i: usize,
     segs: &[m1_core::Node],
     project: Option<&Project>,
+    scope: &Scope,
 ) -> Option<String> {
     let table = project?.symbols();
     let id = table.enum_by_name(segs[i].text())?;
     let next = segs.get(i + 1)?;
-    if !table.enum_has_member(id, next.text()) {
+    if table.enum_has_member(id, next.text()) {
+        return enum_type_markdown(segs[i].text(), project);
+    }
+    // The next segment is not a member. Decide whether this is still an enum
+    // literal with a *misspelled* member (`Color.Grren`) or a genuine path:
+    let head_path = segs[..=i]
+        .iter()
+        .map(|n| n.text())
+        .collect::<Vec<_>>()
+        .join(".");
+    // If the head resolves to a *value* symbol (a channel/parameter), the
+    // construct is `<value>.<accessor>` (e.g. `Drive State.AsInteger`), not an
+    // enum literal — defer to that symbol's hover.
+    if let Resolution::Symbol(s) = resolve(&head_path, scope)
+        && !matches!(
+            s.kind,
+            m1_typecheck::symbols::SymbolKind::Group | m1_typecheck::symbols::SymbolKind::Object
+        )
+    {
+        return None;
+    }
+    // If `head.next` resolves to a real symbol, it is a genuine group-relative
+    // path that merely shares the enum's name (`ASSI.Status`) — let the symbol
+    // hover handle it. Otherwise the member is misspelled and the head is an
+    // enum (optionally colliding with a group): show the enum's valid members and
+    // flag the bad member — the most useful thing on a broken line (#163).
+    let path = format!("{head_path}.{}", next.text());
+    if matches!(resolve(&path, scope), Resolution::Symbol(_)) {
         return None;
     }
     enum_type_markdown(segs[i].text(), project)
+        .map(|md| format!("{md}\n\n⚠ `{}` is not a member of this enum", next.text()))
 }
 
 /// Compact decimal: up to 6 places, trailing zeros trimmed (`0.010000` → `0.01`,
@@ -521,7 +550,7 @@ pub fn hover(
         && let Some(doc) = reference_keyword_doc(seg_text)
     {
         doc.to_string()
-    } else if let Some(md) = enum_literal_head_markdown(i, &segs, project) {
+    } else if let Some(md) = enum_literal_head_markdown(i, &segs, project, &scope) {
         md
     } else {
         match resolve(&prefix, &scope) {
@@ -1246,6 +1275,122 @@ mod tests {
         assert!(
             !m.value.contains("group"),
             "ASSI head must not resolve to the shadowing group: {}",
+            m.value
+        );
+    }
+
+    /// #163: with the enum/group name collision, a *misspelled* member must still
+    /// produce the enum hover (with the valid member list) rather than falling
+    /// back to the shadowing group — that is the most useful moment to show it.
+    #[test]
+    fn hover_on_enum_head_with_typoed_member_still_names_the_enum() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<Project>
+  <DataTypes>
+    <Type Name="ASSI" Storage="enum" Default="Off">
+      <Enum Name="Off" ContainerOrder="0"/>
+      <Enum Name="Driving" ContainerOrder="1"/>
+    </Type>
+  </DataTypes>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Control"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Control.ASSI"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Control.ASSI.Status"><Props Type="::This.ASSI"/></Component>
+  <Component Classname="BuiltIn.MethodUser" Name="Root.Control.ASSI.Update"/>
+</Project>"#,
+            )
+            .unwrap();
+        let project = m1_typecheck::Project::load(&prj).unwrap();
+        // `Drivng` is a typo of the member `Driving` — not a member, and
+        // `ASSI.Drivng` does not resolve to any symbol.
+        let src = "Status = ASSI.Drivng;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find("ASSI").unwrap();
+        let h = hover(
+            cst.root(),
+            byte,
+            Some(&project),
+            Some("Control.ASSI.Update.m1scr"),
+            &li,
+            PositionEncoding::Utf16,
+        )
+        .unwrap();
+        let HoverContents::Markup(m) = h.contents else {
+            panic!("expected markup")
+        };
+        assert!(
+            m.value.to_lowercase().contains("enum") && m.value.contains("Driving"),
+            "typoed-member head should still describe the enum + members: {}",
+            m.value
+        );
+        assert!(
+            m.value.contains("not a member"),
+            "should flag the bad member: {}",
+            m.value
+        );
+        assert!(
+            !m.value.contains("`group`"),
+            "must not fall back to the shadowing group: {}",
+            m.value
+        );
+    }
+
+    /// A genuine group-relative path that shares an enum name (`ASSI.Status`, where
+    /// `Status` is a real child channel, not an enum member) must NOT be hijacked
+    /// by the enum hover — it should resolve to the channel.
+    #[test]
+    fn hover_on_group_name_with_real_child_is_not_hijacked_by_enum() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<Project>
+  <DataTypes>
+    <Type Name="ASSI" Storage="enum" Default="Off">
+      <Enum Name="Off" ContainerOrder="0"/>
+      <Enum Name="Driving" ContainerOrder="1"/>
+    </Type>
+  </DataTypes>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Control"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Control.ASSI"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Control.ASSI.Status"><Props Type="u8"/></Component>
+  <Component Classname="BuiltIn.MethodUser" Name="Root.Control.ASSI.Update"/>
+</Project>"#,
+            )
+            .unwrap();
+        let project = m1_typecheck::Project::load(&prj).unwrap();
+        // `ASSI.Status` is a real path (the channel) — `Status` is not an enum
+        // member, so the enum hover must not hijack it.
+        let src = "x = Control.ASSI.Status;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find("Status").unwrap();
+        let h = hover(
+            cst.root(),
+            byte,
+            Some(&project),
+            Some("Other.Update.m1scr"),
+            &li,
+            PositionEncoding::Utf16,
+        )
+        .unwrap();
+        let HoverContents::Markup(m) = h.contents else {
+            panic!("expected markup")
+        };
+        assert!(
+            !m.value.contains("not a member"),
+            "a real group-relative path must not get the enum note: {}",
             m.value
         );
     }
