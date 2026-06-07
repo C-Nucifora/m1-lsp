@@ -33,9 +33,15 @@ async fn main() {
         println!("m1-lsp {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    // Any other flag is unrecognised; fail loudly instead of silently blocking on
-    // stdin waiting for LSP traffic that will never arrive.
-    if let Some(bad) = args.iter().find(|a| a.starts_with('-')) {
+    // `--stdio` selects stdio transport — which is the only mode this server
+    // supports. LSP clients append it automatically: vscode-languageclient with
+    // `TransportKind.stdio` spawns `m1-lsp --stdio`. Accept it as a no-op (NOT an
+    // unknown flag), otherwise the server would print usage and exit and every
+    // VS Code session's server startup would fail.
+    if let Some(bad) = args
+        .iter()
+        .find(|a| a.starts_with('-') && a.as_str() != "--stdio")
+    {
         eprintln!("m1-lsp: unknown option `{bad}`\n\n{USAGE}");
         std::process::exit(2);
     }

@@ -69,3 +69,20 @@ fn unknown_flag_errors_and_exits() {
         "got: {out}"
     );
 }
+
+#[test]
+fn stdio_flag_is_accepted_and_starts_the_server() {
+    // vscode-languageclient with `TransportKind.stdio` spawns `m1-lsp --stdio`.
+    // It must NOT be treated as an unknown option (which would print usage and
+    // exit, breaking every VS Code session's server startup). With stdin at EOF
+    // the started server exits cleanly, never printing the unknown-option error.
+    let (ok, out) = run(&["--stdio"], 15).expect("--stdio must run the server, not hang");
+    assert!(
+        ok,
+        "`--stdio` should start the server and exit on EOF; got: {out}"
+    );
+    assert!(
+        !out.to_lowercase().contains("unknown option"),
+        "`--stdio` must be accepted, not rejected; got: {out}"
+    );
+}
