@@ -164,7 +164,7 @@ pub fn scaffold() -> String {
     };
     let brace = match fmt.brace_style {
         m1_fmt::BraceStyle::Allman => "allman",
-        m1_fmt::BraceStyle::KAndR => "kr",
+        m1_fmt::BraceStyle::Kr => "kr",
     };
     // indent_style is shared by the formatter and the linter (L010).
     let _ = writeln!(
@@ -262,7 +262,7 @@ mod tests {
         )
         .unwrap();
         let cfg = M1Config::resolve(None, tmp.path());
-        assert_eq!(cfg.format.brace_style, m1_fmt::BraceStyle::KAndR);
+        assert_eq!(cfg.format.brace_style, m1_fmt::BraceStyle::Kr);
         assert_eq!(cfg.format.indent_style, m1_fmt::IndentStyle::Spaces);
         assert_eq!(cfg.format.indent_width, 2);
         // The shared indent decision also drives the linter (L010).
