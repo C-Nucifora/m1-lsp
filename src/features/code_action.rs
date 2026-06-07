@@ -202,6 +202,39 @@ pub fn code_actions(
     out
 }
 
+/// A whole-document "fix all auto-fixable lint issues" action that replaces the
+/// buffer with `fixed` (the output of the shared `m1-lint` fixer). Kind
+/// `SOURCE_FIX_ALL` so editors can run it on save and offer it from the lightbulb
+/// — this is what gives L003/L007/L011/L018 (and any future fixable rule) an
+/// in-editor fix without hand-porting each rule (#158).
+pub fn fix_all_lint_action(
+    uri: &Url,
+    text: &str,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    fixed: String,
+) -> CodeActionOrCommand {
+    let end = li.position(text.len(), enc);
+    let mut changes = HashMap::new();
+    changes.insert(
+        uri.clone(),
+        vec![TextEdit {
+            range: Range::new(Position::new(0, 0), end),
+            new_text: fixed,
+        }],
+    );
+    CodeActionOrCommand::CodeAction(CodeAction {
+        title: "Fix all auto-fixable lint issues (m1-lint)".to_string(),
+        kind: Some(CodeActionKind::SOURCE_FIX_ALL),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        }),
+        ..Default::default()
+    })
+}
+
 /// The operator→keyword replacement edit for an operator-fix diagnostic, or
 /// `None` if its range doesn't cover a replaceable operator (e.g. `while`/`for`).
 fn operator_edit(
@@ -522,6 +555,36 @@ mod tests {
         };
         // Must not panic (produces no action for the mid-codepoint slice).
         let _ = code_actions(src, &li, PositionEncoding::Utf8, &uri(), &[d], None);
+    }
+
+    #[test]
+    fn fix_all_action_replaces_the_whole_document() {
+        let text = "//x\n";
+        let li = LineIndex::new(text);
+        let a = fix_all_lint_action(
+            &uri(),
+            text,
+            &li,
+            PositionEncoding::Utf16,
+            "// x\n".to_string(),
+        );
+        let CodeActionOrCommand::CodeAction(a) = a else {
+            panic!("expected a code action");
+        };
+        assert_eq!(a.kind, Some(CodeActionKind::SOURCE_FIX_ALL));
+        let edit = a
+            .edit
+            .unwrap()
+            .changes
+            .unwrap()
+            .into_values()
+            .next()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(edit.new_text, "// x\n");
+        assert_eq!(edit.range.start, Position::new(0, 0));
     }
 
     #[test]
