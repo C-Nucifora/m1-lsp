@@ -145,6 +145,9 @@ fn path_item(text: &str, range: Range, detail: Option<String>) -> CompletionItem
         label: text.to_string(),
         kind: Some(CompletionItemKind::FIELD),
         detail,
+        // Rank project symbols (1) below in-scope locals (0) but above library
+        // objects (2) and keywords (3) — see `completions` (#146).
+        sort_text: Some(format!("1{text}")),
         filter_text: Some(text.to_string()),
         text_edit: Some(CompletionTextEdit::Edit(TextEdit {
             range,
@@ -218,6 +221,7 @@ pub fn completions(
             label: name.clone(),
             kind: Some(CompletionItemKind::MODULE),
             detail: Some("library object".into()),
+            sort_text: Some(format!("2{name}")),
             ..Default::default()
         });
     }
@@ -226,14 +230,17 @@ pub fn completions(
             items.push(CompletionItem {
                 label: kw.clone(),
                 kind: Some(CompletionItemKind::KEYWORD),
+                sort_text: Some(format!("3{kw}")),
                 ..Default::default()
             });
         }
     }
 
-    // 1. In-scope locals.
+    // 1. In-scope locals — ranked first (sort_text `0…`) so they aren't buried
+    //    among the project's many symbols (#146).
     for (name, _ty) in collect_locals(root) {
         items.push(CompletionItem {
+            sort_text: Some(format!("0{name}")),
             label: name,
             kind: Some(CompletionItemKind::VARIABLE),
             ..Default::default()
@@ -310,6 +317,47 @@ mod tests {
             let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
             assert!(labels.contains(&"fGain"));
             assert!(labels.iter().any(|l| l.contains("Speed Glonk")));
+        });
+    }
+
+    #[test]
+    fn in_scope_locals_rank_before_project_symbols_and_keywords() {
+        // #146: sortText must float in-scope locals to the top of the otherwise
+        // huge flat list (locals < project symbols < library objects < keywords).
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::File::create(tmp.path().join("Project.m1prj"))
+            .unwrap()
+            .write_all(M1PRJ.as_bytes())
+            .unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+        let src = "local fGain = 1.0;\n";
+        let cst = m1_core::parse(src);
+        store.with_project(|p| {
+            let items = completions(
+                cst.root(),
+                p,
+                Some("X.m1scr"),
+                src,
+                src.len(),
+                &crate::line_index::LineIndex::new(src),
+                crate::line_index::PositionEncoding::Utf16,
+            );
+            let st = |label_pred: &dyn Fn(&CompletionItem) -> bool| -> String {
+                items
+                    .iter()
+                    .find(|i| label_pred(i))
+                    .and_then(|i| i.sort_text.clone())
+                    .expect("item with sort_text")
+            };
+            let local = st(&|i| i.label == "fGain");
+            let sym = st(&|i| i.label.contains("Speed Glonk"));
+            let kw = st(&|i| i.kind == Some(CompletionItemKind::KEYWORD));
+            assert!(
+                local < sym,
+                "local {local:?} should rank before symbol {sym:?}"
+            );
+            assert!(sym < kw, "symbol {sym:?} should rank before keyword {kw:?}");
         });
     }
 
