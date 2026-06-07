@@ -294,6 +294,22 @@ fn project_scripts(
     crate::project_store::gather_project_scripts(&loaded.script_files, cursor_uri, None, open_text)
 }
 
+/// `(uri, text)` for the project's `.m1prj`, preferring an open editor buffer
+/// over the on-disk text. Errs (with a user-facing message) when the path can't
+/// form a URL or the file can't be read — used by each cross-file rename that
+/// must rewrite the project declaration.
+fn load_prj_text(
+    loaded: &LoadedProject,
+    open_text: &dyn Fn(&Url) -> Option<String>,
+) -> std::result::Result<(Url, String), String> {
+    let prj_uri = Url::from_file_path(&loaded.m1prj_path)
+        .map_err(|_| "cannot form a URL for the project file".to_string())?;
+    let prj_text = open_text(&prj_uri)
+        .or_else(|| crate::disk_read::read_disk(&loaded.m1prj_path))
+        .ok_or_else(|| "cannot read the project file".to_string())?;
+    Ok((prj_uri, prj_text))
+}
+
 /// What the cursor is renaming. The *segment the cursor sits on* decides: the
 /// prefix up to that segment resolves either to a childless leaf (ordinary
 /// semantic rename) or to a group/object container (cascading rename of the
@@ -661,11 +677,7 @@ fn execute_group(
     let mut ops: Vec<DocumentChangeOperation> = Vec::new();
 
     // 1) `.m1prj`: the group + descendant declarations.
-    let prj_uri = Url::from_file_path(&loaded.m1prj_path)
-        .map_err(|_| "cannot form a URL for the project file".to_string())?;
-    let prj_text = open_text(&prj_uri)
-        .or_else(|| crate::disk_read::read_disk(&loaded.m1prj_path))
-        .ok_or_else(|| "cannot read the project file".to_string())?;
+    let (prj_uri, prj_text) = load_prj_text(loaded, open_text)?;
     let mut prj_edits = m1prj_group_edits(&prj_text, &group_path, old_leaf, new_name, enc);
     if prj_edits.is_empty() {
         return Err(format!(
@@ -823,11 +835,7 @@ fn execute_func_method(
     let mut ops: Vec<DocumentChangeOperation> = Vec::new();
 
     // 1) `.m1prj`: the declaration `Name=` (and an explicit `Filename=`).
-    let prj_uri = Url::from_file_path(&loaded.m1prj_path)
-        .map_err(|_| "cannot form a URL for the project file".to_string())?;
-    let prj_text = open_text(&prj_uri)
-        .or_else(|| crate::disk_read::read_disk(&loaded.m1prj_path))
-        .ok_or_else(|| "cannot read the project file".to_string())?;
+    let (prj_uri, prj_text) = load_prj_text(loaded, open_text)?;
     let mut prj_edits = vec![
         m1prj_name_edit(&prj_text, &target_path, old_leaf, new_name, enc).ok_or_else(|| {
             format!("could not locate the declaration of ‘{target_path}’ in the project file")
@@ -1108,11 +1116,7 @@ pub fn execute(
     let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
 
     // 1) The `.m1prj` declaration (`Name="…<old_leaf>"`).
-    let prj_uri = Url::from_file_path(&loaded.m1prj_path)
-        .map_err(|_| "cannot form a URL for the project file".to_string())?;
-    let prj_text = open_text(&prj_uri)
-        .or_else(|| crate::disk_read::read_disk(&loaded.m1prj_path))
-        .ok_or_else(|| "cannot read the project file".to_string())?;
+    let (prj_uri, prj_text) = load_prj_text(loaded, open_text)?;
     let prj_edit =
         m1prj_name_edit(&prj_text, &target_path, old_leaf, new_name, enc).ok_or_else(|| {
             format!("could not locate the declaration of ‘{target_path}’ in the project file")
