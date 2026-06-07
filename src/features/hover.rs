@@ -38,32 +38,35 @@ fn kind_str(k: SymbolKind) -> &'static str {
     }
 }
 
-fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
-    let mut s = format!("**{}** `{}`\n\n", sym.path, kind_str(sym.kind));
-    // For objects, show the package class instead of a (meaningless) value type.
-    if sym.kind == SymbolKind::Object {
-        match &sym.class {
-            Some(class) => s.push_str(&format!("class: `{class}`")),
-            None => s.push_str("object"),
-        }
-        // A CAN message object carries the frame's id + payload size (#80).
-        if let Some(can) = &sym.can
-            && let (Some(id), Some(dlc)) = (can.can_id, can.dlc)
-        {
-            s.push_str(&format!("\n\nCAN id: `0x{id:X}`  ·  `{dlc}` bytes"));
-        }
-        return s;
+/// The header line: bold path + kind badge (`**Root.X** \`channel\``).
+fn header_markdown(sym: &Symbol) -> String {
+    format!("**{}** `{}`\n\n", sym.path, kind_str(sym.kind))
+}
+
+/// Object hover: the package class (not a value type — an object isn't
+/// value-bearing) plus, for a CAN message object, the frame id + payload size
+/// (#80). `None` when `sym` isn't an object.
+fn object_markdown(sym: &Symbol) -> Option<String> {
+    if sym.kind != SymbolKind::Object {
+        return None;
     }
-    // A table's own hover shows its shape (from the `.m1cfg`), not a value type —
-    // the table object isn't value-bearing; its interpolated result is the
-    // separate `.Value` channel (#25).
-    if sym.kind == SymbolKind::Table
-        && let Some(meta) = &sym.table_meta
+    let mut s = match &sym.class {
+        Some(class) => format!("class: `{class}`"),
+        None => "object".to_string(),
+    };
+    if let Some(can) = &sym.can
+        && let (Some(id), Some(dlc)) = (can.can_id, can.dlc)
     {
-        return format!("{s}{}", table_markdown(meta));
+        s.push_str(&format!("\n\nCAN id: `0x{id:X}`  ·  `{dlc}` bytes"));
     }
-    // Name the concrete enum type when known (e.g. `Enum (Drive State)`), and
-    // collect its valid values to list below.
+    Some(s)
+}
+
+/// The value-type fragment for the badge row (`type: \`Enum (Drive State)\``),
+/// plus, for an enum channel, the rendered list of members (default marked) so
+/// the caller can append a `values:` line. `enum_values` is `None` for a
+/// non-enum or an unresolved enum.
+fn type_markdown(sym: &Symbol, project: Option<&Project>) -> (String, Option<String>) {
     let mut enum_values: Option<String> = None;
     let type_str = match sym.value_type {
         ValueType::Enum(id) => match project.map(|p| p.symbols().enum_type(id)) {
@@ -91,7 +94,7 @@ fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
         },
         other => value_type_str(other).to_string(),
     };
-    s.push_str(&format!("type: `{type_str}`"));
+    let mut s = format!("type: `{type_str}`");
     // Distinguish *why* a type is Unknown (#177): a declared-but-unresolvable
     // type (e.g. a cross-module `MoTeC Types.*` / `::Hardware.*` enum the model
     // can't resolve) preserves what the project wrote; no declaration at all is a
@@ -103,6 +106,13 @@ fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
             None => s.push_str(" (no type declared — not inferred)"),
         }
     }
+    (s, enum_values)
+}
+
+/// The trailing badge fragments after the type — unit, security, call/log rate,
+/// tags — each prefixed with `  ·  `. Empty when none apply.
+fn meta_badges_markdown(sym: &Symbol) -> String {
+    let mut s = String::new();
     if let Some(unit) = &sym.unit {
         s.push_str(&format!("  ·  unit: `{unit}`"));
     }
@@ -128,6 +138,30 @@ fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
             .join(" ");
         s.push_str(&format!("  ·  tags: {badge}"));
     }
+    s
+}
+
+fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
+    let mut s = header_markdown(sym);
+    // For objects, show the package class instead of a (meaningless) value type.
+    if let Some(obj) = object_markdown(sym) {
+        s.push_str(&obj);
+        return s;
+    }
+    // A table's own hover shows its shape (from the `.m1cfg`), not a value type —
+    // the table object isn't value-bearing; its interpolated result is the
+    // separate `.Value` channel (#25).
+    if sym.kind == SymbolKind::Table
+        && let Some(meta) = &sym.table_meta
+    {
+        s.push_str(&table_markdown(meta));
+        return s;
+    }
+    // Name the concrete enum type when known (e.g. `Enum (Drive State)`), and
+    // collect its valid values to list below.
+    let (type_frag, enum_values) = type_markdown(sym, project);
+    s.push_str(&type_frag);
+    s.push_str(&meta_badges_markdown(sym));
     if let Some(values) = enum_values {
         s.push_str(&format!("\n\nvalues: {values}"));
     }
@@ -416,90 +450,126 @@ fn builtin_fn_markdown(path: &str, overloads: &[&Overload]) -> String {
 /// the M1 Development Manual. Keyword tokens are not part of a dotted path, so
 /// without this the hover provider returns nothing over them. `None` for any
 /// non-documented kind.
-fn language_keyword_doc(kind: Kind) -> Option<&'static str> {
-    Some(match kind {
-        Kind::If => {
-            "**if** `keyword`\n\nTests the parenthesised condition and, when true, executes the braced block. Combine with `else` / `else if` for alternative branches."
-        }
-        Kind::Else => {
-            "**else** `keyword`\n\nThe alternative branch of an `if`: its block runs when the `if` condition (and any `else if` conditions) are false."
-        }
-        Kind::When => {
-            "**when** `keyword`\n\nBegins a `when … is` construct — a multi-branch match on an enumerated value. Each `is (Value)` block runs when the argument equals that enumerator. It is an enum match, not a fall-through C `switch`."
-        }
-        Kind::Is => {
-            "**is** `keyword`\n\nIntroduces one branch of a `when … is` construct: `is (Value) { … }` runs when the `when` argument equals `Value`."
-        }
-        Kind::Expand => {
-            "**expand** `keyword`\n\nBegins an `expand ([name] = [start] to [end])` construct: the body is unrolled at **compile time**, once per value in the range. It is code generation, not a runtime loop."
-        }
-        Kind::To => {
-            "**to** `keyword`\n\nSeparates the start and end bounds of an `expand ([name] = [start] to [end])` range."
-        }
-        Kind::Local => {
-            "**local** `keyword`\n\nDefines a local variable inside a function. Locals are not visible outside the function and cannot be logged in M1 Tune; a local must be defined before it is used."
-        }
-        Kind::Static => {
-            "**static** `keyword`\n\nWith `local`, makes a local variable retain its value across executions: it is assigned its initial value on the first run and keeps the last value on subsequent runs (a plain `local` is re-initialised every execution)."
-        }
-        _ => return None,
-    })
-}
+/// Hover docs for the M1 language keywords/constructs (#166), keyed by CST kind.
+/// Drawn from the M1 Development Manual.
+const LANGUAGE_KEYWORD_DOCS: &[(Kind, &str)] = &[
+    (
+        Kind::If,
+        "**if** `keyword`\n\nTests the parenthesised condition and, when true, executes the braced block. Combine with `else` / `else if` for alternative branches.",
+    ),
+    (
+        Kind::Else,
+        "**else** `keyword`\n\nThe alternative branch of an `if`: its block runs when the `if` condition (and any `else if` conditions) are false.",
+    ),
+    (
+        Kind::When,
+        "**when** `keyword`\n\nBegins a `when … is` construct — a multi-branch match on an enumerated value. Each `is (Value)` block runs when the argument equals that enumerator. It is an enum match, not a fall-through C `switch`.",
+    ),
+    (
+        Kind::Is,
+        "**is** `keyword`\n\nIntroduces one branch of a `when … is` construct: `is (Value) { … }` runs when the `when` argument equals `Value`.",
+    ),
+    (
+        Kind::Expand,
+        "**expand** `keyword`\n\nBegins an `expand ([name] = [start] to [end])` construct: the body is unrolled at **compile time**, once per value in the range. It is code generation, not a runtime loop.",
+    ),
+    (
+        Kind::To,
+        "**to** `keyword`\n\nSeparates the start and end bounds of an `expand ([name] = [start] to [end])` range.",
+    ),
+    (
+        Kind::Local,
+        "**local** `keyword`\n\nDefines a local variable inside a function. Locals are not visible outside the function and cannot be logged in M1 Tune; a local must be defined before it is used.",
+    ),
+    (
+        Kind::Static,
+        "**static** `keyword`\n\nWith `local`, makes a local variable retain its value across executions: it is assigned its initial value on the first run and keeps the last value on subsequent runs (a plain `local` is re-initialised every execution).",
+    ),
+];
 
-/// Documentation for an M1 primitive type name appearing inside a `<…>` type
-/// annotation (#164), drawn from the M1 Development Manual. Without this, the
-/// type name resolves as an opaque project path and hovers as "type not
-/// modelled". `None` for a non-primitive (e.g. an enum-type annotation), so the
-/// caller can fall through to the enum-type description.
-fn primitive_type_doc(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "Boolean" => {
-            "**Boolean** `primitive type`\n\nA truth value (`true` / `false`). Restricted to local variables."
-        }
-        "Integer" => {
-            "**Integer** `primitive type`\n\nA signed whole number (positive, negative, or zero)."
-        }
-        "Unsigned Integer" => {
-            "**Unsigned Integer** `primitive type`\n\nA non-negative whole number."
-        }
-        "Floating Point" => {
-            "**Floating Point** `primitive type`\n\nA real number, supporting a wide range of values with fractional precision."
-        }
-        "Fixed Point 7dps" => {
-            "**Fixed Point 7dps** `primitive type`\n\nAn integer scaled by 1e-7 — a signed number with seven fixed decimal places."
-        }
-        "String" => {
-            "**String** `primitive type`\n\nA text value, used for display in information windows. Restricted to local variables."
-        }
-        _ => return None,
-    })
-}
+/// Hover docs for M1 primitive type names appearing inside a `<…>` type
+/// annotation (#164), drawn from the M1 Development Manual. A non-primitive (e.g.
+/// an enum-type annotation) isn't listed, so the lookup misses and the caller
+/// falls through to the enum-type description.
+const PRIMITIVE_TYPE_DOCS: &[(&str, &str)] = &[
+    (
+        "Boolean",
+        "**Boolean** `primitive type`\n\nA truth value (`true` / `false`). Restricted to local variables.",
+    ),
+    (
+        "Integer",
+        "**Integer** `primitive type`\n\nA signed whole number (positive, negative, or zero).",
+    ),
+    (
+        "Unsigned Integer",
+        "**Unsigned Integer** `primitive type`\n\nA non-negative whole number.",
+    ),
+    (
+        "Floating Point",
+        "**Floating Point** `primitive type`\n\nA real number, supporting a wide range of values with fractional precision.",
+    ),
+    (
+        "Fixed Point 7dps",
+        "**Fixed Point 7dps** `primitive type`\n\nAn integer scaled by 1e-7 — a signed number with seven fixed decimal places.",
+    ),
+    (
+        "String",
+        "**String** `primitive type`\n\nA text value, used for display in information windows. Restricted to local variables.",
+    ),
+];
 
-/// Documentation for an M1 reference/scope keyword used at the head of an object
+/// Hover docs for the M1 reference/scope keywords used at the head of an object
 /// reference (#167), drawn from the M1 Development Manual. Matched by exact text,
 /// since these are ordinary identifier segments in the grammar.
+const REFERENCE_KEYWORD_DOCS: &[(&str, &str)] = &[
+    (
+        "Root",
+        "**Root** `reference keyword`\n\nThe root group of the Project — the first constituent of an absolute object reference (`Root.Group.Channel`). Use it to disambiguate when a nearer object shares the same name.",
+    ),
+    (
+        "Parent",
+        "**Parent** `reference keyword`\n\nThe object containing the current one. Unqualified, it resolves to the parent of the group the current object is stored in (`Parent.Channel`).",
+    ),
+    (
+        "This",
+        "**This** `reference keyword`\n\nThe group the current object is stored within. Use it to disambiguate when an object of the same name exists in an enclosing scope (`This.Channel`).",
+    ),
+    (
+        "In",
+        "**In** `reference keyword`\n\nThe object holding a function's input arguments; reference them with the `.` operator (`In.Argument`).",
+    ),
+    (
+        "Out",
+        "**Out** `reference keyword`\n\nThe object holding a function's return value; assign it with `=` (`Out.Result = …`).",
+    ),
+    (
+        "Library",
+        "**Library** `reference keyword`\n\nForms a library-function reference (`Library.Calculate.Max(…)`). Use it to disambiguate when an object name conflicts with a library-function name.",
+    ),
+];
+
+/// Documentation for an M1 language keyword/construct, by CST kind (#166).
+fn language_keyword_doc(kind: Kind) -> Option<&'static str> {
+    LANGUAGE_KEYWORD_DOCS
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, doc)| *doc)
+}
+
+/// Documentation for an M1 primitive type name inside a `<…>` annotation (#164).
+fn primitive_type_doc(name: &str) -> Option<&'static str> {
+    PRIMITIVE_TYPE_DOCS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, doc)| *doc)
+}
+
+/// Documentation for an M1 reference/scope keyword at the head of a reference (#167).
 fn reference_keyword_doc(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "Root" => {
-            "**Root** `reference keyword`\n\nThe root group of the Project — the first constituent of an absolute object reference (`Root.Group.Channel`). Use it to disambiguate when a nearer object shares the same name."
-        }
-        "Parent" => {
-            "**Parent** `reference keyword`\n\nThe object containing the current one. Unqualified, it resolves to the parent of the group the current object is stored in (`Parent.Channel`)."
-        }
-        "This" => {
-            "**This** `reference keyword`\n\nThe group the current object is stored within. Use it to disambiguate when an object of the same name exists in an enclosing scope (`This.Channel`)."
-        }
-        "In" => {
-            "**In** `reference keyword`\n\nThe object holding a function's input arguments; reference them with the `.` operator (`In.Argument`)."
-        }
-        "Out" => {
-            "**Out** `reference keyword`\n\nThe object holding a function's return value; assign it with `=` (`Out.Result = …`)."
-        }
-        "Library" => {
-            "**Library** `reference keyword`\n\nForms a library-function reference (`Library.Calculate.Max(…)`). Use it to disambiguate when an object name conflicts with a library-function name."
-        }
-        _ => return None,
-    })
+    REFERENCE_KEYWORD_DOCS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, doc)| *doc)
 }
 
 pub fn hover(
