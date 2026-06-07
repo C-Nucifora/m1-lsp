@@ -40,6 +40,46 @@ pub fn goto(
     })
 }
 
+/// textDocument/typeDefinition: from an enum-typed channel/parameter, jump to the
+/// `<Type … Name="…">` block that declares its enum in the `.m1prj` (#168). The
+/// enum *type* isn't a project component (it lives in `<DataTypes>`, off the
+/// channel table), so its line is located by scanning the project XML for the
+/// `<Type>` element with the matching `Name`. `None` for non-enum symbols.
+pub fn goto_type_definition(
+    root: m1_core::Node,
+    byte: usize,
+    loaded: &LoadedProject,
+    file_name: Option<&str>,
+) -> Option<Location> {
+    use m1_typecheck::types::ValueType;
+    let (_, path) = path_at_byte(root, byte)?;
+    let scope = build_scope(root, Some(&loaded.project), file_name);
+    let Resolution::Symbol(sym) = resolve(&path, &scope) else {
+        return None;
+    };
+    let ValueType::Enum(id) = sym.value_type else {
+        return None;
+    };
+    let enum_name = loaded.project.symbols().enum_type(id).name.clone();
+    let xml = crate::disk_read::read_disk(&loaded.m1prj_path)?;
+    let line = enum_type_decl_line(&xml, &enum_name)?;
+    let uri = Url::from_file_path(&loaded.m1prj_path).ok()?;
+    Some(Location {
+        uri,
+        range: Range::new(Position::new(line, 0), Position::new(line, 0)),
+    })
+}
+
+/// The 0-based line of the `<Type … Name="<enum>">` declaration in a `.m1prj`,
+/// or `None` if absent. Requires `<Type` on the line so a same-named
+/// `<Component>` channel can't match.
+fn enum_type_decl_line(xml: &str, enum_name: &str) -> Option<u32> {
+    let needle = format!("Name=\"{enum_name}\"");
+    xml.lines()
+        .position(|line| line.contains("<Type") && line.contains(&needle))
+        .map(|i| i as u32)
+}
+
 /// If `byte` sits on a bare reference to a `local` variable, the [`Location`] of
 /// that local's `local <name> = …` declaration in the same file. M1 locals are
 /// file-scoped (and their names may contain spaces), so this is a pure in-file
@@ -222,6 +262,31 @@ mod tests {
                 loc.range.start.line, 3,
                 "should point at the declaration line"
             );
+        });
+    }
+
+    #[test]
+    fn type_definition_jumps_to_enum_type_block() {
+        // #168: Go to Type Definition from an enum-typed channel lands on the
+        // `<Type … Name="…">` declaration in the .m1prj.
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        // line 0 <?xml>, 1 <Project>, 2 <DataTypes>, 3 <Type Name="Color">.
+        let xml = "<?xml version=\"1.0\"?>\n<Project>\n  <DataTypes>\n    <Type Name=\"Color\" Storage=\"enum\"><Enum Name=\"Red\" ContainerOrder=\"1\"/></Type>\n  </DataTypes>\n  <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root\"/>\n  <Component Classname=\"BuiltIn.Channel\" Name=\"Root.Mode\"><Props Type=\"::This.Color\"/></Component>\n</Project>";
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(xml.as_bytes())
+            .unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        let src = "Root.Mode = Color.Red;\n";
+        let cst = m1_core::parse(src);
+        store.with_project(|p| {
+            let loc = goto_type_definition(cst.root(), 0, p.unwrap(), Some("X.m1scr"))
+                .expect("enum-typed channel should resolve to its <Type> block");
+            assert!(loc.uri.to_file_path().unwrap().ends_with("Project.m1prj"));
+            assert_eq!(loc.range.start.line, 3, "the <Type Name=\"Color\"> line");
         });
     }
 

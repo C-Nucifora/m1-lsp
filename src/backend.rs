@@ -386,6 +386,10 @@ impl LanguageServer for Backend {
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                // Go to Declaration (== definition for project symbols) and Go to
+                // Type Definition (enum-typed channel → its <Type> block) (#168).
+                declaration_provider: Some(DeclarationCapability::Simple(true)),
+                type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
                 implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
@@ -616,6 +620,64 @@ impl LanguageServer for Backend {
             })
             .or_else(|| goto::goto_local(cst.root(), byte, &uri, &lindex, self.enc()));
         Ok(loc.map(GotoDefinitionResponse::Scalar))
+    }
+
+    /// textDocument/declaration: for project symbols this is the same `.m1prj`
+    /// `<Component>` (or backing file) site as definition — the LSP-canonical home
+    /// for the jump (#168).
+    async fn goto_declaration(
+        &self,
+        params: request::GotoDeclarationParams,
+    ) -> Result<Option<request::GotoDeclarationResponse>> {
+        let tdp = params.text_document_position_params;
+        let uri = tdp.text_document.uri;
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
+            return Ok(None);
+        };
+        let byte = lindex.offset(tdp.position, &text, self.enc());
+        let cst = m1_core::parse(&text);
+        let file_name = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let loc = self
+            .store
+            .with_project(|p| {
+                p.and_then(|lp| goto::goto(cst.root(), byte, lp, file_name.as_deref()))
+            })
+            .or_else(|| goto::goto_local(cst.root(), byte, &uri, &lindex, self.enc()));
+        Ok(loc.map(request::GotoDeclarationResponse::Scalar))
+    }
+
+    /// textDocument/typeDefinition: from an enum-typed channel/parameter, jump to
+    /// its `<Type>` block in the `.m1prj` (#168).
+    async fn goto_type_definition(
+        &self,
+        params: request::GotoTypeDefinitionParams,
+    ) -> Result<Option<request::GotoTypeDefinitionResponse>> {
+        let tdp = params.text_document_position_params;
+        let uri = tdp.text_document.uri;
+        let Some((text, lindex)) = self
+            .docs
+            .get(&uri)
+            .map(|d| (d.text.clone(), d.line_index.clone()))
+        else {
+            return Ok(None);
+        };
+        let byte = lindex.offset(tdp.position, &text, self.enc());
+        let cst = m1_core::parse(&text);
+        let file_name = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let loc = self.store.with_project(|p| {
+            p.and_then(|lp| goto::goto_type_definition(cst.root(), byte, lp, file_name.as_deref()))
+        });
+        Ok(loc.map(request::GotoTypeDefinitionResponse::Scalar))
     }
 
     async fn goto_implementation(
