@@ -580,8 +580,8 @@ dependencies = [
 
 [[package]]
 name = "m1-fmt"
-version = "0.7.0"
-source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.7.0#1a8dad64880bb69a84326da5e7a04ec37bf939f4"
+version = "0.7.1"
+source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.7.1#cdb0d27436b93d237070bc045291c3a6b09c2441"
 dependencies = [
  "clap",
  "m1-core",
@@ -591,8 +591,8 @@ dependencies = [
 
 [[package]]
 name = "m1-lint"
-version = "0.11.0"
-source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.11.0#b1b4bf9d0484c5040124a6edf039e894c4e60c49"
+version = "0.11.1"
+source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.11.1#33a23fa1d31dfcfc01c4278512fb438a4eed46b1"
 dependencies = [
  "clap",
  "glob",
@@ -621,8 +621,8 @@ dependencies = [
 
 [[package]]
 name = "m1-typecheck"
-version = "0.25.0"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.25.0#e1c3bb8437195cde8c5cd48eb9e73ee98bc4af18"
+version = "0.25.1"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.25.1#718120375d0282ed2ec0998a4d67cd45ab4b7ca7"
 dependencies = [
  "clap",
  "m1-core",
