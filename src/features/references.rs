@@ -9,11 +9,11 @@
 //! `Filename=` attributes and the symbol-table list would be empty.
 use crate::convert::range;
 use crate::features::locate::{
-    build_scope, collect_locals, file_name_of, in_type_annotation, is_member_property, is_top_path,
-    node_at_byte, path_at_byte,
+    build_scope, collect_locals, file_name_of, for_each_top_path, in_type_annotation,
+    is_member_property, is_member_property_of, node_at_byte, path_at_byte, walk_ctx,
 };
 use crate::line_index::{LineIndex, PositionEncoding};
-use m1_core::{Field, Kind, Node};
+use m1_core::{Kind, Node};
 use m1_typecheck::project::Project;
 use m1_typecheck::resolve::{Resolution, Scope, resolve};
 use tower_lsp::lsp_types::{DocumentHighlight, DocumentHighlightKind, Location, Url};
@@ -48,12 +48,9 @@ fn canonical_locations(
 ) -> Vec<Location> {
     let scope = build_scope(root, Some(project), Some(file_name));
     let mut out = Vec::new();
-    for n in root.descendants() {
-        if !is_top_path(n) {
-            continue;
-        }
-        if writes_only && !is_write(n) {
-            continue;
+    for_each_top_path(root, |n, is_write| {
+        if writes_only && !is_write {
+            return;
         }
         if canonical(&scope, n.text()).as_deref() == Some(target) {
             out.push(Location {
@@ -61,7 +58,7 @@ fn canonical_locations(
                 range: range(&n.byte_range(), li, enc),
             });
         }
-    }
+    });
     out
 }
 
@@ -82,70 +79,79 @@ fn top_path_node(n: Node) -> Node {
 /// Every identifier that refers to the local named `name` (declaration or use),
 /// excluding member-access properties and type-annotation names.
 ///
-/// Iterative pre-order traversal (m1-core's `descendants`) rather than recursion,
-/// so a pathologically deep tree can't overflow the call stack (#133).
+/// O(n) context-carrying walk ([`walk_ctx`]): the member-property and
+/// type-annotation tests read the parent/flag threaded by the walk instead of
+/// climbing ancestors per node (which made this O(n²)). Stack-safe on deep input.
 fn collect_local_idents<'a>(root: Node<'a>, name: &str, out: &mut Vec<Node<'a>>) {
-    for n in root.descendants() {
+    walk_ctx(root, |n, parent, in_ta| {
         if n.kind() == Kind::Identifier
             && n.text() == name
-            && !is_member_property(n)
-            && !in_type_annotation(n)
+            && !is_member_property_of(n, parent)
+            && !in_ta
         {
             out.push(n);
         }
-    }
+    });
 }
 
-/// Every top-level path node whose dotted text equals `path`. Iterative pre-order
-/// traversal (see [`collect_local_idents`]) — stack-safe on deep input (#133).
+/// Every top-level path node whose dotted text equals `path`. O(n) single pass
+/// ([`for_each_top_path`]) — stack-safe and no per-node parent climb.
 fn collect_path_matches<'a>(root: Node<'a>, path: &str, out: &mut Vec<Node<'a>>) {
-    for n in root.descendants() {
-        if is_top_path(n) && n.text() == path {
+    for_each_top_path(root, |n, _is_write| {
+        if n.text() == path {
             out.push(n);
         }
-    }
+    });
 }
 
-/// Nodes in `root` that refer to the same entity as the cursor at `byte`.
-fn occurrences<'a>(root: Node<'a>, byte: usize) -> Vec<Node<'a>> {
-    let Some(node) = node_at_byte(root, byte) else {
-        return Vec::new();
-    };
-    // A bare identifier that names a known local: precise, name-based match.
+/// What the cursor at `byte` refers to. A [`Local`](CursorTarget::Local) is a
+/// bare identifier naming a known file-scoped local; a [`Path`](CursorTarget::Path)
+/// is the dotted project path (channel / library member / unresolved) the cursor
+/// sits on. This is the single place the "local vs member-property vs path" rule
+/// lives — references, document-highlight and the project-wide search all classify
+/// the cursor through it, so they can't drift.
+enum CursorTarget {
+    Local(String),
+    Path(String),
+}
+
+/// Classify the cursor at `byte`: a known local (bare identifier, not a member
+/// property or a type-annotation name, present in the local table) or else the
+/// dotted path it sits on.
+fn classify_cursor(root: Node, byte: usize) -> Option<CursorTarget> {
+    let node = node_at_byte(root, byte)?;
     if node.kind() == Kind::Identifier
         && !is_member_property(node)
         && !in_type_annotation(node)
         && collect_locals(root).contains_key(node.text())
     {
-        let mut out = Vec::new();
-        collect_local_idents(root, node.text(), &mut out);
-        return out;
+        return Some(CursorTarget::Local(node.text().to_string()));
     }
-    // Otherwise match the full dotted path (channel / project symbol / library
-    // member) by text.
-    let Some((_, path)) = path_at_byte(root, byte) else {
-        return Vec::new();
-    };
+    let (_, path) = path_at_byte(root, byte)?;
+    Some(CursorTarget::Path(path))
+}
+
+/// Nodes in `root` that refer to the same entity as the cursor at `byte`.
+fn occurrences<'a>(root: Node<'a>, byte: usize) -> Vec<Node<'a>> {
     let mut out = Vec::new();
-    collect_path_matches(root, &path, &mut out);
+    match classify_cursor(root, byte) {
+        // A known local: precise, name-based match.
+        Some(CursorTarget::Local(name)) => collect_local_idents(root, &name, &mut out),
+        // Otherwise the full dotted path (channel / project symbol / library member).
+        Some(CursorTarget::Path(path)) => collect_path_matches(root, &path, &mut out),
+        None => {}
+    }
     out
 }
 
 /// True when `n` (or the path it tops) is being written: the target of an
-/// assignment or the name of a `local` declaration.
+/// assignment or the name of a `local` declaration. For a node already collected
+/// from a top-path scan this is its [`for_each_top_path`] write flag; this form
+/// climbs to the top path first, for the post-scan per-node callers that hold an
+/// arbitrary path node. Shares the classification with `locate::is_write_of`.
 fn is_write(n: Node) -> bool {
     let top = top_path_node(n);
-    match top.parent() {
-        Some(p) if p.kind() == Kind::AssignmentStatement => p
-            .child_by_field(Field::Target)
-            .map(|t| t.byte_range() == top.byte_range())
-            .unwrap_or(false),
-        Some(p) if p.kind() == Kind::LocalDeclaration => p
-            .child_by_field(Field::Name)
-            .map(|name| name.byte_range() == n.byte_range())
-            .unwrap_or(false),
-        _ => false,
-    }
+    crate::features::locate::is_write_of(top, top.parent())
 }
 
 /// Every top-level dotted-path occurrence in `root`, as `(path, byte_range,
@@ -153,14 +159,13 @@ fn is_write(n: Node) -> bool {
 /// everything else is a read. Skips type-annotation names. Powers the
 /// call-hierarchy channel↔script read/write index ([`super::call_hierarchy`]).
 pub(crate) fn path_occurrences(root: Node) -> Vec<(String, std::ops::Range<usize>, bool)> {
-    // Iterative pre-order traversal (m1-core's `descendants`) rather than
-    // recursion, so a pathologically deep tree can't overflow the stack (#133).
+    // O(n) single pass ([`for_each_top_path`]): one pre-order walk that threads
+    // parent context, so it is both stack-safe on deep input (#133) and free of
+    // the per-node parent climbs that made the old `descendants()` scan O(n²).
     let mut out = Vec::new();
-    for n in root.descendants() {
-        if is_top_path(n) {
-            out.push((n.text().to_string(), n.byte_range(), is_write(n)));
-        }
-    }
+    for_each_top_path(root, |n, is_write| {
+        out.push((n.text().to_string(), n.byte_range(), is_write));
+    });
     out
 }
 
@@ -194,18 +199,13 @@ pub enum RefTarget {
     Path(String),
 }
 
-/// Classify the cursor target, mirroring `occurrences`' local-vs-path branching.
+/// Classify the cursor target for the project-wide search, via the shared
+/// `classify_cursor` (so references and document-highlight share one rule).
 pub fn ref_target(root: Node, byte: usize) -> Option<RefTarget> {
-    let node = node_at_byte(root, byte)?;
-    if node.kind() == Kind::Identifier
-        && !is_member_property(node)
-        && !in_type_annotation(node)
-        && collect_locals(root).contains_key(node.text())
-    {
-        return Some(RefTarget::Local(node.text().to_string()));
-    }
-    let (_, path) = path_at_byte(root, byte)?;
-    Some(RefTarget::Path(path))
+    Some(match classify_cursor(root, byte)? {
+        CursorTarget::Local(name) => RefTarget::Local(name),
+        CursorTarget::Path(path) => RefTarget::Path(path),
+    })
 }
 
 /// Locations of the dotted `path` within one already-parsed file, matched by
@@ -402,34 +402,25 @@ pub fn document_highlights_scoped(
     li: &LineIndex,
     enc: PositionEncoding,
 ) -> Option<Vec<DocumentHighlight>> {
-    let node = node_at_byte(root, byte)?;
     // Locals stay name-based (already exact); only project paths need canonicalising.
-    let is_local = node.kind() == Kind::Identifier
-        && !is_member_property(node)
-        && !in_type_annotation(node)
-        && collect_locals(root).contains_key(node.text());
-    if !is_local
+    if let Some(CursorTarget::Path(path)) = classify_cursor(root, byte)
         && let Some(proj) = project
-        && let Some((_, path)) = path_at_byte(root, byte)
     {
         let scope = build_scope(root, Some(proj), file_name);
         if let Some(target) = canonical(&scope, &path) {
             let mut out = Vec::new();
-            for n in root.descendants() {
-                if !is_top_path(n) {
-                    continue;
-                }
+            for_each_top_path(root, |n, is_write| {
                 if canonical(&scope, n.text()).as_deref() == Some(target.as_str()) {
                     out.push(DocumentHighlight {
                         range: range(&n.byte_range(), li, enc),
-                        kind: Some(if is_write(n) {
+                        kind: Some(if is_write {
                             DocumentHighlightKind::WRITE
                         } else {
                             DocumentHighlightKind::READ
                         }),
                     });
                 }
-            }
+            });
             if !out.is_empty() {
                 return Some(out);
             }
@@ -508,11 +499,9 @@ mod tests {
 
     #[test]
     fn path_occurrences_do_not_overflow_on_deep_input() {
-        // Regression for #133: the iterative pre-order walk must not overflow on a
-        // pathologically deep document. Reaching the assertion is the proof — a
-        // stack overflow would abort the process. Default test-thread stack. (The
-        // walk also climbs parents per node, unchanged O(n²), so 20_000 keeps the
-        // test quick while staying above the ~18_000 pre-fix abort point.)
+        // Regression for #133: the pre-order walk ([`walk_ctx`]) is iterative, so a
+        // pathologically deep document must not overflow the call stack. Reaching
+        // the assertion is the proof — a stack overflow would abort the process.
         let depth = 20_000;
         let mut src = String::with_capacity(depth * 2 + 8);
         src.push_str("x = ");
@@ -530,6 +519,57 @@ mod tests {
         assert!(
             occ.iter().any(|(p, _, w)| p == "x" && *w),
             "expected the write to `x`"
+        );
+    }
+
+    #[test]
+    fn path_occurrences_skip_type_annotation_names() {
+        // The walk threads an "inside <Type>" flag instead of climbing ancestors;
+        // the type name `Integer` in the annotation must not be a path occurrence,
+        // while the declared local `myValue` is (a write).
+        let cst = m1_core::parse("local <Integer> myValue = 0;\nmyValue = 1;\n");
+        let occ = path_occurrences(cst.root());
+        assert!(
+            !occ.iter().any(|(p, _, _)| p == "Integer"),
+            "type-annotation name must be skipped: {occ:?}"
+        );
+        let writes: Vec<_> = occ
+            .iter()
+            .filter(|(p, _, w)| p == "myValue" && *w)
+            .collect();
+        assert_eq!(writes.len(), 2, "decl + assignment are writes: {occ:?}");
+    }
+
+    #[test]
+    fn path_occurrences_scale_linearly_on_deep_input() {
+        // Perf regression guard for the reviewer's O(n²) finding. Worst case: an
+        // identifier at *every* nesting level, so the old code's per-node ancestor
+        // climbs (`is_top_path`/`is_write`/`in_type_annotation`) cost O(depth) each
+        // → O(n²) overall (this shape didn't finish depth=2_000 in 90 s). The
+        // single-pass [`for_each_top_path`] walk is O(n): ~0.1 s here. A generous
+        // bound catches a quadratic regression (minutes) without flaking on slow CI.
+        let depth = 20_000;
+        let mut src = String::with_capacity(depth * 6 + 8);
+        src.push_str("x = ");
+        for _ in 0..depth {
+            src.push_str("(a + ");
+        }
+        src.push('1');
+        for _ in 0..depth {
+            src.push(')');
+        }
+        src.push_str(";\n");
+        let cst = m1_core::parse(&src);
+        let start = std::time::Instant::now();
+        let occ = path_occurrences(cst.root());
+        let elapsed = start.elapsed();
+        // One occurrence per `a` plus the `x` target.
+        assert_eq!(occ.len(), depth + 1);
+        assert!(occ.iter().any(|(p, _, w)| p == "x" && *w));
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "path_occurrences took {elapsed:?} on depth {depth} — expected ~O(n); \
+             a quadratic regression would take minutes"
         );
     }
 

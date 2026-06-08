@@ -131,13 +131,13 @@ pub(super) fn collect_ref_edits(
     li: &LineIndex,
     enc: PositionEncoding,
 ) -> Vec<TextEdit> {
-    use crate::features::locate::is_top_path;
-    // Iterative pre-order traversal (m1-core's `descendants`) rather than
-    // recursion, so a pathologically deep tree can't overflow the stack (#133).
+    use crate::features::locate::for_each_top_path;
+    // O(n) single pass ([`for_each_top_path`]): stack-safe on deep input (#133)
+    // and free of the per-node parent climbs that made the old `descendants()` +
+    // `is_top_path` scan O(n²).
     let mut out = Vec::new();
-    for n in root.descendants() {
-        if is_top_path(n)
-            && let Some((sym, k)) = resolve_prefix(n.text(), scope)
+    for_each_top_path(root, |n, _is_write| {
+        if let Some((sym, k)) = resolve_prefix(n.text(), scope)
             && sym.path == target_path
             && let Some(seg) = segment_nodes(n).get(k - 1)
         {
@@ -146,7 +146,7 @@ pub(super) fn collect_ref_edits(
                 new_text: new_name.to_string(),
             });
         }
-    }
+    });
     out
 }
 

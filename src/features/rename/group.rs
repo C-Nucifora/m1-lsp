@@ -7,7 +7,7 @@ use super::helpers::{
     text_doc_edit,
 };
 use crate::convert::range as to_range;
-use crate::features::locate::{file_name_of, is_top_path};
+use crate::features::locate::{file_name_of, for_each_top_path};
 use crate::line_index::{LineIndex, PositionEncoding};
 use crate::project_store::LoadedProject;
 use m1_core::Node;
@@ -90,12 +90,12 @@ fn collect_group_ref_edits(
     use crate::features::locate::segment_nodes;
     let group_depth = group_path.split('.').count() - 1;
     let prefix = format!("{group_path}.");
-    // Iterative pre-order traversal (m1-core's `descendants`) rather than
-    // recursion, so a pathologically deep tree can't overflow the stack (#133).
+    // O(n) single pass ([`for_each_top_path`]): stack-safe on deep input (#133)
+    // and free of the per-node parent climbs that made the old `descendants()` +
+    // `is_top_path` scan O(n²).
     let mut out = Vec::new();
-    for n in root.descendants() {
-        if is_top_path(n)
-            && let Some((sym, k)) = resolve_prefix(n.text(), scope)
+    for_each_top_path(root, |n, _is_write| {
+        if let Some((sym, k)) = resolve_prefix(n.text(), scope)
             && (sym.path == group_path || sym.path.starts_with(&prefix))
         {
             let sym_last = sym.path.split('.').count() - 1;
@@ -110,7 +110,7 @@ fn collect_group_ref_edits(
                 });
             }
         }
-    }
+    });
     out
 }
 

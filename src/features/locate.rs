@@ -104,16 +104,78 @@ pub(crate) fn in_type_annotation(n: Node) -> bool {
     false
 }
 
-/// True for the outermost node of a dotted path (an `identifier` /
-/// `member_expression` not itself the child of a `member_expression`), excluding
-/// type-annotation names. This is the `is_path && is_top && !in_type_annotation`
-/// guard that gates every project-symbol reference scan.
-pub(crate) fn is_top_path(n: Node) -> bool {
-    matches!(n.kind(), Kind::Identifier | Kind::MemberExpression)
-        && n.parent()
-            .map(|p| p.kind() != Kind::MemberExpression)
-            .unwrap_or(true)
-        && !in_type_annotation(n)
+/// Pre-order walk of every node in `root`, calling `f(node, parent, in_type_annotation)`.
+///
+/// This is the O(n) backbone for the reference/highlight/occurrence scans. It
+/// threads the two pieces of context those scans need — the node's `parent` and
+/// whether it sits inside a `<Type>` annotation — *downward* through the walk, so
+/// callers never climb parents to re-derive them. The earlier scans applied
+/// outermost-path / write / type-annotation predicates per node, each of which
+/// climbed to the root (`in_type_annotation` walks every ancestor),
+/// making a full-document scan O(n²) — pathological on deeply nested input (a
+/// 16k-deep expression with an identifier at every level took minutes; #133's
+/// sibling perf bug). Carrying context makes every per-node test O(1).
+///
+/// Iterative (explicit stack) so deep input can't overflow the call stack either.
+/// Children are visited left-to-right (source order), matching `descendants()`.
+pub(crate) fn walk_ctx<'a>(root: Node<'a>, mut f: impl FnMut(Node<'a>, Option<Node<'a>>, bool)) {
+    // (node, parent, inside-a-TypeAnnotation). Push children reversed so they pop
+    // in source order — a pre-order visit identical to the old `descendants()`.
+    let mut stack: Vec<(Node<'a>, Option<Node<'a>>, bool)> = vec![(root, None, false)];
+    while let Some((node, parent, in_ta)) = stack.pop() {
+        f(node, parent, in_ta);
+        let child_in_ta = in_ta || node.kind() == Kind::TypeAnnotation;
+        for child in node.children().into_iter().rev() {
+            stack.push((child, Some(node), child_in_ta));
+        }
+    }
+}
+
+/// True when `n` is the `property` half of `parent` (a `member_expression`) — the
+/// part after the `.`, a field access that is never a local. The parent-context
+/// form of [`is_member_property`]: O(1), no parent climb (the caller already holds
+/// the parent from [`walk_ctx`]).
+pub(crate) fn is_member_property_of(n: Node, parent: Option<Node>) -> bool {
+    parent
+        .filter(|p| p.kind() == Kind::MemberExpression)
+        .and_then(|p| p.child_by_field(Field::Property))
+        .map(|prop| prop.byte_range() == n.byte_range())
+        .unwrap_or(false)
+}
+
+/// True when `node` (a top-level path) is being *written*: the target of an
+/// assignment or the name of a `local` declaration, given its `parent`. The
+/// parent-context form of [`super::references`]'s write test — O(1).
+pub(crate) fn is_write_of(node: Node, parent: Option<Node>) -> bool {
+    match parent {
+        Some(p) if p.kind() == Kind::AssignmentStatement => p
+            .child_by_field(Field::Target)
+            .map(|t| t.byte_range() == node.byte_range())
+            .unwrap_or(false),
+        Some(p) if p.kind() == Kind::LocalDeclaration => p
+            .child_by_field(Field::Name)
+            .map(|name| name.byte_range() == node.byte_range())
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Every outermost dotted-path node in `root` (an `identifier` / `member_expression`
+/// not itself the child of a `member_expression`, excluding type-annotation names),
+/// in source order, with whether it is a write. The O(n) replacement for scanning
+/// `descendants()` and testing an outermost-path / write predicate per node.
+/// `node` is the occurrence; `is_write` is true for assignment targets and
+/// `local` declaration names.
+pub(crate) fn for_each_top_path<'a>(root: Node<'a>, mut f: impl FnMut(Node<'a>, bool)) {
+    walk_ctx(root, |node, parent, in_ta| {
+        let is_path = matches!(node.kind(), Kind::Identifier | Kind::MemberExpression);
+        let parent_is_member = parent
+            .map(|p| p.kind() == Kind::MemberExpression)
+            .unwrap_or(false);
+        if is_path && !parent_is_member && !in_ta {
+            f(node, is_write_of(node, parent));
+        }
+    });
 }
 
 /// The file name (basename) of a `file://` URI, for group-relative resolution.
