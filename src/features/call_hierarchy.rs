@@ -16,9 +16,13 @@
 //! Items carry a small JSON tag in [`CallHierarchyItem::data`] so the incoming/
 //! outgoing handlers know whether they are looking at a script or a channel.
 //!
-//! The index is built on demand (not cached at project load) so it always
-//! reflects unsaved edits in open buffers, the same freshness contract as
-//! [`super::references::project_references`].
+//! The index is built on demand — never at project load — so it always reflects
+//! unsaved edits in open buffers, the same freshness contract as
+//! [`super::references::project_references`]. To avoid re-parsing every script
+//! once per request, a single "Show Call Hierarchy" interaction (separate
+//! `prepare`/`incoming`/`outgoing` LSP requests) shares one [`CallGraph`] cached
+//! in [`crate::project_store::ProjectStore`] and dropped on any buffer/project
+//! change, so the freshness contract still holds.
 use crate::convert::range;
 use crate::features::locate::build_scope;
 use crate::features::references::path_occurrences;
@@ -218,11 +222,10 @@ fn channel_item(loaded: &LoadedProject, path: &str) -> Option<CallHierarchyItem>
 /// cursor is in a script file, the script itself becomes the item.
 pub fn prepare(
     loaded: &LoadedProject,
+    graph: &CallGraph,
     uri: &Url,
     text: &str,
     byte: usize,
-    enc: PositionEncoding,
-    open_text: &dyn Fn(&Url) -> Option<String>,
 ) -> Option<Vec<CallHierarchyItem>> {
     let file_name = uri
         .to_file_path()
@@ -246,11 +249,9 @@ pub fn prepare(
     // A call to a user function/method → that callable's backing script item.
     if let Resolution::Symbol(s) = resolve(&path, &scope)
         && matches!(s.kind, SymbolKind::Function | SymbolKind::Method)
+        && let Some(node) = graph.script_by_file(&backing_file(s))
     {
-        let graph = CallGraph::build(loaded, enc, open_text);
-        if let Some(node) = graph.script_by_file(&backing_file(s)) {
-            return Some(vec![graph.script_item(node)]);
-        }
+        return Some(vec![graph.script_item(node)]);
     }
     None
 }
@@ -259,12 +260,9 @@ pub fn prepare(
 ///   - channel → the scripts that read it (from-ranges = their read sites);
 ///   - script  → the scripts that read a channel this script writes.
 pub fn incoming(
-    loaded: &LoadedProject,
+    graph: &CallGraph,
     item: &CallHierarchyItem,
-    enc: PositionEncoding,
-    open_text: &dyn Fn(&Url) -> Option<String>,
 ) -> Option<Vec<CallHierarchyIncomingCall>> {
-    let graph = CallGraph::build(loaded, enc, open_text);
     let mut out = Vec::new();
     match item_tag(item)? {
         Tag::Channel(path) => {
@@ -306,11 +304,9 @@ pub fn incoming(
 ///   - channel → the scripts that write (produce) it.
 pub fn outgoing(
     loaded: &LoadedProject,
+    graph: &CallGraph,
     item: &CallHierarchyItem,
-    enc: PositionEncoding,
-    open_text: &dyn Fn(&Url) -> Option<String>,
 ) -> Option<Vec<CallHierarchyOutgoingCall>> {
-    let graph = CallGraph::build(loaded, enc, open_text);
     let mut out = Vec::new();
     match item_tag(item)? {
         Tag::Script(file) => {
@@ -417,8 +413,9 @@ mod tests {
         let (_t, store) = fixture();
         store.with_project(|p| {
             let lp = p.unwrap();
+            let g = CallGraph::build(lp, PositionEncoding::Utf16, &no_open);
             let item = channel_item(lp, "Root.Engine.Speed").unwrap();
-            let calls = incoming(lp, &item, PositionEncoding::Utf16, &no_open).unwrap();
+            let calls = incoming(&g, &item).unwrap();
             let names: Vec<_> = calls.iter().map(|c| c.from.name.clone()).collect();
             assert!(names.contains(&"Engine.Dash.m1scr".to_string()));
             assert!(names.contains(&"Engine.Safety.m1scr".to_string()));
@@ -433,8 +430,9 @@ mod tests {
         let (_t, store) = fixture();
         store.with_project(|p| {
             let lp = p.unwrap();
+            let g = CallGraph::build(lp, PositionEncoding::Utf16, &no_open);
             let item = channel_item(lp, "Root.Engine.Speed").unwrap();
-            let calls = outgoing(lp, &item, PositionEncoding::Utf16, &no_open).unwrap();
+            let calls = outgoing(lp, &g, &item).unwrap();
             assert_eq!(calls.len(), 1, "one writer");
             assert_eq!(calls[0].to.name, "Engine.Control.m1scr");
         });
@@ -448,7 +446,7 @@ mod tests {
             let g = CallGraph::build(lp, PositionEncoding::Utf16, &no_open);
             let ctrl = g.script_by_file("Engine.Control.m1scr").unwrap();
             let item = g.script_item(ctrl);
-            let calls = outgoing(lp, &item, PositionEncoding::Utf16, &no_open).unwrap();
+            let calls = outgoing(lp, &g, &item).unwrap();
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].to.name, "Root.Engine.Speed");
             assert!(!calls[0].from_ranges.is_empty(), "write site range");
@@ -463,12 +461,80 @@ mod tests {
             let g = CallGraph::build(lp, PositionEncoding::Utf16, &no_open);
             let ctrl = g.script_by_file("Engine.Control.m1scr").unwrap();
             let item = g.script_item(ctrl);
-            let calls = incoming(lp, &item, PositionEncoding::Utf16, &no_open).unwrap();
+            let calls = incoming(&g, &item).unwrap();
             let names: Vec<_> = calls.iter().map(|c| c.from.name.clone()).collect();
             assert!(names.contains(&"Engine.Dash.m1scr".to_string()));
             assert!(names.contains(&"Engine.Safety.m1scr".to_string()));
             assert_eq!(calls.len(), 2);
         });
+    }
+
+    #[test]
+    fn cached_graph_matches_fresh_build_and_invalidates() {
+        // The store-cached graph (used across prepare/incoming/outgoing of one
+        // interaction) must produce the same results as a fresh per-call build,
+        // and `invalidate_call_graph` must force a rebuild.
+        let (_t, store) = fixture();
+
+        // Results via the cached path.
+        let cached_incoming = store.with_call_graph(
+            |lp| CallGraph::build(lp, PositionEncoding::Utf16, &no_open),
+            |pg| {
+                let (lp, g) = pg.unwrap();
+                let item = channel_item(lp, "Root.Engine.Speed").unwrap();
+                let mut names: Vec<_> = incoming(g, &item)
+                    .unwrap()
+                    .iter()
+                    .map(|c| c.from.name.clone())
+                    .collect();
+                names.sort();
+                names
+            },
+        );
+        // A second request in the same interaction reuses the SAME cached graph
+        // (no rebuild) and must give the identical answer.
+        let cached_incoming_again = store.with_call_graph(
+            |_| panic!("graph must not be rebuilt while the cache is warm"),
+            |pg| {
+                let (lp, g) = pg.unwrap();
+                let item = channel_item(lp, "Root.Engine.Speed").unwrap();
+                let mut names: Vec<_> = incoming(g, &item)
+                    .unwrap()
+                    .iter()
+                    .map(|c| c.from.name.clone())
+                    .collect();
+                names.sort();
+                names
+            },
+        );
+        assert_eq!(cached_incoming, cached_incoming_again);
+
+        // Results via a fresh build, for the same item — must be identical.
+        let fresh = store.with_project(|p| {
+            let lp = p.unwrap();
+            let g = CallGraph::build(lp, PositionEncoding::Utf16, &no_open);
+            let item = channel_item(lp, "Root.Engine.Speed").unwrap();
+            let mut names: Vec<_> = incoming(&g, &item)
+                .unwrap()
+                .iter()
+                .map(|c| c.from.name.clone())
+                .collect();
+            names.sort();
+            names
+        });
+        assert_eq!(cached_incoming, fresh);
+
+        // After invalidation the builder MUST run again.
+        store.invalidate_call_graph();
+        let mut rebuilt = false;
+        store.with_call_graph(
+            |lp| {
+                rebuilt = true;
+                CallGraph::build(lp, PositionEncoding::Utf16, &no_open)
+            },
+            |_| {},
+        );
+        assert!(rebuilt, "invalidate_call_graph must force a rebuild");
     }
 
     #[test]
@@ -478,13 +544,10 @@ mod tests {
         let uri = Url::from_file_path(scripts_dir.join("Engine.Control.m1scr")).unwrap();
         let text = "Root.Engine.Speed = 1.0;\n";
         store.with_project(|p| {
+            let lp = p.unwrap();
+            let g = CallGraph::build(lp, PositionEncoding::Utf16, &no_open);
             let items = prepare(
-                p.unwrap(),
-                &uri,
-                text,
-                0, // cursor on `Root.Engine.Speed`
-                PositionEncoding::Utf16,
-                &no_open,
+                lp, &g, &uri, text, 0, // cursor on `Root.Engine.Speed`
             )
             .unwrap();
             assert_eq!(items.len(), 1);
@@ -503,8 +566,10 @@ mod tests {
             Url::from_file_path(_t.path().join("Scripts").join("Engine.Control.m1scr")).unwrap();
         let text = "local myValue = 42;\n";
         store.with_project(|p| {
+            let lp = p.unwrap();
+            let g = CallGraph::build(lp, PositionEncoding::Utf16, &no_open);
             // Cursor on `myValue` (byte 6).
-            let got = prepare(p.unwrap(), &uri, text, 6, PositionEncoding::Utf16, &no_open);
+            let got = prepare(lp, &g, &uri, text, 6);
             assert!(
                 got.is_none(),
                 "a local should yield no call hierarchy: {got:?}"

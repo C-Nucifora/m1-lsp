@@ -556,6 +556,9 @@ impl LanguageServer for Backend {
         let d = params.text_document;
         self.docs
             .insert(d.uri.clone(), Document::new(d.text, d.version));
+        // A new/updated buffer can change script reads/writes — drop the cached
+        // call graph so the next call-hierarchy request rebuilds from live text.
+        self.store.invalidate_call_graph();
         // Some clients open a file without ever sending a `rootUri`/workspace
         // folder at `initialize`, leaving the server project-less. Fall back to
         // discovering the project from the opened file itself (#73).
@@ -571,17 +574,25 @@ impl LanguageServer for Backend {
                 uri.clone(),
                 Document::new(change.text, params.text_document.version),
             );
+            // The edited buffer can change script reads/writes — drop the cached
+            // call graph (rebuilt on the next call-hierarchy request).
+            self.store.invalidate_call_graph();
             self.publish(uri).await;
         }
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        // Disk now matches the buffer; the graph reads buffers first, so this is
+        // belt-and-braces, but keeps the cache honest for any disk-sourced script.
+        self.store.invalidate_call_graph();
         self.publish(params.text_document.uri).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
         self.docs.remove(&uri);
+        // The graph would now read this file from disk instead of the buffer.
+        self.store.invalidate_call_graph();
         self.client.publish_diagnostics(uri, vec![], None).await;
     }
 
@@ -903,11 +914,14 @@ impl LanguageServer for Backend {
         let enc = self.enc();
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
         // Reads + parses every script under the live project; run off the async
-        // worker via `block_in_place` (#135).
+        // worker via `block_in_place` (#135). The graph is built once per
+        // call-hierarchy interaction and cached in the store (it is invalidated on
+        // any buffer edit), so prepare/incoming/outgoing share one build.
         Ok(tokio::task::block_in_place(|| {
-            self.store.with_project(|p| {
-                p.and_then(|lp| call_hierarchy::prepare(lp, &uri, &text, byte, enc, &open_text))
-            })
+            self.store.with_call_graph(
+                |lp| call_hierarchy::CallGraph::build(lp, enc, &open_text),
+                |pg| pg.and_then(|(lp, g)| call_hierarchy::prepare(lp, g, &uri, &text, byte)),
+            )
         }))
     }
 
@@ -917,12 +931,13 @@ impl LanguageServer for Backend {
     ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
         let enc = self.enc();
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
-        // Reads + parses every script under the live project; run off the async
-        // worker via `block_in_place` (#135).
+        // Uses the cached graph from this interaction's `prepare` (rebuilt only if
+        // a buffer changed); see `prepare_call_hierarchy`.
         Ok(tokio::task::block_in_place(|| {
-            self.store.with_project(|p| {
-                p.and_then(|lp| call_hierarchy::incoming(lp, &params.item, enc, &open_text))
-            })
+            self.store.with_call_graph(
+                |lp| call_hierarchy::CallGraph::build(lp, enc, &open_text),
+                |pg| pg.and_then(|(_, g)| call_hierarchy::incoming(g, &params.item)),
+            )
         }))
     }
 
@@ -932,12 +947,13 @@ impl LanguageServer for Backend {
     ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
         let enc = self.enc();
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
-        // Reads + parses every script under the live project; run off the async
-        // worker via `block_in_place` (#135).
+        // Uses the cached graph from this interaction's `prepare` (rebuilt only if
+        // a buffer changed); see `prepare_call_hierarchy`.
         Ok(tokio::task::block_in_place(|| {
-            self.store.with_project(|p| {
-                p.and_then(|lp| call_hierarchy::outgoing(lp, &params.item, enc, &open_text))
-            })
+            self.store.with_call_graph(
+                |lp| call_hierarchy::CallGraph::build(lp, enc, &open_text),
+                |pg| pg.and_then(|(lp, g)| call_hierarchy::outgoing(lp, g, &params.item)),
+            )
         }))
     }
 
