@@ -54,6 +54,32 @@ pub struct Backend {
     config_root: std::sync::RwLock<Option<std::path::PathBuf>>,
 }
 
+/// Everything a request handler needs about one open document, gathered once: the
+/// cloned text + line index (released from the `DashMap` guard), the negotiated
+/// position encoding, and the file basename used for group-relative resolution.
+/// Replaces the get-doc / `enc()` / byte-offset / `file_name` plumbing that every
+/// cursor-position handler repeated. The CST is parsed by the caller via
+/// [`DocContext::parse`] — a `Node` borrows the tree, which must outlive the borrow.
+struct DocContext {
+    text: String,
+    line_index: crate::line_index::LineIndex,
+    enc: PositionEncoding,
+    file_name: Option<String>,
+}
+
+impl DocContext {
+    /// Byte offset of an LSP `position` within this document.
+    fn byte(&self, position: Position) -> usize {
+        self.line_index.offset(position, &self.text, self.enc)
+    }
+
+    /// Parse the document text into a CST. The caller holds the returned `Cst` so
+    /// `Node`s borrowed from it stay valid.
+    fn parse(&self) -> m1_core::Cst {
+        m1_core::parse(&self.text)
+    }
+}
+
 impl Backend {
     pub fn new(client: Client) -> Self {
         Self::with_backends(
@@ -125,6 +151,19 @@ impl Backend {
         self.docs
             .get(uri)
             .map(|d| (d.text.clone(), d.line_index.clone()))
+    }
+
+    /// Bundle an open document's text / line index / encoding / basename for a
+    /// request handler ([`DocContext`]). `None` when the document isn't open — the
+    /// caller returns its empty response, as the raw [`get_doc`](Self::get_doc) did.
+    fn doc_context(&self, uri: &Url) -> Option<DocContext> {
+        let (text, line_index) = self.get_doc(uri)?;
+        Some(DocContext {
+            text,
+            line_index,
+            enc: self.enc(),
+            file_name: crate::features::locate::file_name_of(uri),
+        })
     }
 
     /// Fallback project discovery (#73). `initialize` loads the project from the
@@ -679,26 +718,19 @@ impl LanguageServer for Backend {
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let tdp = params.text_document_position_params;
-        let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&tdp.text_document.uri) else {
             return Ok(None);
         };
-        let byte = lindex.offset(tdp.position, &text, self.enc());
-        let cst = m1_core::parse(&text);
-        let file_name = uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
-        let li = &lindex;
-        let enc = self.enc();
+        let byte = doc.byte(tdp.position);
+        let cst = doc.parse();
         Ok(self.store.with_project(|p| {
             hover::hover(
                 cst.root(),
                 byte,
                 p.map(|lp| &lp.project),
-                file_name.as_deref(),
-                li,
-                enc,
+                doc.file_name.as_deref(),
+                &doc.line_index,
+                doc.enc,
             )
         }))
     }
@@ -709,24 +741,20 @@ impl LanguageServer for Backend {
     ) -> Result<Option<GotoDefinitionResponse>> {
         let tdp = params.text_document_position_params;
         let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&uri) else {
             return Ok(None);
         };
-        let byte = lindex.offset(tdp.position, &text, self.enc());
-        let cst = m1_core::parse(&text);
-        let file_name = uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let byte = doc.byte(tdp.position);
+        let cst = doc.parse();
         // Project symbols (channels/params/functions/DBC) resolve via the
         // project; a bare `local` resolves in-file and works even with no project
         // loaded (#141).
         let loc = self
             .store
             .with_project(|p| {
-                p.and_then(|lp| goto::goto(cst.root(), byte, lp, file_name.as_deref()))
+                p.and_then(|lp| goto::goto(cst.root(), byte, lp, doc.file_name.as_deref()))
             })
-            .or_else(|| goto::goto_local(cst.root(), byte, &uri, &lindex, self.enc()));
+            .or_else(|| goto::goto_local(cst.root(), byte, &uri, &doc.line_index, doc.enc));
         Ok(loc.map(GotoDefinitionResponse::Scalar))
     }
 
@@ -739,21 +767,17 @@ impl LanguageServer for Backend {
     ) -> Result<Option<request::GotoDeclarationResponse>> {
         let tdp = params.text_document_position_params;
         let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&uri) else {
             return Ok(None);
         };
-        let byte = lindex.offset(tdp.position, &text, self.enc());
-        let cst = m1_core::parse(&text);
-        let file_name = uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let byte = doc.byte(tdp.position);
+        let cst = doc.parse();
         let loc = self
             .store
             .with_project(|p| {
-                p.and_then(|lp| goto::goto(cst.root(), byte, lp, file_name.as_deref()))
+                p.and_then(|lp| goto::goto(cst.root(), byte, lp, doc.file_name.as_deref()))
             })
-            .or_else(|| goto::goto_local(cst.root(), byte, &uri, &lindex, self.enc()));
+            .or_else(|| goto::goto_local(cst.root(), byte, &uri, &doc.line_index, doc.enc));
         Ok(loc.map(request::GotoDeclarationResponse::Scalar))
     }
 
@@ -764,18 +788,15 @@ impl LanguageServer for Backend {
         params: request::GotoTypeDefinitionParams,
     ) -> Result<Option<request::GotoTypeDefinitionResponse>> {
         let tdp = params.text_document_position_params;
-        let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&tdp.text_document.uri) else {
             return Ok(None);
         };
-        let byte = lindex.offset(tdp.position, &text, self.enc());
-        let cst = m1_core::parse(&text);
-        let file_name = uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let byte = doc.byte(tdp.position);
+        let cst = doc.parse();
         let loc = self.store.with_project(|p| {
-            p.and_then(|lp| goto::goto_type_definition(cst.root(), byte, lp, file_name.as_deref()))
+            p.and_then(|lp| {
+                goto::goto_type_definition(cst.root(), byte, lp, doc.file_name.as_deref())
+            })
         });
         Ok(loc.map(request::GotoTypeDefinitionResponse::Scalar))
     }
@@ -784,7 +805,7 @@ impl LanguageServer for Backend {
     /// `Project.m1prj` to the script they name, relative to the project dir (#175).
     async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
         let uri = params.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&uri) else {
             return Ok(None);
         };
         let Some(root) = uri
@@ -794,7 +815,7 @@ impl LanguageServer for Backend {
         else {
             return Ok(None);
         };
-        let links = document_link::document_links(&text, &lindex, self.enc(), &root);
+        let links = document_link::document_links(&doc.text, &doc.line_index, doc.enc, &root);
         Ok((!links.is_empty()).then_some(links))
     }
 
@@ -804,18 +825,16 @@ impl LanguageServer for Backend {
         &self,
         params: SelectionRangeParams,
     ) -> Result<Option<Vec<SelectionRange>>> {
-        let uri = params.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&params.text_document.uri) else {
             return Ok(None);
         };
-        let enc = self.enc();
-        let cst = m1_core::parse(&text);
+        let cst = doc.parse();
         let ranges: Vec<SelectionRange> = params
             .positions
             .iter()
             .filter_map(|pos| {
-                let byte = lindex.offset(*pos, &text, enc);
-                selection_range::selection_range(cst.root(), byte, &lindex, enc)
+                let byte = doc.byte(*pos);
+                selection_range::selection_range(cst.root(), byte, &doc.line_index, doc.enc)
             })
             .collect();
         Ok((ranges.len() == params.positions.len()).then_some(ranges))
@@ -827,11 +846,11 @@ impl LanguageServer for Backend {
     ) -> Result<Option<GotoImplementationResponse>> {
         let tdp = params.text_document_position_params;
         let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&uri) else {
             return Ok(None);
         };
-        let byte = lindex.offset(tdp.position, &text, self.enc());
-        let enc = self.enc();
+        let byte = doc.byte(tdp.position);
+        let enc = doc.enc;
         // "Implementation" of a channel = where it is written (produced). With a
         // project loaded, search every `.m1scr`; open buffers win over disk.
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
@@ -845,7 +864,7 @@ impl LanguageServer for Backend {
                         &lp.project,
                         &lp.script_files,
                         &uri,
-                        &text,
+                        &doc.text,
                         byte,
                         enc,
                         &open_text,
@@ -860,37 +879,30 @@ impl LanguageServer for Backend {
         &self,
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
-        let uri = params.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&params.text_document.uri) else {
             return Ok(None);
         };
-        let cst = m1_core::parse(&text);
-        let syms = document_symbols::document_symbols(cst.root(), &lindex, self.enc());
+        let cst = doc.parse();
+        let syms = document_symbols::document_symbols(cst.root(), &doc.line_index, doc.enc);
         Ok(Some(DocumentSymbolResponse::Nested(syms)))
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let tdp = params.text_document_position;
-        let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&tdp.text_document.uri) else {
             return Ok(None);
         };
-        let enc = self.enc();
-        let byte = lindex.offset(tdp.position, &text, enc);
-        let cst = m1_core::parse(&text);
-        let file_name = uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let byte = doc.byte(tdp.position);
+        let cst = doc.parse();
         let items = self.store.with_project(|p| {
             completion::completions(
                 cst.root(),
                 p,
-                file_name.as_deref(),
-                &text,
+                doc.file_name.as_deref(),
+                &doc.text,
                 byte,
-                &lindex,
-                enc,
+                &doc.line_index,
+                doc.enc,
             )
         });
         Ok(Some(CompletionResponse::Array(items)))
@@ -898,45 +910,34 @@ impl LanguageServer for Backend {
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
         let tdp = params.text_document_position_params;
-        let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&tdp.text_document.uri) else {
             return Ok(None);
         };
-        let byte = lindex.offset(tdp.position, &text, self.enc());
-        let cst = m1_core::parse(&text);
-        let file_name = uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let byte = doc.byte(tdp.position);
+        let cst = doc.parse();
         Ok(self.store.with_project(|p| {
             signature_help::signature_help(
                 cst.root(),
                 byte,
                 p.map(|lp| &lp.project),
-                file_name.as_deref(),
+                doc.file_name.as_deref(),
             )
         }))
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
-        let uri = params.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&params.text_document.uri) else {
             return Ok(None);
         };
-        let cst = m1_core::parse(&text);
-        let file_name = uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
-        let enc = self.enc();
+        let cst = doc.parse();
         let hints = self.store.with_project(|p| {
             inlay::inlay_hints(
                 cst.root(),
                 params.range,
-                &lindex,
-                enc,
+                &doc.line_index,
+                doc.enc,
                 p.map(|lp| &lp.project),
-                file_name.as_deref(),
+                doc.file_name.as_deref(),
             )
         });
         Ok(Some(hints))
@@ -954,15 +955,11 @@ impl LanguageServer for Backend {
         params: CallHierarchyPrepareParams,
     ) -> Result<Option<Vec<CallHierarchyItem>>> {
         let uri = params.text_document_position_params.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&uri) else {
             return Ok(None);
         };
-        let byte = lindex.offset(
-            params.text_document_position_params.position,
-            &text,
-            self.enc(),
-        );
-        let enc = self.enc();
+        let byte = doc.byte(params.text_document_position_params.position);
+        let enc = doc.enc;
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
         // Reads + parses every script under the live project; run off the async
         // worker via `block_in_place` (#135). The graph is built once per
@@ -971,7 +968,7 @@ impl LanguageServer for Backend {
         Ok(tokio::task::block_in_place(|| {
             self.store.with_call_graph(
                 |lp| call_hierarchy::CallGraph::build(lp, enc, &open_text),
-                |pg| pg.and_then(|(lp, g)| call_hierarchy::prepare(lp, g, &uri, &text, byte)),
+                |pg| pg.and_then(|(lp, g)| call_hierarchy::prepare(lp, g, &uri, &doc.text, byte)),
             )
         }))
     }
@@ -1013,30 +1010,25 @@ impl LanguageServer for Backend {
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
         let uri = params.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&uri) else {
             return Ok(None);
         };
-        let byte = lindex.offset(params.position, &text, self.enc());
-        let enc = self.enc();
+        let byte = doc.byte(params.position);
         // The `.m1prj` is XML, not a script: offer rename on a component's Name.
         if is_m1prj(&uri) {
             return Ok(self.store.with_project(|p| {
-                rename::prepare_m1prj(&text, byte, enc, p.map(|lp| &lp.project))
+                rename::prepare_m1prj(&doc.text, byte, doc.enc, p.map(|lp| &lp.project))
             }));
         }
-        let cst = m1_core::parse(&text);
-        let file_name = uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let cst = doc.parse();
         Ok(self.store.with_project(|p| {
             rename::prepare(
                 cst.root(),
                 byte,
-                &lindex,
-                enc,
+                &doc.line_index,
+                doc.enc,
                 p.map(|lp| &lp.project),
-                file_name.as_deref(),
+                doc.file_name.as_deref(),
             )
         }))
     }
@@ -1045,11 +1037,11 @@ impl LanguageServer for Backend {
         let new_name = params.new_name;
         let tdp = params.text_document_position;
         let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&uri) else {
             return Ok(None);
         };
-        let byte = lindex.offset(tdp.position, &text, self.enc());
-        let enc = self.enc();
+        let byte = doc.byte(tdp.position);
+        let enc = doc.enc;
         // Open buffers win over on-disk copies so an in-flight edit is seen.
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
         // A project-wide rename reads + parses every script. Those functions
@@ -1060,7 +1052,7 @@ impl LanguageServer for Backend {
             tokio::task::block_in_place(|| {
                 self.store.with_project(|p| match p {
                     Some(lp) => rename::execute_m1prj(
-                        &text,
+                        &doc.text,
                         byte,
                         &new_name,
                         uri.clone(),
@@ -1072,11 +1064,7 @@ impl LanguageServer for Backend {
                 })
             })
         } else {
-            let cst = m1_core::parse(&text);
-            let file_name = uri
-                .to_file_path()
-                .ok()
-                .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+            let cst = doc.parse();
             tokio::task::block_in_place(|| {
                 self.store.with_project(|p| {
                     rename::execute(
@@ -1084,10 +1072,10 @@ impl LanguageServer for Backend {
                         byte,
                         &new_name,
                         uri.clone(),
-                        &lindex,
+                        &doc.line_index,
                         enc,
                         p,
-                        file_name.as_deref(),
+                        doc.file_name.as_deref(),
                         &open_text,
                     )
                 })
@@ -1117,24 +1105,17 @@ impl LanguageServer for Backend {
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
-        let uri = params.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&params.text_document.uri) else {
             return Ok(None);
         };
-        let cst = m1_core::parse(&text);
-        let file_name = uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
-        let li = &lindex;
-        let enc = self.enc();
+        let cst = doc.parse();
         let tokens = self.store.with_project(|p| {
             semantic_tokens::semantic_tokens(
                 cst.root(),
                 p.map(|lp| &lp.project),
-                file_name.as_deref(),
-                li,
-                enc,
+                doc.file_name.as_deref(),
+                &doc.line_index,
+                doc.enc,
             )
         });
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
@@ -1147,24 +1128,17 @@ impl LanguageServer for Backend {
         &self,
         params: SemanticTokensRangeParams,
     ) -> Result<Option<SemanticTokensRangeResult>> {
-        let uri = params.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&params.text_document.uri) else {
             return Ok(None);
         };
-        let cst = m1_core::parse(&text);
-        let file_name = uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
-        let li = &lindex;
-        let enc = self.enc();
+        let cst = doc.parse();
         let tokens = self.store.with_project(|p| {
             semantic_tokens::semantic_tokens_range(
                 cst.root(),
                 p.map(|lp| &lp.project),
-                file_name.as_deref(),
-                li,
-                enc,
+                doc.file_name.as_deref(),
+                &doc.line_index,
+                doc.enc,
                 params.range.start.line,
                 params.range.end.line,
             )
@@ -1178,11 +1152,11 @@ impl LanguageServer for Backend {
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let tdp = params.text_document_position;
         let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&uri) else {
             return Ok(None);
         };
-        let byte = lindex.offset(tdp.position, &text, self.enc());
-        let enc = self.enc();
+        let byte = doc.byte(tdp.position);
+        let enc = doc.enc;
         // With a project loaded, search every `.m1scr` for a project symbol
         // (#29); locals stay file-local. Open buffers win over on-disk text.
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
@@ -1198,7 +1172,7 @@ impl LanguageServer for Backend {
                         &lp.project,
                         &lp.script_files,
                         &uri,
-                        &text,
+                        &doc.text,
                         byte,
                         enc,
                         &open_text,
@@ -1210,12 +1184,12 @@ impl LanguageServer for Backend {
             return Ok(locs);
         }
         // Project-less mode: single-file references.
-        let cst = m1_core::parse(&text);
+        let cst = doc.parse();
         Ok(references::references(
             cst.root(),
             byte,
             uri.clone(),
-            &lindex,
+            &doc.line_index,
             enc,
         ))
     }
@@ -1225,55 +1199,47 @@ impl LanguageServer for Backend {
         params: DocumentHighlightParams,
     ) -> Result<Option<Vec<DocumentHighlight>>> {
         let tdp = params.text_document_position_params;
-        let uri = tdp.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&tdp.text_document.uri) else {
             return Ok(None);
         };
-        let byte = lindex.offset(tdp.position, &text, self.enc());
-        let cst = m1_core::parse(&text);
-        let file_name = uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
-        let li = &lindex;
-        let enc = self.enc();
+        let byte = doc.byte(tdp.position);
+        let cst = doc.parse();
         // Project-aware so a channel spelled two ways in one file highlights as one (#143).
         Ok(self.store.with_project(|p| {
             references::document_highlights_scoped(
                 p.map(|lp| &lp.project),
-                file_name.as_deref(),
+                doc.file_name.as_deref(),
                 cst.root(),
                 byte,
-                li,
-                enc,
+                &doc.line_index,
+                doc.enc,
             )
         }))
     }
 
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
-        let uri = params.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&params.text_document.uri) else {
             return Ok(None);
         };
-        let cst = m1_core::parse(&text);
+        let cst = doc.parse();
         Ok(Some(folding::folding_ranges(
             cst.root(),
-            &lindex,
-            self.enc(),
+            &doc.line_index,
+            doc.enc,
         )))
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         let uri = params.text_document.uri;
-        let Some((text, lindex)) = self.get_doc(&uri) else {
+        let Some(doc) = self.doc_context(&uri) else {
             return Ok(None);
         };
-        let enc = self.enc();
+        let enc = doc.enc;
         // The project model backs the T020 "did you mean" enum-member fix (#159).
         let mut actions = self.store.with_project(|p| {
             code_action::code_actions(
-                &text,
-                &lindex,
+                &doc.text,
+                &doc.line_index,
                 enc,
                 &uri,
                 &params.context.diagnostics,
@@ -1283,18 +1249,22 @@ impl LanguageServer for Backend {
         // Whole-file "fix all auto-fixable lint issues" via the shared m1-lint
         // fixer — covers every fixable rule (L003/L007/L011/L018…), not just the
         // hand-ported few (#158).
-        if let Some(fixed) = self.lint.fix(&text)
-            && fixed != text
+        if let Some(fixed) = self.lint.fix(&doc.text)
+            && fixed != doc.text
         {
             actions.push(code_action::fix_all_lint_action(
-                &uri, &text, &lindex, enc, fixed,
+                &uri,
+                &doc.text,
+                &doc.line_index,
+                enc,
+                fixed,
             ));
         }
         // Selection-driven refactors, offered independently of diagnostics (#174):
         // "Extract to local" on a selected expression, "Inline local" on a local.
         actions.extend(code_action::refactors(
-            &text,
-            &lindex,
+            &doc.text,
+            &doc.line_index,
             enc,
             &uri,
             params.range,
