@@ -1,4 +1,5 @@
 //! Discovery, loading, caching, and reload of the m1-typecheck Project.
+use crate::features::call_hierarchy::CallGraph;
 use m1_typecheck::Project;
 use m1_typecheck::symbols::Symbol;
 use std::path::{Path, PathBuf};
@@ -179,6 +180,14 @@ fn augment(
 #[derive(Default)]
 pub struct ProjectStore {
     inner: RwLock<Option<LoadedProject>>,
+    /// Cached call-hierarchy data-flow graph for the loaded project, built lazily
+    /// on the first call-hierarchy request and reused across the
+    /// `prepare`/`incoming`/`outgoing` requests of one "Show Call Hierarchy"
+    /// interaction (each is a separate LSP request, so without this the graph
+    /// would be rebuilt — every script re-parsed — once per request). Invalidated
+    /// by [`Self::invalidate_call_graph`] on any document edit/open/close and on
+    /// every project (re)load, so a rebuild always reflects the live buffers.
+    call_graph: RwLock<Option<CallGraph>>,
 }
 
 impl ProjectStore {
@@ -197,12 +206,43 @@ impl ProjectStore {
         if let Some(lp) = self.inner.write().unwrap().as_mut() {
             lp.script_files = walk_scripts(&lp.root);
         }
+        // The script set changed (file created/deleted) — drop the stale graph.
+        self.invalidate_call_graph();
     }
 
     /// Read access to the loaded project for the feature handlers.
     pub fn with_project<R>(&self, f: impl FnOnce(Option<&LoadedProject>) -> R) -> R {
         let guard = self.inner.read().unwrap();
         f(guard.as_ref())
+    }
+
+    /// Drop the cached call-hierarchy graph so the next call-hierarchy request
+    /// rebuilds it from the current project + buffers. Cheap (just clears the
+    /// cell); called on any document edit/open/close and on every project reload.
+    pub fn invalidate_call_graph(&self) {
+        *self.call_graph.write().unwrap() = None;
+    }
+
+    /// Run `f` against the loaded project and its call-hierarchy graph, building
+    /// (and caching) the graph with `build` on a cache miss. The graph is reused
+    /// across the three requests of one call-hierarchy interaction; it is dropped
+    /// by [`Self::invalidate_call_graph`] whenever a buffer or the project
+    /// changes, so a freshly-built graph always reflects the live state. `f`
+    /// receives `None` only when no project is loaded.
+    pub fn with_call_graph<R>(
+        &self,
+        build: impl FnOnce(&LoadedProject) -> CallGraph,
+        f: impl FnOnce(Option<(&LoadedProject, &CallGraph)>) -> R,
+    ) -> R {
+        let project = self.inner.read().unwrap();
+        let Some(lp) = project.as_ref() else {
+            return f(None);
+        };
+        let mut graph = self.call_graph.write().unwrap();
+        if graph.is_none() {
+            *graph = Some(build(lp));
+        }
+        f(Some((lp, graph.as_ref().unwrap())))
     }
 
     /// Project-scope diagnostics for the loaded project: the `.m1cfg`-coverage
@@ -256,10 +296,12 @@ impl ProjectStore {
                     dbc_paths,
                     script_files,
                 });
+                self.invalidate_call_graph();
                 Ok(true)
             }
             Err(e) => {
                 *self.inner.write().unwrap() = None;
+                self.invalidate_call_graph();
                 Err(e)
             }
         }
@@ -300,6 +342,7 @@ impl ProjectStore {
             dbc_paths,
             script_files,
         });
+        self.invalidate_call_graph();
         Ok(true)
     }
 
