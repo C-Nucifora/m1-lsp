@@ -118,23 +118,35 @@ fn collect(n: Node, li: &LineIndex, enc: PositionEncoding) -> Vec<DocumentSymbol
     out
 }
 
-/// The right-hand side of an assignment / `local` declaration, as outline detail
-/// (`= 1`, `= a + b`) — whitespace-collapsed and truncated. Disambiguates several
-/// writes to the same target, which otherwise share a label (#156).
+/// The assignment operator and right-hand side, as outline detail (`= 1`,
+/// `+= a + b`) — whitespace-collapsed and truncated. Disambiguates several writes
+/// to the same target, which otherwise share a label (#156).
+///
+/// Both the operator and the value come from the CST fields rather than a textual
+/// `find('=')`: a compound assignment (`+=`, `>>=`, …) is an accumulation/mutation,
+/// not a plain `=`, so it must keep its real operator; and the RHS may itself
+/// contain `=` (a `==` comparison), which the old first-`=` scan truncated. A
+/// `local` declaration has no operator field — it is always `=`.
 fn rhs_detail(node: Node) -> Option<String> {
-    let text = node.text();
-    let eq = text.find('=')?;
-    let rhs = text[eq + 1..].trim().trim_end_matches(';').trim();
+    let value = node.child_by_field(Field::Value)?;
+    let op = node
+        .child_by_field(Field::Operator)
+        .map(|o| o.text())
+        .unwrap_or("=");
+    let rhs = value
+        .text()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if rhs.is_empty() {
         return None;
     }
-    let rhs = rhs.split_whitespace().collect::<Vec<_>>().join(" ");
     let rhs = if rhs.chars().count() > 40 {
         format!("{}…", rhs.chars().take(40).collect::<String>())
     } else {
         rhs
     };
-    Some(format!("= {rhs}"))
+    Some(format!("{op} {rhs}"))
 }
 
 #[allow(deprecated)]
@@ -214,6 +226,48 @@ mod tests {
             "the two writes should be distinguishable: {outs:?}"
         );
         assert!(outs[0].detail.as_deref().unwrap().contains('1'));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn compound_assignment_detail_keeps_its_operator() {
+        // A compound assignment (`+=`, `>>=`, …) is an accumulation/mutation, not a
+        // plain `=`. The outline detail must preserve the actual operator, both so
+        // the reader sees what the statement does and so two compound writes to the
+        // same target stay distinguishable (#156). The real corpus uses these:
+        // e.g. `Energy Used += DCCurrent*DCVoltage * 0.05 * -1;`.
+        let src = "Out += 1;\nOut -= 1;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let syms = document_symbols(cst.root(), &li, PositionEncoding::Utf16);
+        let outs: Vec<_> = syms.iter().filter(|s| s.name == "Out").collect();
+        assert_eq!(outs.len(), 2, "two compound writes to Out: {syms:?}");
+        assert_eq!(
+            outs[0].detail.as_deref(),
+            Some("+= 1"),
+            "first write should show its `+=` operator, not a bare `=`"
+        );
+        assert_eq!(
+            outs[1].detail.as_deref(),
+            Some("-= 1"),
+            "second write should show its `-=` operator"
+        );
+        // …and therefore the two are distinguishable, which a bare `= 1` for both
+        // would defeat.
+        assert_ne!(outs[0].detail, outs[1].detail);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn detail_handles_rhs_containing_an_equals() {
+        // The RHS itself may contain `=` (a comparison). Detail must take the whole
+        // RHS expression, not stop at the first `=`.
+        let src = "Out = a == b;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let syms = document_symbols(cst.root(), &li, PositionEncoding::Utf16);
+        let out = syms.iter().find(|s| s.name == "Out").unwrap();
+        assert_eq!(out.detail.as_deref(), Some("= a == b"));
     }
 
     #[test]
