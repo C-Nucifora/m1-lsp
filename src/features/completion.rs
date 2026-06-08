@@ -168,6 +168,48 @@ fn chain_start(text: &str, byte: usize) -> usize {
         .unwrap_or(0)
 }
 
+/// Byte offset where the identifier/dot run *containing or starting at* `byte`
+/// ends — the forward twin of [`chain_start`]. Scans FORWARD from `byte` over
+/// path characters (alphanumerics, `_`, `.`) to the end of the dotted run.
+/// Completing in the *middle* of a chain (`Driveline.A|ccumulator.Voltage`)
+/// must replace the whole token, not just `chain_start..byte`, or accepting an
+/// item leaves the orphaned suffix `ccumulator.Voltage` after the inserted text
+/// (#…). At end-of-chain `chain_end == byte`, so the common case is unchanged.
+fn chain_end(text: &str, byte: usize) -> usize {
+    let byte = byte.min(text.len());
+    text[byte..]
+        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+        .map(|i| byte + i)
+        .unwrap_or(text.len())
+}
+
+/// `true` when `byte` sits inside a comment or string-literal node, where
+/// code completion is meaningless and would otherwise dump the whole library /
+/// keyword / symbol set into prose (#…). Walks `root`'s descendants for the
+/// smallest node whose byte range contains `byte` and checks its kind.
+///
+/// The boundary right at the *end* of a token is treated as outside the token
+/// (`start <= byte < end`), so completion still fires when the cursor sits just
+/// past a closing `"` or at the line break after a `//` comment.
+fn in_comment_or_string(root: Node, byte: usize) -> bool {
+    use m1_core::Kind;
+    let mut best: Option<Node> = None;
+    for n in root.descendants() {
+        let r = n.byte_range();
+        if r.start <= byte && byte < r.end {
+            // Prefer the smallest (innermost) containing node.
+            match &best {
+                Some(b) if (b.byte_range().end - b.byte_range().start) <= (r.end - r.start) => {}
+                _ => best = Some(n),
+            }
+        }
+    }
+    matches!(
+        best.map(|n| n.kind()),
+        Some(Kind::LineComment | Kind::BlockComment | Kind::String | Kind::Interpolation)
+    )
+}
+
 /// A project-symbol completion item that *replaces* the typed dotted chain
 /// (`range`) with `text` — both the visible label and the inserted text. Setting
 /// an explicit edit + filter is what stops the client appending the path after
@@ -200,6 +242,12 @@ pub fn completions(
     li: &crate::line_index::LineIndex,
     enc: crate::line_index::PositionEncoding,
 ) -> Vec<CompletionItem> {
+    // Inside a comment or string literal, code completion is noise — bail out
+    // with an empty list rather than dumping objects/keywords/locals (#…).
+    if in_comment_or_string(root, byte) {
+        return Vec::new();
+    }
+
     let intr = m1_typecheck::intrinsics::get();
 
     // After `Object.` where Object is a library object: just its methods.
@@ -325,7 +373,11 @@ pub fn completions(
     //    `Control.AV.Root.Control.AV.DFMM.Checkup`.
     if let Some(lp) = loaded {
         let group = file_name.and_then(|f| lp.project.group_for_script(f));
-        let edit_range = crate::convert::range(&(chain_start(text, byte)..byte), li, enc);
+        // Replace the WHOLE dotted chain under the cursor — head to tail — so
+        // completing in the middle (`Driveline.A|ccumulator.Voltage`) doesn't
+        // leave the orphaned suffix after the inserted path (#…).
+        let edit_range =
+            crate::convert::range(&(chain_start(text, byte)..chain_end(text, byte)), li, enc);
         for sym in lp.project.symbols().iter() {
             let ty = type_unit_detail(sym, &lp.project);
             let rel = sym.path.strip_prefix("Root.").unwrap_or(&sym.path);
@@ -660,6 +712,121 @@ mod tests {
             assert!(
                 item.filter_text.as_deref().unwrap_or(&item.label) == "Control.AV.DFMM.Checkup",
                 "filter_text should be the stripped path"
+            );
+        });
+    }
+
+    /// BUG 4: completing in the MIDDLE of a dotted chain must replace the WHOLE
+    /// chain (head..tail), not `chain_start..cursor`. With the cursor inside
+    /// `Accumulator` (`Driveline.A|ccumulator.Voltage`), the old edit range ended
+    /// at the cursor, so accepting `Control.AV.DFMM.Checkup` left the orphaned
+    /// suffix `ccumulator.Voltage` behind. The fix scans forward to the end of the
+    /// chain so the edit range covers the entire token.
+    #[test]
+    fn mid_chain_completion_replaces_whole_chain() {
+        use tower_lsp::lsp_types::CompletionTextEdit;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Project.m1prj"), M1PRJ_DEEP).unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        // Cursor sits right after `Driveline.A`, i.e. inside `Accumulator`.
+        let src = "local v = Driveline.Accumulator.Voltage;\n";
+        let byte = src.find("Driveline.A").unwrap() + "Driveline.A".len();
+        let chain_start = src.find("Driveline").unwrap();
+        let chain_end = src.find(';').unwrap(); // end of the dotted run
+        let cst = m1_core::parse(src);
+        let li = crate::line_index::LineIndex::new(src);
+        let enc = crate::line_index::PositionEncoding::Utf16;
+        store.with_project(|p| {
+            let items = completions(cst.root(), p, Some("X.m1scr"), src, byte, &li, enc);
+            let item = items
+                .iter()
+                .find(|i| i.label == "Control.AV.DFMM.Checkup")
+                .expect("project symbol should be offered mid-chain");
+            let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
+                panic!("completion must carry a text_edit");
+            };
+            // Range covers the FULL chain `Driveline.Accumulator.Voltage`, so
+            // accepting replaces it cleanly with no orphaned `ccumulator.Voltage`.
+            assert_eq!(
+                edit.range.start.character, chain_start as u32,
+                "edit must start at the chain head"
+            );
+            assert_eq!(
+                edit.range.end.character, chain_end as u32,
+                "edit must end at the chain tail, not the cursor"
+            );
+
+            // Simulate the client applying the edit: replace [start..end) with
+            // new_text. The result must be exactly the inserted path — no suffix.
+            let mut applied = String::new();
+            applied.push_str(&src[..chain_start]);
+            applied.push_str(&edit.new_text);
+            applied.push_str(&src[chain_end..]);
+            assert_eq!(
+                applied, "local v = Control.AV.DFMM.Checkup;\n",
+                "accepting must replace the whole chain, got {applied:?}"
+            );
+            assert!(
+                !applied.contains("ccumulator"),
+                "no orphaned suffix may survive, got {applied:?}"
+            );
+        });
+    }
+
+    /// BUG 5: completion must NOT fire inside line comments, block comments, or
+    /// string literals — it would otherwise dump the whole library/keyword set
+    /// into prose. Normal code positions still return items.
+    #[test]
+    fn no_completion_inside_comments_and_strings() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Project.m1prj"), M1PRJ).unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+        let li = |s: &str| crate::line_index::LineIndex::new(s);
+        let enc = crate::line_index::PositionEncoding::Utf16;
+
+        // Inside a line comment.
+        let line_c = "// some Calc note\n";
+        let lc_byte = line_c.find("Calc").unwrap() + 2; // inside the comment text
+        // Inside a block comment.
+        let block_c = "/* some Calc note */\n";
+        let bc_byte = block_c.find("Calc").unwrap() + 2;
+        // Inside a string literal.
+        let string_l = "local s = \"some Calc text\";\n";
+        let sl_byte = string_l.find("Calc").unwrap() + 2;
+        // Normal code (control: must still return items).
+        let code = "local x = \n";
+        let code_byte = code.find('\n').unwrap();
+
+        store.with_project(|p| {
+            let comp = |src: &str, byte: usize| {
+                completions(
+                    m1_core::parse(src).root(),
+                    p,
+                    Some("X.m1scr"),
+                    src,
+                    byte,
+                    &li(src),
+                    enc,
+                )
+            };
+            assert!(
+                comp(line_c, lc_byte).is_empty(),
+                "no completion inside a line comment"
+            );
+            assert!(
+                comp(block_c, bc_byte).is_empty(),
+                "no completion inside a block comment"
+            );
+            assert!(
+                comp(string_l, sl_byte).is_empty(),
+                "no completion inside a string literal"
+            );
+            assert!(
+                !comp(code, code_byte).is_empty(),
+                "completion still fires in normal code"
             );
         });
     }
