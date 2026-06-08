@@ -34,6 +34,14 @@ pub struct Backend {
     /// `initialize`). When it does, multi-file / file-renaming renames are tagged
     /// with a confirmation annotation so the client can preview them (#151).
     change_annotation_support: std::sync::atomic::AtomicBool,
+    /// Whether the client supports pull diagnostics (`textDocument/diagnostic`),
+    /// set during `initialize`. When it does, the server serves diagnostics via
+    /// the pull handlers ONLY and does not also push `publishDiagnostics`: pushing
+    /// to a pull-capable client makes editors that keep push and pull diagnostics
+    /// in separate collections (VS Code) display every diagnostic twice. Pull
+    /// clients re-request open docs on change themselves; for project-model
+    /// changes the server nudges them with `workspace/diagnostic/refresh`.
+    client_pull_diagnostics: std::sync::atomic::AtomicBool,
     /// The resolved unified config (lint/format/diagnostics) currently applied to
     /// the backends. Re-resolved on root discovery, `m1-tools.toml` change, and
     /// `didChangeConfiguration`; its `diagnostics` filter is read on every publish.
@@ -77,6 +85,7 @@ impl Backend {
             store,
             watch_dynamic: std::sync::atomic::AtomicBool::new(false),
             change_annotation_support: std::sync::atomic::AtomicBool::new(false),
+            client_pull_diagnostics: std::sync::atomic::AtomicBool::new(false),
             config: std::sync::RwLock::new(M1Config::default()),
             editor_settings: std::sync::RwLock::new(None),
             config_root: std::sync::RwLock::new(None),
@@ -255,6 +264,15 @@ impl Backend {
     }
 
     async fn publish(&self, uri: Url) {
+        // Pull-capable clients re-request `textDocument/diagnostic` for a document
+        // on open/change themselves; also pushing would duplicate every diagnostic
+        // in clients that keep push and pull in separate collections (VS Code).
+        if self
+            .client_pull_diagnostics
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
         // Push is only for open buffers; the version comes from the open doc.
         // (Closed-file coverage is the pull path's job, #140.)
         let Some(version) = self.docs.get(&uri).map(|d| d.version) else {
@@ -273,6 +291,17 @@ impl Backend {
     /// set (clearing stale entries) when the project loaded cleanly with no
     /// findings; a no-op when no project is loaded.
     async fn publish_project_diagnostics(&self) {
+        // Pull-capable clients receive project-scope diagnostics via
+        // `workspace/diagnostic`; after a project-model change (reload, `.m1prj`
+        // or config edit) nudge them to re-pull instead of pushing — pushing here
+        // too would duplicate diagnostics in VS Code (#NNN).
+        if self
+            .client_pull_diagnostics
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let _ = self.client.workspace_diagnostic_refresh().await;
+            return;
+        }
         let Some(prj_path) = self
             .store
             .with_project(|p| p.map(|lp| lp.m1prj_path.clone()))
@@ -302,6 +331,18 @@ impl Backend {
         let version = self.docs.get(&uri).map(|d| d.version);
         self.client.publish_diagnostics(uri, diags, version).await;
     }
+}
+
+/// Whether the client advertised support for pull diagnostics
+/// (`textDocument/diagnostic`). When true, the server must serve diagnostics via
+/// the pull handlers ONLY and not also push `publishDiagnostics` — pushing to a
+/// pull-capable client doubles every diagnostic in editors (VS Code) that keep
+/// push and pull diagnostics in separate collections.
+fn client_supports_pull_diagnostics(caps: &ClientCapabilities) -> bool {
+    caps.text_document
+        .as_ref()
+        .and_then(|t| t.diagnostic.as_ref())
+        .is_some()
 }
 
 /// True when `uri` points at a `Project.m1prj` (or any `.m1prj`) project file.
@@ -404,6 +445,16 @@ fn server_capabilities(encoding: PositionEncodingKind) -> ServerCapabilities {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // Record whether the client supports pull diagnostics (read before the
+        // encoding negotiation below moves fields out of `capabilities`). If it
+        // does, the server serves diagnostics via the pull handlers ONLY and
+        // suppresses the push path — otherwise a pull-capable client that keeps
+        // push and pull in separate collections (VS Code) shows everything twice.
+        self.client_pull_diagnostics.store(
+            client_supports_pull_diagnostics(&params.capabilities),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         // Negotiate position encoding: the client's list is in PREFERENCE
         // order (LSP spec), so pick the first entry we support (UTF-16 or
         // UTF-8). Default to UTF-16 when none is offered/supported.
@@ -1426,5 +1477,41 @@ impl LanguageServer for Backend {
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod pull_diagnostics_tests {
+    use super::client_supports_pull_diagnostics;
+    use tower_lsp::lsp_types::{
+        ClientCapabilities, DiagnosticClientCapabilities, TextDocumentClientCapabilities,
+    };
+
+    // Regression guard: a client that advertises `textDocument/diagnostic` (pull)
+    // must be detected so the server suppresses the push path. Pushing as well
+    // doubles every diagnostic in VS Code (push + pull land in separate
+    // collections — observed 292 instead of 146 on the EV-M1 corpus).
+    #[test]
+    fn pull_capability_is_detected() {
+        let mut caps = ClientCapabilities::default();
+        assert!(
+            !client_supports_pull_diagnostics(&caps),
+            "no textDocument capabilities => legacy push client"
+        );
+
+        caps.text_document = Some(TextDocumentClientCapabilities::default());
+        assert!(
+            !client_supports_pull_diagnostics(&caps),
+            "textDocument without `diagnostic` => legacy push client"
+        );
+
+        caps.text_document = Some(TextDocumentClientCapabilities {
+            diagnostic: Some(DiagnosticClientCapabilities::default()),
+            ..Default::default()
+        });
+        assert!(
+            client_supports_pull_diagnostics(&caps),
+            "textDocument.diagnostic present => pull client (push must be suppressed)"
+        );
     }
 }
