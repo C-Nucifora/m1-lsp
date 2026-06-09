@@ -107,6 +107,7 @@ fn enum_member_completions(
         locals: std::collections::HashMap::new(),
         group,
         project: Some(&lp.project),
+        fn_symbol: None,
     };
     let Resolution::Symbol(sym) = resolve(lhs, &scope) else {
         return None;

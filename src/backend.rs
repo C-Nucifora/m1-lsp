@@ -42,6 +42,13 @@ pub struct Backend {
     /// clients re-request open docs on change themselves; for project-model
     /// changes the server nudges them with `workspace/diagnostic/refresh`.
     client_pull_diagnostics: std::sync::atomic::AtomicBool,
+    /// Client supports `workspace/inlayHint/refresh` / `…/semanticTokens/refresh`
+    /// / `…/codeLens/refresh` — nudged after every project-model reload so unit
+    /// hints, token colors and rate lenses don't go stale until the user types
+    /// (#232).
+    inlay_refresh_support: std::sync::atomic::AtomicBool,
+    semtok_refresh_support: std::sync::atomic::AtomicBool,
+    code_lens_refresh_support: std::sync::atomic::AtomicBool,
     /// The resolved unified config (lint/format/diagnostics) currently applied to
     /// the backends. Re-resolved on root discovery, `m1-tools.toml` change, and
     /// `didChangeConfiguration`; its `diagnostics` filter is read on every publish.
@@ -52,6 +59,11 @@ pub struct Backend {
     /// The project root last used to resolve config, so `didChangeConfiguration`
     /// can re-resolve against the same workspace.
     config_root: std::sync::RwLock<Option<std::path::PathBuf>>,
+    /// Per-document snapshot of the last full semantic-token response
+    /// (`result_id` → token data), backing `semanticTokens/full/delta` (#231).
+    semtok_prev: DashMap<Url, (String, Vec<SemanticToken>)>,
+    /// Monotonic source of semantic-token result ids.
+    semtok_seq: std::sync::atomic::AtomicU64,
 }
 
 /// Everything a request handler needs about one open document, gathered once: the
@@ -112,9 +124,14 @@ impl Backend {
             watch_dynamic: std::sync::atomic::AtomicBool::new(false),
             change_annotation_support: std::sync::atomic::AtomicBool::new(false),
             client_pull_diagnostics: std::sync::atomic::AtomicBool::new(false),
+            inlay_refresh_support: std::sync::atomic::AtomicBool::new(false),
+            semtok_refresh_support: std::sync::atomic::AtomicBool::new(false),
+            code_lens_refresh_support: std::sync::atomic::AtomicBool::new(false),
             config: std::sync::RwLock::new(M1Config::default()),
             editor_settings: std::sync::RwLock::new(None),
             config_root: std::sync::RwLock::new(None),
+            semtok_prev: DashMap::new(),
+            semtok_seq: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -138,6 +155,13 @@ impl Backend {
         if let Some(root) = root {
             self.apply_config(&root);
         }
+    }
+
+    /// Next semantic-token `result_id` (#231).
+    fn next_semtok_id(&self) -> String {
+        self.semtok_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .to_string()
     }
 
     fn enc(&self) -> PositionEncoding {
@@ -282,9 +306,11 @@ impl Backend {
                 .store
                 .with_project(|p| p.and_then(|lp| Url::from_file_path(&lp.m1prj_path).ok()));
             return Some(if active.as_ref() == Some(uri) {
+                let filter = self.config.read().unwrap().diagnostics.clone();
                 self.store
                     .project_diagnostics()
                     .iter()
+                    .filter(|d| filter.allows_subject(d.code.as_str(), d.subject.as_deref()))
                     .map(|d| crate::convert::type_diagnostic(d, &lindex, enc))
                     .collect()
             } else {
@@ -329,7 +355,29 @@ impl Backend {
     /// project loads, matching what the CLI reports (#139). Publishes an empty
     /// set (clearing stale entries) when the project loaded cleanly with no
     /// findings; a no-op when no project is loaded.
+    /// Nudge the client to re-pull every project-derived view (#232): inlay
+    /// hints (`[unit]` badges), semantic tokens and code lenses are all
+    /// computed from the project model, so they go stale on `.m1prj`/config
+    /// reload until the client refreshes them. Each refresh is gated on the
+    /// capability the client declared at initialize.
+    async fn refresh_project_views(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if self.inlay_refresh_support.load(Relaxed) {
+            let _ = self.client.inlay_hint_refresh().await;
+        }
+        if self.semtok_refresh_support.load(Relaxed) {
+            let _ = self.client.semantic_tokens_refresh().await;
+        }
+        if self.code_lens_refresh_support.load(Relaxed) {
+            let _ = self.client.code_lens_refresh().await;
+        }
+    }
+
     async fn publish_project_diagnostics(&self) {
+        // Every caller of this function has just (re)loaded the project model,
+        // so the project-derived views need a refresh too (#232).
+        self.refresh_project_views().await;
+
         // Pull-capable clients receive project-scope diagnostics via
         // `workspace/diagnostic`; after a project-model change (reload, `.m1prj`
         // or config edit) nudge them to re-pull instead of pushing — pushing here
@@ -361,10 +409,12 @@ impl Backend {
             .unwrap_or_default();
         let li = crate::line_index::LineIndex::new(&text);
         let enc = self.enc();
+        let filter = self.config.read().unwrap().diagnostics.clone();
         let diags: Vec<Diagnostic> = self
             .store
             .project_diagnostics()
             .iter()
+            .filter(|d| filter.allows_subject(d.code.as_str(), d.subject.as_deref()))
             .map(|d| crate::convert::type_diagnostic(d, &li, enc))
             .collect();
         let version = self.docs.get(&uri).map(|d| d.version);
@@ -407,6 +457,12 @@ fn server_capabilities(encoding: PositionEncodingKind) -> ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         document_formatting_provider: Some(OneOf::Left(true)),
         document_range_formatting_provider: Some(OneOf::Left(true)),
+        // #234: re-indent the just-closed block when `}` is typed — pasted
+        // code in a different style snaps to Allman/tab layout live.
+        document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
+            first_trigger_character: "}".to_string(),
+            more_trigger_character: None,
+        }),
         workspace_symbol_provider: Some(OneOf::Left(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
@@ -472,7 +528,7 @@ fn server_capabilities(encoding: PositionEncodingKind) -> ServerCapabilities {
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 legend: semantic_tokens::legend(),
-                full: Some(SemanticTokensFullOptions::Bool(true)),
+                full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
                 range: Some(true),
                 work_done_progress_options: Default::default(),
             },
@@ -526,6 +582,31 @@ impl LanguageServer for Backend {
             .unwrap_or(false);
         self.watch_dynamic
             .store(supports_watch, std::sync::atomic::Ordering::Relaxed);
+
+        // Refresh-support capabilities (#232), read before `capabilities` is
+        // partially moved below.
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            let ws = params.capabilities.workspace.as_ref();
+            self.inlay_refresh_support.store(
+                ws.and_then(|w| w.inlay_hint.as_ref())
+                    .and_then(|c| c.refresh_support)
+                    .unwrap_or(false),
+                Relaxed,
+            );
+            self.semtok_refresh_support.store(
+                ws.and_then(|w| w.semantic_tokens.as_ref())
+                    .and_then(|c| c.refresh_support)
+                    .unwrap_or(false),
+                Relaxed,
+            );
+            self.code_lens_refresh_support.store(
+                ws.and_then(|w| w.code_lens.as_ref())
+                    .and_then(|c| c.refresh_support)
+                    .unwrap_or(false),
+                Relaxed,
+            );
+        }
 
         // Record whether the client supports change annotations, so a multi-file /
         // file-renaming rename can carry a confirmation preview (#151).
@@ -681,6 +762,7 @@ impl LanguageServer for Backend {
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
         self.docs.remove(&uri);
+        self.semtok_prev.remove(&uri);
         // The graph would now read this file from disk instead of the buffer.
         self.store.invalidate_call_graph();
         self.client.publish_diagnostics(uri, vec![], None).await;
@@ -703,6 +785,25 @@ impl LanguageServer for Backend {
             .docs
             .get(&uri)
             .and_then(|doc| range_format_edits(&doc, params.range, self.formatter.as_ref())))
+    }
+
+    async fn on_type_formatting(
+        &self,
+        params: DocumentOnTypeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        // Triggered after `}` (#234): range-format the line that was just
+        // closed. `range_format_edits` snaps to the deepest statement spanning
+        // it (m1-fmt #98), so this re-indents exactly the closed construct.
+        let pos = params.text_document_position.position;
+        let uri = params.text_document_position.text_document.uri;
+        let range = tower_lsp::lsp_types::Range::new(
+            Position::new(pos.line, 0),
+            Position::new(pos.line, pos.character),
+        );
+        Ok(self
+            .docs
+            .get(&uri)
+            .and_then(|doc| range_format_edits(&doc, range, self.formatter.as_ref())))
     }
 
     #[allow(deprecated)]
@@ -945,9 +1046,17 @@ impl LanguageServer for Backend {
 
     async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
         let uri = params.text_document.uri;
+        // The logging/security badges (#171/#172) resolve the channels the
+        // script writes, which needs its text: prefer the open buffer, fall
+        // back to disk.
+        let text = self.docs.get(&uri).map(|d| d.text.clone()).or_else(|| {
+            uri.to_file_path()
+                .ok()
+                .and_then(|p| crate::disk_read::read_disk(&p))
+        });
         Ok(self
             .store
-            .with_project(|p| p.map(|lp| code_lens::code_lens(lp, &uri))))
+            .with_project(|p| p.map(|lp| code_lens::code_lens(lp, &uri, text.as_deref()))))
     }
 
     async fn prepare_call_hierarchy(
@@ -1118,10 +1227,54 @@ impl LanguageServer for Backend {
                 doc.enc,
             )
         });
+        let id = self.next_semtok_id();
+        self.semtok_prev.insert(
+            params.text_document.uri.clone(),
+            (id.clone(), tokens.clone()),
+        );
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
-            result_id: None,
+            result_id: Some(id),
             data: tokens,
         })))
+    }
+
+    async fn semantic_tokens_full_delta(
+        &self,
+        params: SemanticTokensDeltaParams,
+    ) -> Result<Option<SemanticTokensFullDeltaResult>> {
+        let uri = params.text_document.uri;
+        let Some(doc) = self.doc_context(&uri) else {
+            return Ok(None);
+        };
+        let cst = doc.parse();
+        let tokens = self.store.with_project(|p| {
+            semantic_tokens::semantic_tokens(
+                cst.root(),
+                p.map(|lp| &lp.project),
+                doc.file_name.as_deref(),
+                &doc.line_index,
+                doc.enc,
+            )
+        });
+        let id = self.next_semtok_id();
+        let prev = self
+            .semtok_prev
+            .insert(uri.clone(), (id.clone(), tokens.clone()));
+        // Only diff against the snapshot the client says it holds; anything
+        // else (restart, eviction) falls back to a full response.
+        let matching_prev = prev
+            .filter(|(prev_id, _)| *prev_id == params.previous_result_id)
+            .map(|(_, data)| data);
+        Ok(Some(match matching_prev {
+            Some(prev_data) => SemanticTokensFullDeltaResult::TokensDelta(SemanticTokensDelta {
+                result_id: Some(id),
+                edits: crate::semtok_delta::single_splice_edit(&prev_data, &tokens),
+            }),
+            None => SemanticTokensFullDeltaResult::Tokens(SemanticTokens {
+                result_id: Some(id),
+                data: tokens,
+            }),
+        }))
     }
 
     async fn semantic_tokens_range(

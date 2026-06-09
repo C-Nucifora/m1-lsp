@@ -12,4 +12,5 @@ pub mod format;
 pub mod line_index;
 pub mod lint_backend;
 pub mod project_store;
+pub(crate) mod semtok_delta;
 pub mod type_backend;

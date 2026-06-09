@@ -266,10 +266,33 @@ pub fn incoming(
     let mut out = Vec::new();
     match item_tag(item)? {
         Tag::Channel(path) => {
+            // The fastest writer of this channel bounds how fresh a read can
+            // be — a strictly faster reader sees stale values between writer
+            // ticks (#237; static sibling: m1-typecheck T089).
+            let max_writer_hz = graph
+                .writers
+                .get(&path)
+                .into_iter()
+                .flatten()
+                .filter_map(|&w| graph.scripts[w].rate_hz)
+                .fold(None::<f64>, |acc, hz| {
+                    Some(acc.map_or(hz, |a: f64| a.max(hz)))
+                });
             for &i in graph.readers.get(&path)? {
                 let node = &graph.scripts[i];
+                let mut from = graph.script_item(node);
+                if let (Some(r), Some(w)) = (node.rate_hz, max_writer_hz)
+                    && r > w
+                {
+                    let d = from.detail.take().unwrap_or_default();
+                    from.detail = Some(format!(
+                        "{d} ⚠ reads at {} Hz a channel written at {} Hz",
+                        fmt_hz(r),
+                        fmt_hz(w)
+                    ));
+                }
                 out.push(CallHierarchyIncomingCall {
-                    from: graph.script_item(node),
+                    from,
                     from_ranges: node.reads.get(&path).cloned().unwrap_or_default(),
                 });
             }
