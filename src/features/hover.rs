@@ -838,6 +838,7 @@ mod tests {
             log_rate_hz: None,
             tags: Vec::new(),
             return_type: None,
+            in_params: None,
             table_meta: None,
         }
     }
@@ -902,6 +903,7 @@ mod tests {
             log_rate_hz: None,
             tags: Vec::new(),
             return_type: None,
+            in_params: None,
             table_meta: None,
         };
         let md = symbol_markdown(&sym, None);
@@ -928,6 +930,7 @@ mod tests {
             log_rate_hz: None,
             tags: Vec::new(),
             return_type: None,
+            in_params: None,
             table_meta: None,
         };
         let md = symbol_markdown(&sym, None);
@@ -973,6 +976,7 @@ mod tests {
             log_rate_hz: None,
             tags: Vec::new(),
             return_type: None,
+            in_params: None,
             table_meta: Some(TableMeta {
                 axes: vec![
                     TableAxis {
@@ -1022,6 +1026,7 @@ mod tests {
             log_rate_hz: None,
             tags: Vec::new(),
             return_type: None,
+            in_params: None,
             table_meta: None,
         };
         let md = symbol_markdown(&sym, None);

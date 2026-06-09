@@ -21,11 +21,29 @@ use std::path::Path;
 #[derive(Debug, Clone, Default)]
 pub struct DiagFilter {
     pub ignore: HashSet<String>,
+    /// Symbol-scoped suppressions (`[diagnostics] ignore_symbols`, #151):
+    /// `(code, symbol_path)` pairs dropping one project-level finding without
+    /// silencing the whole code.
+    pub ignore_symbols: HashSet<(String, String)>,
     pub select: HashSet<String>,
 }
 
 impl DiagFilter {
     /// Whether a diagnostic with this code should be published.
+    /// [`Self::allows`] plus the symbol-scoped check for project-level
+    /// diagnostics that carry a subject (#151).
+    pub fn allows_subject(&self, code: &str, subject: Option<&str>) -> bool {
+        if !self.allows(code) {
+            return false;
+        }
+        match subject {
+            Some(s) => !self
+                .ignore_symbols
+                .contains(&(code.to_string(), s.to_string())),
+            None => true,
+        }
+    }
+
     pub fn allows(&self, code: &str) -> bool {
         if !self.select.is_empty() && !self.select.contains(code) {
             return false;
@@ -35,7 +53,7 @@ impl DiagFilter {
 
     /// True when no filtering is configured (the common case — skip the walk).
     pub fn is_empty(&self) -> bool {
-        self.ignore.is_empty() && self.select.is_empty()
+        self.ignore.is_empty() && self.select.is_empty() && self.ignore_symbols.is_empty()
     }
 }
 
@@ -121,6 +139,13 @@ fn apply(tc: M1ToolsConfig, cfg: &mut M1Config) {
     }
     if let Some(ig) = tc.diagnostics.ignore {
         cfg.diagnostics.ignore = ig.into_iter().collect();
+    }
+    if let Some(igs) = tc.diagnostics.ignore_symbols {
+        cfg.diagnostics.ignore_symbols = igs
+            .iter()
+            .filter_map(|e| m1_workspace::parse_ignore_symbol(e))
+            .map(|(c, p)| (c.to_string(), p.to_string()))
+            .collect();
     }
     if let Some(se) = tc.diagnostics.select {
         cfg.diagnostics.select = se.into_iter().collect();

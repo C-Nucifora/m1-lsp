@@ -236,6 +236,7 @@ fn collect_locals_with(
                 locals: locals.clone(),
                 group: group.map(str::to_string),
                 project,
+                fn_symbol: None,
             };
             let t = local_decl_type(n, &scope);
             locals.insert(name.text().to_string(), t);
@@ -262,10 +263,17 @@ pub fn build_scope<'p>(
         (Some(p), Some(f)) => p.group_for_script(f),
         _ => None,
     };
+    // The backing function symbol anchors `In.<Param>` resolution (#110), so
+    // hover/completion inside a callee see declared parameter types.
+    let fn_symbol = match (project, file_name) {
+        (Some(p), Some(f)) => p.function_symbol_for_script(f),
+        _ => None,
+    };
     Scope {
         locals: collect_locals_with(root, project, group.as_deref()),
         group,
         project,
+        fn_symbol,
     }
 }
 
