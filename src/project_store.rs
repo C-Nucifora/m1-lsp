@@ -305,6 +305,7 @@ impl ProjectStore {
                 let mut v = lp.project.missing_cfg_parameters();
                 v.extend(lp.project.audit());
                 v.extend(lp.project.audit_tags());
+                v.extend(lp.project.audit_display_units());
                 let scripts = scripts_from_disk(&lp.script_files);
                 v.extend(m1_typecheck::schedule::check(
                     &lp.project,
