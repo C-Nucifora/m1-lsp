@@ -308,7 +308,7 @@ impl Backend {
             return Some(if active.as_ref() == Some(uri) {
                 let filter = self.config.read().unwrap().diagnostics.clone();
                 self.store
-                    .project_diagnostics()
+                    .project_diagnostics_with(filter.select.contains("T092"))
                     .iter()
                     .filter(|d| filter.allows_subject(d.code.as_str(), d.subject.as_deref()))
                     .map(|d| crate::convert::type_diagnostic(d, &lindex, enc))
@@ -412,7 +412,7 @@ impl Backend {
         let filter = self.config.read().unwrap().diagnostics.clone();
         let diags: Vec<Diagnostic> = self
             .store
-            .project_diagnostics()
+            .project_diagnostics_with(filter.select.contains("T092"))
             .iter()
             .filter(|d| filter.allows_subject(d.code.as_str(), d.subject.as_deref()))
             .map(|d| crate::convert::type_diagnostic(d, &li, enc))

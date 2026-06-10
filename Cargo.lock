@@ -586,33 +586,33 @@ dependencies = [
  "clap",
  "libc",
  "m1-core",
- "m1-workspace 0.8.0",
+ "m1-workspace",
  "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]
 name = "m1-lint"
-version = "0.13.0"
-source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.13.0#8395dcf7214f63a4b5dcb4ba476f4a604083d044"
+version = "0.14.0"
+source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.14.0#5b62307a55eee36b91d75865474944246d5c6c8f"
 dependencies = [
  "clap",
  "glob",
  "m1-core",
- "m1-workspace 0.8.0",
+ "m1-workspace",
  "serde_json",
  "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]
 name = "m1-lsp"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "dashmap 6.2.1",
  "m1-core",
  "m1-fmt",
  "m1-lint",
  "m1-typecheck",
- "m1-workspace 0.8.0",
+ "m1-workspace",
  "serde",
  "serde_json",
  "tempfile",
@@ -623,25 +623,16 @@ dependencies = [
 
 [[package]]
 name = "m1-typecheck"
-version = "0.28.0"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.28.0#6df9048acacfdc51337b8b433eec38291561f92e"
+version = "0.29.0"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.29.0#ddc312b96267c4409a468b6574db98aad71f9bbb"
 dependencies = [
  "clap",
  "m1-core",
- "m1-workspace 0.7.0",
+ "m1-workspace",
  "roxmltree",
  "serde",
  "serde_json",
  "toml 1.1.2+spec-1.1.0",
-]
-
-[[package]]
-name = "m1-workspace"
-version = "0.7.0"
-source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.7.0#9d595a955c682d5aaa0bc14404e2a4f969ab6e87"
-dependencies = [
- "serde",
- "toml 0.8.23",
 ]
 
 [[package]]
