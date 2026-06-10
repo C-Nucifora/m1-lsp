@@ -251,10 +251,25 @@ impl ProjectStore {
     /// project, and the LSP anchors them to the `.m1prj` (#139). Empty when no
     /// project is loaded.
     pub fn project_diagnostics(&self) -> Vec<m1_typecheck::diagnostics::TypeDiagnostic> {
+        self.project_diagnostics_with(false)
+    }
+
+    /// [`Self::project_diagnostics`] plus, when `tags_audit` is set, the opt-in
+    /// M1 Build tag-warning parity audit (T092). Mirrors the CLI: T092 runs
+    /// only under an explicit `--select`/`[diagnostics] select` — an *empty*
+    /// select allows every code through the filter, so including T092
+    /// unconditionally would flood untagged-by-choice projects by default.
+    pub fn project_diagnostics_with(
+        &self,
+        tags_audit: bool,
+    ) -> Vec<m1_typecheck::diagnostics::TypeDiagnostic> {
         self.with_project(|p| match p {
             Some(lp) => {
                 let mut v = lp.project.missing_cfg_parameters();
                 v.extend(lp.project.audit());
+                if tags_audit {
+                    v.extend(lp.project.audit_tags());
+                }
                 v
             }
             None => Vec::new(),
@@ -488,6 +503,34 @@ mod tests {
     fn project_diagnostics_empty_when_no_project() {
         let store = ProjectStore::new();
         assert!(store.project_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn tags_audit_is_gated_on_the_select_opt_in() {
+        // T092 (untagged-component) is opt-in: absent from the default set,
+        // present only when the caller passes tags_audit (i.e. `select`
+        // names T092) — an empty select would otherwise let it flood.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("Project.m1prj"),
+            "<?xml version=\"1.0\"?>\n<Project>\n\
+             <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root.A\"/>\n\
+             <Component Classname=\"BuiltIn.Channel\" Name=\"Root.A.Chan\"><Props Type=\"u32\"/></Component>\n\
+             </Project>",
+        )
+        .unwrap();
+        let store = ProjectStore::new();
+        assert!(store.discover_and_load(tmp.path()).unwrap());
+        let t092 = |v: &[m1_typecheck::diagnostics::TypeDiagnostic]| {
+            v.iter()
+                .filter(|d| d.code == m1_typecheck::diagnostics::TypeCode::T092)
+                .count()
+        };
+        assert_eq!(t092(&store.project_diagnostics()), 0, "default: no T092");
+        assert!(
+            t092(&store.project_diagnostics_with(true)) >= 2,
+            "opted in: the untagged channel flags both tag groups"
+        );
     }
 
     #[test]
