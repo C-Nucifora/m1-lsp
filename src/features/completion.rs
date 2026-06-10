@@ -867,8 +867,10 @@ mod tests {
 
     #[test]
     fn calibration_only_objects_not_offered_in_completion() {
-        // Math / UI are calibration-method-only objects; they must not be offered
-        // in ECU .m1scr completion. ECU objects (Calculate, System) still are.
+        // UI is calibration-method-only; it must not be offered in ECU .m1scr
+        // completion. Math carries ECU functions (lowercase `fabs`, `sqrt`, ...
+        // — the real corpus calls Math.fabs in scripts) alongside its
+        // calibration-only PascalCase set, so it IS offered.
         let src = "\n";
         let cst = m1_core::parse(src);
         let items = completions(
@@ -889,7 +891,10 @@ mod tests {
             labels.contains(&"System"),
             "System offered (has ECU functions)"
         );
-        assert!(!labels.contains(&"Math"), "Math is calibration-only");
+        assert!(
+            labels.contains(&"Math"),
+            "Math offered (has ECU functions like fabs)"
+        );
         assert!(!labels.contains(&"UI"), "UI is calibration-only");
     }
 
