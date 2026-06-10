@@ -147,6 +147,23 @@ fn walk_scripts(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Read each cached script path into a `(basename, source)` pair for the
+/// project-wide scheduling/usage checks ([`m1_typecheck::schedule`]). The key is
+/// the file's basename (not a relative path) because
+/// `Project::function_symbol_for_script` matches on the basename — this mirrors
+/// the CLI's `gather_project_scripts`. Tolerant decode (UTF-8 → Windows-1252) so
+/// a `°`-bearing MoTeC script is included; an unreadable file is skipped.
+fn scripts_from_disk(script_files: &[PathBuf]) -> Vec<(String, String)> {
+    script_files
+        .iter()
+        .filter_map(|p| {
+            let name = p.file_name()?.to_str()?.to_string();
+            let src = crate::disk_read::read_disk(p)?;
+            Some((name, src))
+        })
+        .collect()
+}
+
 /// Apply the disk-sourced `.m1cfg`/`.m1dbc` augmentation to a freshly-parsed
 /// project. Shared by `load_from` (parse from the file) and
 /// `reload_from_m1prj_text` (parse from edited in-memory text); the cfg/dbc are
@@ -246,30 +263,61 @@ impl ProjectStore {
     }
 
     /// Project-scope diagnostics for the loaded project: the `.m1cfg`-coverage
-    /// audit (T041) plus the symbol-name / component audit (T050/T010/T071).
-    /// These are not tied to any one script — the CLI emits them once per
-    /// project, and the LSP anchors them to the `.m1prj` (#139). Empty when no
-    /// project is loaded.
+    /// audit (T041), the symbol-name / component audits (T050/T010/T071), and
+    /// the M1-Build-parity checks (T092 tags, T088 circular schedule, T093/T094
+    /// unassigned-channel / unread-parameter). These are not tied to any one
+    /// script — the CLI emits them once per project, and the LSP anchors them to
+    /// the `.m1prj` (#139). The opt-in T089 is excluded here; use
+    /// [`Self::project_diagnostics_with`] to include it. Empty when no project
+    /// is loaded.
     pub fn project_diagnostics(&self) -> Vec<m1_typecheck::diagnostics::TypeDiagnostic> {
         self.project_diagnostics_with(false)
     }
 
-    /// [`Self::project_diagnostics`] plus, when `tags_audit` is set, the opt-in
-    /// M1 Build tag-warning parity audit (T092). Mirrors the CLI: T092 runs
-    /// only under an explicit `--select`/`[diagnostics] select` — an *empty*
-    /// select allows every code through the filter, so including T092
-    /// unconditionally would flood untagged-by-choice projects by default.
+    /// [`Self::project_diagnostics`] plus the project-wide checks that M1 Build
+    /// itself reports, so the editor mirrors a *Validate Project* run (the CLI
+    /// runs these by default too — this is the LSP catching up, #145):
+    ///
+    /// - **T092** untagged-component (tag warnings 1142/1549) — `audit_tags`,
+    /// - **T088** circular-dependency (warning 1640) — `schedule::check`,
+    /// - **T093/T094** unassigned-channel / unread-parameter (errors 1627/1631)
+    ///   — `schedule::check_usage`.
+    ///
+    /// All of these are **default-on** because M1 Build emits exactly them; a
+    /// team that doesn't want one drops it with `[diagnostics] ignore` (the
+    /// downstream `allows_subject` filter), the same lever the CLI uses. The one
+    /// opt-in is **T089** rate-inversion, which M1 Build does *not* flag — it
+    /// runs only when `rate_inversion` is set (i.e. `select` names T089).
+    ///
+    /// The scheduling/usage checks need the **complete** project script set (a
+    /// missing writer would make its channels look never-assigned), so they read
+    /// every `.m1scr` under the root from disk — exactly like the CLI's
+    /// `gather_project_scripts`, keyed by basename to match
+    /// `Project::function_symbol_for_script`. Project-scope diagnostics are
+    /// recomputed on project (re)load, not per-keystroke, so the per-call script
+    /// re-read is not on a hot path.
     pub fn project_diagnostics_with(
         &self,
-        tags_audit: bool,
+        rate_inversion: bool,
     ) -> Vec<m1_typecheck::diagnostics::TypeDiagnostic> {
         self.with_project(|p| match p {
             Some(lp) => {
                 let mut v = lp.project.missing_cfg_parameters();
                 v.extend(lp.project.audit());
-                if tags_audit {
-                    v.extend(lp.project.audit_tags());
-                }
+                v.extend(lp.project.audit_tags());
+                let scripts = scripts_from_disk(&lp.script_files);
+                v.extend(m1_typecheck::schedule::check(
+                    &lp.project,
+                    &scripts,
+                    true,
+                    rate_inversion,
+                ));
+                v.extend(m1_typecheck::schedule::check_usage(
+                    &lp.project,
+                    &scripts,
+                    true,
+                    true,
+                ));
                 v
             }
             None => Vec::new(),
@@ -494,8 +542,10 @@ mod tests {
         assert!(
             !diags
                 .iter()
-                .any(|d| d.inner.message.contains("Root.A.Covered")),
-            "a covered parameter must not be flagged"
+                .any(|d| d.code == m1_typecheck::diagnostics::TypeCode::T041
+                    && d.inner.message.contains("Root.A.Covered")),
+            "a cfg-covered parameter must not be flagged T041 (it may still draw \
+             a default-on T094 'never read', which is correct — no script reads it)"
         );
     }
 
@@ -506,10 +556,12 @@ mod tests {
     }
 
     #[test]
-    fn tags_audit_is_gated_on_the_select_opt_in() {
-        // T092 (untagged-component) is opt-in: absent from the default set,
-        // present only when the caller passes tags_audit (i.e. `select`
-        // names T092) — an empty select would otherwise let it flood.
+    fn tag_and_usage_audits_are_default_on() {
+        // The M1-Build-parity checks now run by default (matching the CLI and a
+        // *Validate Project* run): an untagged channel flags T092 in both tag
+        // groups, and a channel no script assigns flags T093 — all without any
+        // `select` opt-in. Only T089 (rate-inversion, which M1 Build does not
+        // emit) stays gated on the `rate_inversion` flag.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
             tmp.path().join("Project.m1prj"),
@@ -521,15 +573,19 @@ mod tests {
         .unwrap();
         let store = ProjectStore::new();
         assert!(store.discover_and_load(tmp.path()).unwrap());
-        let t092 = |v: &[m1_typecheck::diagnostics::TypeDiagnostic]| {
-            v.iter()
-                .filter(|d| d.code == m1_typecheck::diagnostics::TypeCode::T092)
-                .count()
+        let count = |v: &[m1_typecheck::diagnostics::TypeDiagnostic],
+                     code: m1_typecheck::diagnostics::TypeCode| {
+            v.iter().filter(|d| d.code == code).count()
         };
-        assert_eq!(t092(&store.project_diagnostics()), 0, "default: no T092");
+        let diags = store.project_diagnostics();
         assert!(
-            t092(&store.project_diagnostics_with(true)) >= 2,
-            "opted in: the untagged channel flags both tag groups"
+            count(&diags, m1_typecheck::diagnostics::TypeCode::T092) >= 2,
+            "default-on: the untagged channel flags both tag groups; got {diags:?}"
+        );
+        assert_eq!(
+            count(&diags, m1_typecheck::diagnostics::TypeCode::T093),
+            1,
+            "default-on: the never-assigned channel flags T093; got {diags:?}"
         );
     }
 
