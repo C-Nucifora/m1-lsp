@@ -51,7 +51,22 @@ fn object_markdown(sym: &Symbol) -> Option<String> {
         return None;
     }
     let mut s = match &sym.class {
-        Some(class) => format!("class: `{class}`"),
+        Some(class) => {
+            let mut s = format!("class: `{class}`");
+            // Help summary from the M1 Build help-capture catalogue, matched
+            // on the full class name or its leaf ("MoTeC Input.Sensor" →
+            // "Sensor"). Internal spellings (`_IOMethod.*`) have no capture
+            // and stay summary-less.
+            let intr = m1_typecheck::intrinsics::get();
+            if let Some(doc) = intr.class_doc(class).or_else(|| {
+                class
+                    .split_once('.')
+                    .and_then(|(_, leaf)| intr.class_doc(leaf))
+            }) {
+                s.push_str(&format!("\n\n{doc}"));
+            }
+            s
+        }
         None => "object".to_string(),
     };
     if let Some(can) = &sym.can
@@ -959,6 +974,28 @@ mod tests {
         sym.tags = vec!["Engine".into(), "Normal".into()];
         let md = symbol_markdown(&sym, None);
         assert!(md.contains("tags: `Engine` `Normal`"), "got: {md}");
+    }
+
+    #[test]
+    fn object_hover_includes_class_help_summary() {
+        // Capture docs match on the class leaf: "MoTeC Input.Sensor" → "Sensor".
+        let mut sym = channel(ValueType::Unknown, None);
+        sym.kind = SymbolKind::Object;
+        sym.class = Some("MoTeC Input.Sensor".into());
+        let md = object_markdown(&sym).unwrap();
+        assert!(md.contains("class: `MoTeC Input.Sensor`"), "got: {md}");
+        assert!(md.contains("require calibration"), "got: {md}");
+    }
+
+    #[test]
+    fn object_hover_without_capture_doc_shows_class_only() {
+        // Internal spellings (`_IOMethod.*`) have no capture entry.
+        let mut sym = channel(ValueType::Unknown, None);
+        sym.kind = SymbolKind::Object;
+        sym.class = Some("_IOMethod.av_switch".into());
+        let md = object_markdown(&sym).unwrap();
+        assert!(md.contains("class: `_IOMethod.av_switch`"), "got: {md}");
+        assert!(!md.contains("\n\n"), "no summary expected: {md}");
     }
 
     #[test]
