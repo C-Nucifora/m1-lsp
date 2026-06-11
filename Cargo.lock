@@ -586,7 +586,7 @@ dependencies = [
  "clap",
  "libc",
  "m1-core",
- "m1-workspace",
+ "m1-workspace 0.8.0",
  "toml 1.1.2+spec-1.1.0",
 ]
 
@@ -598,7 +598,7 @@ dependencies = [
  "clap",
  "glob",
  "m1-core",
- "m1-workspace",
+ "m1-workspace 0.8.0",
  "serde_json",
  "toml 1.1.2+spec-1.1.0",
 ]
@@ -612,7 +612,7 @@ dependencies = [
  "m1-fmt",
  "m1-lint",
  "m1-typecheck",
- "m1-workspace",
+ "m1-workspace 0.8.1",
  "serde",
  "serde_json",
  "tempfile",
@@ -628,7 +628,7 @@ source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.34.0#b5043da
 dependencies = [
  "clap",
  "m1-core",
- "m1-workspace",
+ "m1-workspace 0.8.0",
  "roxmltree",
  "serde",
  "serde_json",
@@ -642,6 +642,15 @@ source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.8.0#fd7986d19d2
 dependencies = [
  "serde",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "m1-workspace"
+version = "0.8.1"
+source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.8.1#20c4a9cd4ed6c5087433abf89dfb405c95e2bfac"
+dependencies = [
+ "serde",
+ "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]
