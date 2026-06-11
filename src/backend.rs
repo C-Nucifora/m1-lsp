@@ -454,6 +454,24 @@ fn editor_settings(v: serde_json::Value) -> serde_json::Value {
 fn server_capabilities(encoding: PositionEncodingKind) -> ServerCapabilities {
     ServerCapabilities {
         position_encoding: Some(encoding),
+        // willRenameFiles (#250): renaming a .m1scr in the explorer updates
+        // the .m1prj mapping / runs the inverse group cascade.
+        workspace: Some(WorkspaceServerCapabilities {
+            workspace_folders: None,
+            file_operations: Some(WorkspaceFileOperationsServerCapabilities {
+                will_rename: Some(FileOperationRegistrationOptions {
+                    filters: vec![FileOperationFilter {
+                        scheme: Some("file".to_string()),
+                        pattern: FileOperationPattern {
+                            glob: "**/*.m1scr".to_string(),
+                            matches: Some(FileOperationPatternKind::File),
+                            options: None,
+                        },
+                    }],
+                }),
+                ..Default::default()
+            }),
+        }),
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         document_formatting_provider: Some(OneOf::Left(true)),
         document_range_formatting_provider: Some(OneOf::Left(true)),
@@ -1139,6 +1157,51 @@ impl LanguageServer for Backend {
                 p.map(|lp| &lp.project),
                 doc.file_name.as_deref(),
             )
+        }))
+    }
+
+    async fn will_rename_files(&self, params: RenameFilesParams) -> Result<Option<WorkspaceEdit>> {
+        // Renaming a `.m1scr` in the explorer is the inverse gesture of a
+        // symbol rename (#250): update the explicit `Filename=` attribute, or
+        // run the group cascade when the new basename implies a different
+        // group segment. Convention-breaking renames get a warning instead of
+        // silently dangling references.
+        let enc = *self.encoding.read().unwrap();
+        let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
+        let mut all_ops: Vec<DocumentChangeOperation> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
+        tokio::task::block_in_place(|| {
+            self.store.with_project(|p| {
+                let Some(lp) = p else { return };
+                for f in &params.files {
+                    let (Ok(old_uri), Ok(new_uri)) =
+                        (Url::parse(&f.old_uri), Url::parse(&f.new_uri))
+                    else {
+                        continue;
+                    };
+                    match rename::execute_file_rename(&old_uri, &new_uri, enc, lp, &open_text) {
+                        Ok(Some(edit)) => {
+                            if let Some(DocumentChanges::Operations(ops)) = edit.document_changes {
+                                all_ops.extend(ops);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(msg) => warnings.push(msg),
+                    }
+                }
+            })
+        });
+        for msg in warnings {
+            self.client
+                .show_message(MessageType::WARNING, format!("m1-lsp: {msg}"))
+                .await;
+        }
+        if all_ops.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(WorkspaceEdit {
+            document_changes: Some(DocumentChanges::Operations(all_ops)),
+            ..Default::default()
         }))
     }
 
