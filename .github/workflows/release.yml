@@ -101,7 +101,7 @@ jobs:
           codesign --force --sign - "out/m1-lsp-${{ matrix.target }}${{ matrix.ext }}"
           codesign --verify --verbose "out/m1-lsp-${{ matrix.target }}${{ matrix.ext }}"
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: out/*
       - uses: actions/upload-artifact@v7
@@ -122,14 +122,57 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: v${{ needs.check.outputs.version }}
         run: |
-          # Create the release if absent, otherwise upload the binaries to the
-          # existing one (--clobber overwrites any partial uploads). This repairs
-          # a release that exists but is missing its binaries.
+          # Checksum manifest covering every released binary; the release notes
+          # explain how to verify it (and the build provenance) after download.
+          (cd out && sha256sum * > SHA256SUMS)
+
+          # Release body: auto-generated "What's Changed" (PR list + full
+          # changelog link) followed by install + verification instructions.
+          # PR titles may contain backticks, so the generated half must never
+          # pass through an unquoted heredoc; the static half is a quoted
+          # heredoc with placeholders substituted afterwards.
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
+            -q .body > body.md || echo "_Generated notes unavailable._" > body.md
+          cat >> body.md <<'NOTES'
+
+          ## Install
+
+          Prebuilt binaries of the **m1-lsp** language server. The [nvim-m1](https://github.com/C-Nucifora/nvim-m1) plugin and the [m1-vscode](https://github.com/nedlane/m1-vscode) extension download the pinned server automatically — manual install is only needed for other editors:
+
+          | Platform | Asset |
+          | --- | --- |
+          | Linux x86_64 | [`m1-lsp-x86_64-unknown-linux-gnu`](https://github.com/{{REPO}}/releases/download/{{TAG}}/m1-lsp-x86_64-unknown-linux-gnu) |
+          | macOS Apple Silicon | [`m1-lsp-aarch64-apple-darwin`](https://github.com/{{REPO}}/releases/download/{{TAG}}/m1-lsp-aarch64-apple-darwin) |
+          | Windows x86_64 | [`m1-lsp-x86_64-pc-windows-msvc.exe`](https://github.com/{{REPO}}/releases/download/{{TAG}}/m1-lsp-x86_64-pc-windows-msvc.exe) |
+
+          Download the binary for your platform, rename it to `m1-lsp` (`m1-lsp.exe` on Windows), mark it executable (`chmod +x m1-lsp`), and move it onto your `PATH`. On macOS, clear the download quarantine first: `xattr -d com.apple.quarantine m1-lsp`.
+
+          Or build from source on any platform (incl. Intel macOS):
+
+          ```sh
+          cargo install --git https://github.com/{{REPO}} --tag {{TAG}}
+          ```
+
+          ## Verify the download
+
+          `SHA256SUMS` covers every binary, and each binary carries GitHub build provenance:
+
+          ```sh
+          sha256sum --check --ignore-missing SHA256SUMS
+          gh attestation verify m1-lsp-x86_64-unknown-linux-gnu --repo {{REPO}}
+          ```
+          NOTES
+          sed -i "s|{{REPO}}|$GITHUB_REPOSITORY|g; s|{{TAG}}|$TAG|g" body.md
+
+          # Create the release if absent, otherwise upload the assets to the
+          # existing one (--clobber overwrites any partial uploads). The body is
+          # only set on create, so a self-heal never overwrites edited notes.
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" out/* --clobber --repo "$GITHUB_REPOSITORY"
           else
             gh release create "$TAG" out/* \
               --repo "$GITHUB_REPOSITORY" \
               --title "m1-lsp $TAG" \
-              --notes "Prebuilt m1-lsp server binaries (Linux/macOS/Windows). Consumed by the m1-vscode extension."
+              --notes-file body.md
           fi
