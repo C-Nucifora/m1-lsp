@@ -522,6 +522,83 @@ async fn workspace_diagnostic_covers_all_project_scripts() {
     }
 }
 
+// #259: a `textDocument/diagnostic` poll returns a `resultId`; re-polling with
+// that `previousResultId` while nothing changed must return an `unchanged`
+// report bearing the same id, instead of re-sending the full item set.
+// The pull path now runs `diagnostics_for` under `block_in_place` (#258), which
+// requires the multi-threaded runtime — the current-thread test runtime would
+// panic, so opt into multi_thread here (same as the other pull-diagnostic tests).
+#[tokio::test(flavor = "multi_thread")]
+async fn pull_diagnostic_returns_unchanged_for_matching_result_id() {
+    use std::io::Write;
+    use tower_lsp::lsp_types::Url;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let scripts = tmp.path().join("Scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    std::fs::File::create(tmp.path().join("Project.m1prj"))
+        .unwrap()
+        .write_all(b"<?xml version=\"1.0\"?>\n<Project>\n  <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root\"/>\n</Project>")
+        .unwrap();
+    let script = scripts.join("Widget.m1scr");
+    std::fs::write(&script, "local x = 0;\nx = a == b;\n").unwrap();
+
+    let root_uri = Url::from_file_path(tmp.path()).unwrap();
+    let script_uri = Url::from_file_path(&script).unwrap();
+
+    let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+            "params":{"capabilities":{},"processId":null,"rootUri":root_uri}}),
+    )
+    .await;
+    let _ = read_response(&mut client, 1).await;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+
+    // First poll: full report with a result id.
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":2,"method":"textDocument/diagnostic","params":{
+            "textDocument":{"uri":script_uri}}}),
+    )
+    .await;
+    let first = read_response(&mut client, 2).await;
+    assert_eq!(first["result"]["kind"], json!("full"), "got {first}");
+    let result_id = first["result"]["resultId"]
+        .as_str()
+        .expect("full report must carry a resultId")
+        .to_string();
+
+    // Second poll with that id, nothing changed: unchanged report, same id.
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":3,"method":"textDocument/diagnostic","params":{
+            "textDocument":{"uri":script_uri},"previousResultId":result_id}}),
+    )
+    .await;
+    let second = read_response(&mut client, 3).await;
+    assert_eq!(
+        second["result"]["kind"],
+        json!("unchanged"),
+        "re-poll with a matching previousResultId must be unchanged; got {second}"
+    );
+    assert_eq!(
+        second["result"]["resultId"],
+        json!(result_id),
+        "unchanged report must echo the stable result id; got {second}"
+    );
+}
+
 // Direct-call tests of the pure analysis path (no transport needed).
 #[test]
 fn analyze_reports_syntax_error() {
