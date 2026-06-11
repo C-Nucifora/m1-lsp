@@ -69,6 +69,74 @@ fn lint_code(d: &Diagnostic) -> Option<&str> {
     }
 }
 
+/// A rule code an in-source `// @m1:allow(…)` can suppress: `L\d{3}` / `T\d{3}`.
+/// Syntax codes (`missing-token`, …) and the zero-range project-audit family
+/// (anchored on the `.m1prj`, suppressed via `--ignore-symbol`/m1-tools.toml,
+/// never surfaced on a script) don't qualify.
+fn suppressable_code(d: &Diagnostic) -> Option<&str> {
+    match &d.code {
+        Some(NumberOrString::String(s))
+            if s.len() == 4
+                && (s.starts_with('L') || s.starts_with('T'))
+                && s[1..].bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            Some(s)
+        }
+        _ => None,
+    }
+}
+
+/// The innermost statement-kind node covering byte `offset` — the construct an
+/// `@m1:allow` line inserted above it attaches to (m1-lint suppresses a
+/// diagnostic when the annotation target's lines cover the diagnostic line, so
+/// inserting above the *statement* also reaches findings on its continuation
+/// lines). Iterative walk, matching the crate's no-recursion convention.
+fn statement_at<'a>(root: Node<'a>, offset: usize) -> Option<Node<'a>> {
+    fn is_statement(k: Kind) -> bool {
+        matches!(
+            k,
+            Kind::AssignmentStatement
+                | Kind::LocalDeclaration
+                | Kind::IfStatement
+                | Kind::WhenStatement
+                | Kind::ExpandStatement
+                | Kind::ExpressionStatement
+        )
+    }
+    let mut best: Option<Node> = None;
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        let r = n.byte_range();
+        if offset < r.start || offset >= r.end {
+            continue;
+        }
+        if is_statement(n.kind()) {
+            best = Some(n);
+        }
+        stack.extend(n.children());
+    }
+    best
+}
+
+/// 0-based line of `byte` within `text` (count of preceding newlines) —
+/// mirrors m1-lint's `runner.rs` helper so the two agree on attachment lines.
+fn byte_line(text: &str, byte: usize) -> u32 {
+    let b = byte.min(text.len());
+    text.as_bytes()[..b].iter().filter(|&&c| c == b'\n').count() as u32
+}
+
+/// The human label for the construct a suppression targets.
+fn construct_label(kind: Kind) -> &'static str {
+    match kind {
+        Kind::AssignmentStatement => "assignment",
+        Kind::LocalDeclaration => "local",
+        Kind::IfStatement => "if statement",
+        Kind::WhenStatement => "when block",
+        Kind::ExpandStatement => "expand",
+        _ => "statement",
+    }
+}
+
 /// True for diagnostics whose fix is an operator→keyword swap: the syntax-level
 /// `unsupported-c-token`, and the lint-level L004 (`eq`-operator) / L005 (spelled
 /// logical operator), whose ranges also cover the operator.
@@ -257,6 +325,77 @@ pub fn code_actions(
             }],
             Some(d),
         ));
+    }
+
+    // Suppression quick-fix (#249): `// @m1:allow(<code>)` above the enclosing
+    // statement — the in-editor entry point to the toolchain's in-source
+    // suppression (m1-core#33), honoured by m1-lint and m1-typecheck alike.
+    // Low-priority by design (`is_preferred: false`): fix what should be
+    // fixed, suppress what is intentional.
+    if uri.path().ends_with(".m1scr") {
+        let mut cst = None;
+        for d in diagnostics {
+            let Some(code) = suppressable_code(d) else {
+                continue;
+            };
+            let offset = li.offset(d.range.start, text, enc);
+            let cst = cst.get_or_insert_with(|| m1_core::parse(text));
+            let (line, label) = match statement_at(cst.root(), offset) {
+                Some(stmt) => (
+                    byte_line(text, stmt.byte_range().start),
+                    construct_label(stmt.kind()),
+                ),
+                None => (d.range.start.line, "line"),
+            };
+            // An existing annotation line directly above: append to its args
+            // instead of stacking a second line (skip entirely when the code
+            // is already listed — the finding is already suppressed there).
+            let prev = line
+                .checked_sub(1)
+                .and_then(|l| text.lines().nth(l as usize));
+            let edit = match prev.and_then(|p| p.split_once("@m1:allow(")) {
+                Some((_, rest)) => {
+                    let args = rest.split(')').next().unwrap_or("");
+                    if args.split(',').any(|a| a.trim() == code) {
+                        continue;
+                    }
+                    let p = prev.unwrap();
+                    let Some(close) = p.rfind(')') else {
+                        continue;
+                    };
+                    // Splice `, <code>` in front of the closing paren.
+                    TextEdit {
+                        range: Range::new(
+                            Position::new(line - 1, 0),
+                            Position::new(line - 1, p.chars().count() as u32),
+                        ),
+                        new_text: format!("{}, {code}{}", &p[..close], &p[close..]),
+                    }
+                }
+                None => {
+                    let indent = line_indent(text, li, enc, line);
+                    let pos = Position::new(line, 0);
+                    TextEdit {
+                        range: Range::new(pos, pos),
+                        new_text: format!("{indent}// @m1:allow({code})\n"),
+                    }
+                }
+            };
+            let mut changes = HashMap::new();
+            changes.insert(uri.clone(), vec![edit]);
+            out.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: format!("Suppress {code} for this {label}"),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![d.clone()]),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    document_changes: None,
+                    change_annotations: None,
+                }),
+                is_preferred: Some(false),
+                ..Default::default()
+            }));
+        }
     }
 
     // Bulk "fix all <code> in file" for the operator lints, when >1 occurs.
@@ -1204,5 +1343,103 @@ mod tests {
                 "expected a did-you-mean fix; got {titles:?}"
             );
         });
+    }
+
+    // --- #249 @m1:allow suppression quick-fix ------------------------------
+
+    /// A diagnostic with `code`, spanning the first occurrence of `needle`.
+    fn coded_diag(src: &str, needle: &str, code: &str, li: &LineIndex) -> Diagnostic {
+        let s = src.find(needle).unwrap();
+        Diagnostic {
+            range: Range::new(li.position(s, ENC), li.position(s + needle.len(), ENC)),
+            severity: Some(DiagnosticSeverity::WARNING),
+            code: Some(NumberOrString::String(code.into())),
+            message: "finding".into(),
+            ..Default::default()
+        }
+    }
+
+    /// Run `code_actions` for one diagnostic and apply the suppress action's
+    /// edits, returning the new source (None when no suppress action exists).
+    fn suppressed(src: &str, needle: &str, code: &str) -> Option<String> {
+        let li = LineIndex::new(src);
+        let d = coded_diag(src, needle, code, &li);
+        let actions = code_actions(src, &li, ENC, &uri(), std::slice::from_ref(&d), None);
+        let edits = actions.iter().find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) if ca.title.starts_with("Suppress") => {
+                ca.edit.as_ref()?.changes.as_ref()?.get(&uri()).cloned()
+            }
+            _ => None,
+        })?;
+        Some(apply(src, &edits, &li))
+    }
+
+    #[test]
+    fn suppress_action_inserts_allow_line() {
+        let src = "when (Mode) {\n\tis (On) {\n\t\tRatio=2;\n\t}\n}\n";
+        let got = suppressed(src, "Ratio=2;", "L007").expect("suppress action");
+        assert_eq!(
+            got,
+            "when (Mode) {\n\tis (On) {\n\t\t// @m1:allow(L007)\n\t\tRatio=2;\n\t}\n}\n",
+            "annotation above the statement, matching its indentation"
+        );
+    }
+
+    #[test]
+    fn suppress_action_targets_enclosing_statement() {
+        // The finding sits on the continuation line of a multi-line assignment;
+        // the annotation must land above the statement's FIRST line (m1-lint
+        // attaches @allow to the construct whose lines cover the diagnostic).
+        let src = "Out =\n\tA +\n\tB == 1.5;\n";
+        let got = suppressed(src, "B == 1.5", "T002").expect("suppress action");
+        assert_eq!(got, "// @m1:allow(T002)\nOut =\n\tA +\n\tB == 1.5;\n");
+    }
+
+    #[test]
+    fn suppress_action_appends_to_existing_annotation() {
+        let src = "\t// @m1:allow(L002)\n\tRatio=2;\n";
+        let got = suppressed(src, "Ratio=2;", "L007").expect("suppress action");
+        assert_eq!(got, "\t// @m1:allow(L002, L007)\n\tRatio=2;\n");
+    }
+
+    #[test]
+    fn suppress_action_not_offered_when_already_listed() {
+        let src = "// @m1:allow(L007)\nRatio=2;\n";
+        assert!(
+            suppressed(src, "Ratio=2;", "L007").is_none(),
+            "no action when the code is already suppressed"
+        );
+    }
+
+    #[test]
+    fn suppress_action_skips_non_code_diagnostics() {
+        let src = "Ratio == 2;\n";
+        assert!(suppressed(src, "==", "missing-token").is_none());
+        assert!(suppressed(src, "==", "unsupported-c-token").is_none());
+        assert!(suppressed(src, "==", "syntax").is_none());
+        assert!(suppressed(src, "==", "T002").is_some(), "T-codes are offered");
+    }
+
+    #[test]
+    fn suppress_edit_actually_suppresses() {
+        // End-to-end against the real linter: a trailing-whitespace finding
+        // (L002), suppressed via the action's own edit, must vanish on re-lint.
+        let src = "Ratio = 2; \n";
+        let runner = m1_lint::runner::Runner::new(m1_lint::registry::Registry::from_config(
+            &m1_lint::config::Config::default(),
+        ));
+        let before = runner.run_source(src);
+        let d = before
+            .diagnostics
+            .iter()
+            .find(|d| d.code.to_string() == "L002")
+            .expect("L002 fires on trailing whitespace");
+        assert_eq!(d.inner.range.start.line, 0);
+        let edited = suppressed(src, "Ratio", "L002").expect("suppress action");
+        let after = runner.run_source(&edited);
+        assert!(
+            !after.diagnostics.iter().any(|d| d.code.to_string() == "L002"),
+            "the inserted annotation silences the finding: {edited:?}"
+        );
     }
 }
