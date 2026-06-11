@@ -81,10 +81,6 @@ pub(crate) fn gather_project_scripts(
     out
 }
 
-/// Maximum directory depth [`walk_scripts`] descends (defense-in-depth against a
-/// pathologically deep tree).
-const MAX_WALK_DEPTH: usize = 64;
-
 /// Join an (untrusted) `.m1prj` `Filename=` value to the project root, rejecting
 /// anything that would escape the project tree.
 ///
@@ -113,38 +109,11 @@ pub(crate) fn contained_join(root: &Path, filename: &str) -> Option<PathBuf> {
 /// real `.m1prj` typically omits `Filename=` (scripts are matched to components
 /// by the path-encoding convention) — so the symbol-based list would be empty.
 /// Computed once at load and cached in [`LoadedProject::script_files`] for the
-/// workspace-wide features (cross-file references, rename).
+/// workspace-wide features (cross-file references, rename). Discovery goes
+/// through the shared hardened walk ([`m1_workspace::find_scripts`]:
+/// symlink-skip, depth cap — the m1-workspace#7 guarantees — #256).
 fn walk_scripts(root: &Path) -> Vec<PathBuf> {
-    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
-        if depth > MAX_WALK_DEPTH {
-            return;
-        }
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for e in entries.flatten() {
-            // Use the entry's own (non-following) file type: a crafted in-tree
-            // symlink to an out-of-tree directory must not be descended, or the
-            // server would enumerate arbitrary host `*.m1scr` files into the
-            // workspace symbol set (mirrors m1-workspace#7).
-            let Ok(ft) = e.file_type() else {
-                continue;
-            };
-            if ft.is_symlink() {
-                continue;
-            }
-            let p = e.path();
-            if ft.is_dir() {
-                walk(&p, depth + 1, out);
-            } else if p.extension().and_then(|x| x.to_str()) == Some("m1scr") {
-                out.push(p);
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(root, 0, &mut out);
-    out.sort();
-    out
+    m1_workspace::find_scripts(root)
 }
 
 /// Read each cached script path into a `(basename, source)` pair for the

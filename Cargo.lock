@@ -580,25 +580,25 @@ dependencies = [
 
 [[package]]
 name = "m1-fmt"
-version = "0.10.0"
-source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.10.0#4ce042084a5405bd04fe02cb49c84fb78b3ad9ed"
+version = "0.11.0"
+source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.11.0#02e077bd07abfe1f0c647f4fd66807b5f4f9027e"
 dependencies = [
  "clap",
  "libc",
  "m1-core",
- "m1-workspace 0.8.0",
+ "m1-workspace 0.8.1",
  "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]
 name = "m1-lint"
-version = "0.15.0"
-source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.15.0#42eb4c559c49555c9e5881e96b268a8e505d7915"
+version = "0.16.0"
+source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.16.0#3267c69d2fcedfd4207ea2fa5de4ed948d6d6b87"
 dependencies = [
  "clap",
  "glob",
  "m1-core",
- "m1-workspace 0.8.0",
+ "m1-workspace 0.8.1",
  "serde_json",
  "toml 1.1.2+spec-1.1.0",
 ]
