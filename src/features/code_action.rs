@@ -245,7 +245,8 @@ pub fn code_actions(
             "{indent}-- TODO: `{kw}` is not supported in M1 — rewrite as a WhenStatement\n\
              {indent}When State.Phase {{\n\
              {indent}    Is Phase.Init: -- …\n\
-             {indent}}}\n"
+             {indent}}}
+"
         );
         let pos = Position::new(line, 0);
         out.push(quickfix(
@@ -257,6 +258,35 @@ pub fn code_actions(
             }],
             Some(d),
         ));
+    }
+
+    // Suppress-with-`@m1:allow` (#249): for every diagnostic carrying a lint
+    // L-code or typecheck T-code, offer the in-source suppression the whole
+    // toolchain honours — `// @m1:allow(CODE)` on its own line above the
+    // enclosing statement (or appended to an existing standalone allow line).
+    // Offered only where it provably silences: the diagnostic must sit inside
+    // a statement that starts its own line (the annotation attaches to the
+    // next statement, so a comment-line or shared-line target would miss).
+    if diagnostics.iter().any(|d| suppress_code(d).is_some()) {
+        let cst = m1_core::parse(text);
+        for d in diagnostics.iter() {
+            let Some(code) = suppress_code(d) else {
+                continue;
+            };
+            if let Some(edit) = suppress_edit(text, li, enc, &cst, d, code) {
+                let mut action = quickfix(
+                    format!("Suppress {code} for this statement"),
+                    uri,
+                    vec![edit],
+                    Some(d),
+                );
+                if let CodeActionOrCommand::CodeAction(ca) = &mut action {
+                    // Never outrank a real fix for the same diagnostic.
+                    ca.is_preferred = Some(false);
+                }
+                out.push(action);
+            }
+        }
     }
 
     // Bulk "fix all <code> in file" for the operator lints, when >1 occurs.
@@ -332,6 +362,88 @@ fn enclosing_statement(n: Node) -> Node {
         cur = p;
     }
     cur
+}
+
+/// The suppressible diagnostic code: a lint `L0xx` or typecheck `T0xx`.
+/// Syntax errors (string codes like `unsupported-c-token`) carry no rule code
+/// and cannot be `@m1:allow`'d.
+fn suppress_code(d: &Diagnostic) -> Option<&str> {
+    match &d.code {
+        Some(NumberOrString::String(s))
+            if s.len() == 4
+                && (s.starts_with('L') || s.starts_with('T'))
+                && s[1..].chars().all(|c| c.is_ascii_digit()) =>
+        {
+            Some(s)
+        }
+        _ => None,
+    }
+}
+
+/// The edit inserting (or extending) the `@m1:allow` suppression for `d`.
+///
+/// `None` when the diagnostic is not inside a statement that starts its own
+/// line — e.g. a finding on a comment-only line, at end-of-file, or on the
+/// second statement of a shared line — where a leading annotation would attach
+/// to a different construct and not silence the finding.
+fn suppress_edit(
+    text: &str,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    cst: &m1_core::Cst,
+    d: &Diagnostic,
+    code: &str,
+) -> Option<TextEdit> {
+    let offset = li.offset(d.range.start, text, enc);
+    let node = cst.node_at_offset(offset);
+    let stmt = enclosing_statement(node);
+    if matches!(stmt.kind(), Kind::LineComment | Kind::BlockComment) {
+        return None;
+    }
+    let stmt_range = stmt.byte_range();
+    if !(stmt_range.start <= offset && offset <= stmt_range.end) {
+        return None;
+    }
+
+    // The statement must start its own line (anything before it is indent).
+    let stmt_line = stmt.range().start.line;
+    let line_start = text[..stmt_range.start].rfind('\n').map_or(0, |i| i + 1);
+    let indent = &text[line_start..stmt_range.start];
+    if !indent.chars().all(|c| c == ' ' || c == '\t') {
+        return None;
+    }
+
+    // An existing standalone `// @m1:allow(...)` directly above: append the
+    // code to its list instead of stacking a second annotation line.
+    if stmt_line > 0 {
+        let prev_start = li.offset(Position::new(stmt_line - 1, 0), text, enc);
+        let prev_end = line_start.saturating_sub(1); // strip the `\n`
+        let prev_line = &text[prev_start..prev_end];
+        let trimmed = prev_line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("//")
+            && let Some(args) = rest.trim_start().strip_prefix("@m1:allow(")
+            && let Some(close) = args.find(')')
+        {
+            if args[..close].split(',').any(|c| c.trim() == code) {
+                return None; // already listed — nothing useful to offer
+            }
+            let insert_at = prev_start
+                + (prev_line.len() - prev_line.trim_start().len())
+                + (trimmed.len() - args.len())
+                + close;
+            let pos = li.position(insert_at, enc);
+            return Some(TextEdit {
+                range: Range::new(pos, pos),
+                new_text: format!(", {code}"),
+            });
+        }
+    }
+
+    let pos = Position::new(stmt_line, 0);
+    Some(TextEdit {
+        range: Range::new(pos, pos),
+        new_text: format!("{indent}// @m1:allow({code})\n"),
+    })
 }
 
 /// True when `n` lies within the `target` (lvalue) side of an assignment — a
@@ -1083,7 +1195,8 @@ mod tests {
     fn while_offers_only_the_whenstatement_template() {
         // `while` has no operator replacement, but now offers the WhenStatement
         // skeleton (#83) — and nothing else.
-        let src = "while (1) {}\n";
+        let src = "while (1) {}
+";
         let li = LineIndex::new(src);
         let d = diag_for(src, "while", &li);
         let actions = code_actions(src, &li, PositionEncoding::Utf16, &uri(), &[d], None);
@@ -1204,5 +1317,109 @@ mod tests {
                 "expected a did-you-mean fix; got {titles:?}"
             );
         });
+    }
+
+    // --- #249 suppress-with-@m1:allow ---------------------------------------
+
+    /// Build a diagnostic with `code` spanning the first occurrence of `needle`.
+    fn coded_diag(src: &str, needle: &str, code: &str, li: &LineIndex) -> Diagnostic {
+        let start = src.find(needle).unwrap();
+        Diagnostic {
+            range: Range::new(
+                li.position(start, ENC),
+                li.position(start + needle.len(), ENC),
+            ),
+            severity: Some(DiagnosticSeverity::WARNING),
+            code: Some(NumberOrString::String(code.into())),
+            message: "finding".into(),
+            ..Default::default()
+        }
+    }
+
+    /// The applied result of the "Suppress …" action, if offered.
+    fn suppressed(src: &str, needle: &str, code: &str) -> Option<String> {
+        let li = LineIndex::new(src);
+        let d = coded_diag(src, needle, code, &li);
+        let actions = code_actions(src, &li, ENC, &uri(), std::slice::from_ref(&d), None);
+        let edits = action_edits(&actions, &format!("Suppress {code} for this statement"))?;
+        Some(apply(src, &edits, &li))
+    }
+
+    #[test]
+    fn suppress_inserts_annotation_above_statement() {
+        let out = suppressed("x = 1;\ny    = 2;\n", "y", "L007").unwrap();
+        assert_eq!(out, "x = 1;\n// @m1:allow(L007)\ny    = 2;\n");
+    }
+
+    #[test]
+    fn suppress_matches_block_indentation() {
+        let src = "if (a)\n{\n\ty = 2;\n}
+";
+        let out = suppressed(src, "y", "T030").unwrap();
+        assert_eq!(
+            out,
+            "if (a)\n{\n\t// @m1:allow(T030)\n\ty = 2;\n}
+"
+        );
+    }
+
+    #[test]
+    fn suppress_appends_to_existing_allow_line() {
+        let src = "// @m1:allow(L010)\ny = 2;\n";
+        let out = suppressed(src, "y", "L007").unwrap();
+        assert_eq!(out, "// @m1:allow(L010, L007)\ny = 2;\n");
+    }
+
+    #[test]
+    fn suppress_not_offered_when_code_already_listed() {
+        assert!(suppressed("// @m1:allow(L007)\ny = 2;\n", "y", "L007").is_none());
+    }
+
+    #[test]
+    fn suppress_not_offered_on_comment_lines() {
+        // e.g. an L001 line-too-long on a comment-only line: a leading
+        // annotation would attach to the next statement, not the comment.
+        assert!(suppressed("// some very long comment\nx = 1;\n", "long", "L001").is_none());
+    }
+
+    #[test]
+    fn suppress_not_offered_for_second_statement_on_a_line() {
+        assert!(suppressed("x = 1; y = 2;\n", "y = 2", "L021").is_none());
+    }
+
+    #[test]
+    fn suppress_not_offered_for_syntax_codes() {
+        let src = "x == 1;\n";
+        let li = LineIndex::new(src);
+        let d = diag_for(src, "==", &li);
+        let actions = code_actions(src, &li, ENC, &uri(), std::slice::from_ref(&d), None);
+        assert!(
+            action_edits(&actions, "Suppress unsupported-c-token for this statement").is_none()
+        );
+    }
+
+    #[test]
+    fn suppress_provably_silences_the_lint_finding() {
+        // End-to-end through the real m1-lint engine: take a live finding,
+        // apply the suppression edit, re-lint, and the finding is gone.
+        use crate::analysis::LintProvider;
+        let backend = crate::lint_backend::M1Lint::new();
+        let src = "x = a == b;\n";
+        let li = LineIndex::new(src);
+        let diags = backend.lint(src, &li, ENC);
+        let d = diags
+            .iter()
+            .find(|d| suppress_code(d) == Some("L004"))
+            .expect("live L004 finding")
+            .clone();
+        let actions = code_actions(src, &li, ENC, &uri(), std::slice::from_ref(&d), None);
+        let edits = action_edits(&actions, "Suppress L004 for this statement").unwrap();
+        let fixed = apply(src, &edits, &li);
+        let li2 = LineIndex::new(&fixed);
+        let after = backend.lint(&fixed, &li2, ENC);
+        assert!(
+            !after.iter().any(|d| suppress_code(d) == Some("L004")),
+            "L004 still present after suppression:\n{fixed}"
+        );
     }
 }
