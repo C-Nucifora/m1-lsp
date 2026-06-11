@@ -307,11 +307,14 @@ impl ProjectStore {
                 v.extend(lp.project.audit_tags());
                 v.extend(lp.project.audit_display_units());
                 let scripts = scripts_from_disk(&lp.script_files);
+                // T088 and T097 (recursive-call, m1-typecheck#187) are
+                // default-on like the CLI; T089 stays behind its opt-in.
                 v.extend(m1_typecheck::schedule::check(
                     &lp.project,
                     &scripts,
                     true,
                     rate_inversion,
+                    true,
                 ));
                 v.extend(m1_typecheck::schedule::check_usage(
                     &lp.project,

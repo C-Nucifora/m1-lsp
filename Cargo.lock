@@ -571,8 +571,8 @@ dependencies = [
 
 [[package]]
 name = "m1-core"
-version = "0.8.0"
-source = "git+https://github.com/C-Nucifora/m1-core.git?tag=v0.8.0#f93f0df82371648329e1226203ad1dabbecb750c"
+version = "0.9.0"
+source = "git+https://github.com/C-Nucifora/m1-core.git?tag=v0.9.0#99a73de538b602691cd915ac2c3b456eb50fe173"
 dependencies = [
  "tree-sitter",
  "tree-sitter-m1",
@@ -580,8 +580,8 @@ dependencies = [
 
 [[package]]
 name = "m1-fmt"
-version = "0.9.0"
-source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.9.0#562974161a6772fd9dc7b8dcbb0215905a279917"
+version = "0.10.0"
+source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.10.0#4ce042084a5405bd04fe02cb49c84fb78b3ad9ed"
 dependencies = [
  "clap",
  "libc",
@@ -592,8 +592,8 @@ dependencies = [
 
 [[package]]
 name = "m1-lint"
-version = "0.14.0"
-source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.14.0#5b62307a55eee36b91d75865474944246d5c6c8f"
+version = "0.15.0"
+source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.15.0#42eb4c559c49555c9e5881e96b268a8e505d7915"
 dependencies = [
  "clap",
  "glob",
@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "m1-lsp"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "dashmap 6.2.1",
  "m1-core",
@@ -623,8 +623,8 @@ dependencies = [
 
 [[package]]
 name = "m1-typecheck"
-version = "0.33.0"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.33.0#700d5ff4406a3b7863884ffc71f900a7a64f3e09"
+version = "0.34.0"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.34.0#b5043dac9fe28f5930d289dfd7bf2ab7a4abe60b"
 dependencies = [
  "clap",
  "m1-core",
@@ -1204,8 +1204,8 @@ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 
 [[package]]
 name = "tree-sitter-m1"
-version = "0.5.0"
-source = "git+https://github.com/C-Nucifora/tree-sitter-m1.git?tag=v0.5.0#bc86584c18d9c218a9d4a18705ca2a94967b3393"
+version = "0.6.0"
+source = "git+https://github.com/C-Nucifora/tree-sitter-m1.git?tag=v0.6.0#c83a032bb6b53994cc8f2f9e72c03c028b449135"
 dependencies = [
  "cc",
  "tree-sitter-language",
