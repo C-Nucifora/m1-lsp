@@ -1342,6 +1342,51 @@ mod tests {
         );
     }
 
+    /// A *case-variant* enum head — AV-M1's `… eq universal Switch State.On`
+    /// (lowercase `u`) — must hover like the canonical spelling: M1 Build
+    /// resolves names case-insensitively, and m1-typecheck#183 made
+    /// `enum_by_name` follow suit. Both the head card and the member card must
+    /// resolve; neither may fall back to "type not modelled".
+    #[test]
+    fn hover_on_case_variant_enum_head_still_names_the_enum() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<Project>
+  <DataTypes>
+    <Type Name="Gear State" Storage="enum" Default="Neutral">
+      <Enum Name="Neutral" ContainerOrder="0"/>
+      <Enum Name="Driving" ContainerOrder="1"/>
+    </Type>
+  </DataTypes>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Control"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Control.Status"><Props Type="::This.Gear State"/></Component>
+</Project>"#,
+            )
+            .unwrap();
+        let project = m1_typecheck::Project::load(&prj).unwrap();
+        let src = "Status = gear state.Driving;\n";
+        let on_head = hover_value_at(&project, src, "gear state", 0);
+        assert!(
+            on_head.contains("Gear State") && on_head.to_lowercase().contains("enum"),
+            "case-variant head hover should name the canonical enum: {on_head}"
+        );
+        assert!(
+            on_head.contains("Driving") && on_head.contains("Neutral"),
+            "case-variant head hover should list the members: {on_head}"
+        );
+        let on_member = hover_value_at(&project, src, "Driving", 0);
+        assert!(
+            on_member.contains("Gear State.Driving") && !on_member.contains("type not modelled"),
+            "member behind a case-variant head must resolve: {on_member}"
+        );
+    }
+
     /// `Status = ASSI.Driving;` — the *head* of an `EnumName.Member` literal is
     /// the enum type itself. Hovering it must describe the enum (name + values),
     /// not fall back to "type not modelled". The enum name is not a channel, so it
