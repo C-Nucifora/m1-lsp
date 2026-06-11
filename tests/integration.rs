@@ -388,7 +388,11 @@ async fn initialize_advertises_diagnostic_provider() {
 
 // #140: `textDocument/diagnostic` must run the analysis pass on demand for a
 // file that has NOT been opened (read from disk), returning a full report.
-#[tokio::test]
+// The diagnostic handlers wrap their blocking disk-read/analyze work in
+// `block_in_place` (#258), which requires the multi-threaded runtime — the same
+// flavor the production server uses (`#[tokio::main]`). The default
+// current-thread test runtime would panic, so opt into multi_thread here.
+#[tokio::test(flavor = "multi_thread")]
 async fn pull_diagnostic_reports_findings_for_unopened_script() {
     use std::io::Write;
     use tower_lsp::lsp_types::Url;
@@ -450,7 +454,9 @@ async fn pull_diagnostic_reports_findings_for_unopened_script() {
 
 // #140: `workspace/diagnostic` must aggregate findings across every script in
 // the loaded project, including files that were never opened.
-#[tokio::test]
+// Needs the multi-threaded runtime: the handler runs its collection loop under
+// `block_in_place` (#258), matching the production `#[tokio::main]` server.
+#[tokio::test(flavor = "multi_thread")]
 async fn workspace_diagnostic_covers_all_project_scripts() {
     use std::io::Write;
     use tower_lsp::lsp_types::Url;
