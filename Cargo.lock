@@ -170,6 +170,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "crossbeam-deque"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-utils"
 version = "0.8.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -212,6 +231,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "either"
+version = "1.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
 name = "equivalent"
@@ -571,8 +596,8 @@ dependencies = [
 
 [[package]]
 name = "m1-core"
-version = "0.9.0"
-source = "git+https://github.com/C-Nucifora/m1-core.git?tag=v0.9.0#99a73de538b602691cd915ac2c3b456eb50fe173"
+version = "0.9.1"
+source = "git+https://github.com/C-Nucifora/m1-core.git?tag=v0.9.1#8c4b9d6e3012bb72b74e15ec4e085510f1051890"
 dependencies = [
  "tree-sitter",
  "tree-sitter-m1",
@@ -580,27 +605,28 @@ dependencies = [
 
 [[package]]
 name = "m1-fmt"
-version = "0.11.0"
-source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.11.0#02e077bd07abfe1f0c647f4fd66807b5f4f9027e"
+version = "0.11.1"
+source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.11.1#f54a8b5aa67b4f1bac322956c143b7202fd83d95"
 dependencies = [
  "clap",
  "libc",
  "m1-core",
- "m1-workspace 0.8.1",
- "toml 1.1.2+spec-1.1.0",
+ "m1-workspace",
+ "toml",
 ]
 
 [[package]]
 name = "m1-lint"
-version = "0.16.0"
-source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.16.0#3267c69d2fcedfd4207ea2fa5de4ed948d6d6b87"
+version = "0.17.0"
+source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.17.0#49cea391f0bc54504f31502c824db63c2c5e363b"
 dependencies = [
  "clap",
  "glob",
  "m1-core",
- "m1-workspace 0.8.1",
+ "m1-workspace",
+ "rayon",
  "serde_json",
- "toml 1.1.2+spec-1.1.0",
+ "toml",
 ]
 
 [[package]]
@@ -612,36 +638,27 @@ dependencies = [
  "m1-fmt",
  "m1-lint",
  "m1-typecheck",
- "m1-workspace 0.8.1",
+ "m1-workspace",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "toml 1.1.2+spec-1.1.0",
+ "toml",
  "tower-lsp",
 ]
 
 [[package]]
 name = "m1-typecheck"
-version = "0.34.0"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.34.0#b5043dac9fe28f5930d289dfd7bf2ab7a4abe60b"
+version = "0.34.1"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.34.1#40cffd79cd96b99f463cdbd30f4f2ff67cf02abc"
 dependencies = [
  "clap",
  "m1-core",
- "m1-workspace 0.8.0",
+ "m1-workspace",
  "roxmltree",
  "serde",
  "serde_json",
- "toml 1.1.2+spec-1.1.0",
-]
-
-[[package]]
-name = "m1-workspace"
-version = "0.8.0"
-source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.8.0#fd7986d19d272e5e4f4fbfe015efa120866edb8b"
-dependencies = [
- "serde",
- "toml 0.8.23",
+ "toml",
 ]
 
 [[package]]
@@ -650,7 +667,7 @@ version = "0.8.1"
 source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.8.1#20c4a9cd4ed6c5087433abf89dfb405c95e2bfac"
 dependencies = [
  "serde",
- "toml 1.1.2+spec-1.1.0",
+ "toml",
 ]
 
 [[package]]
@@ -758,6 +775,26 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "rayon"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
+name = "rayon-core"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
+]
 
 [[package]]
 name = "redox_syscall"
@@ -888,15 +925,6 @@ dependencies = [
 
 [[package]]
 name = "serde_spanned"
-version = "0.6.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "serde_spanned"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
@@ -1022,38 +1050,17 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "0.8.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
-dependencies = [
- "serde",
- "serde_spanned 0.6.9",
- "toml_datetime 0.6.11",
- "toml_edit",
-]
-
-[[package]]
-name = "toml"
 version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81f3d15e84cbcd896376e6730314d59fb5a87f31e4b038454184435cd57defee"
 dependencies = [
  "indexmap",
  "serde_core",
- "serde_spanned 1.1.1",
- "toml_datetime 1.1.1+spec-1.1.0",
+ "serde_spanned",
+ "toml_datetime",
  "toml_parser",
  "toml_writer",
- "winnow 1.0.3",
-]
-
-[[package]]
-name = "toml_datetime"
-version = "0.6.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
-dependencies = [
- "serde",
+ "winnow",
 ]
 
 [[package]]
@@ -1066,33 +1073,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "toml_edit"
-version = "0.22.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
-dependencies = [
- "indexmap",
- "serde",
- "serde_spanned 0.6.9",
- "toml_datetime 0.6.11",
- "toml_write",
- "winnow 0.7.15",
-]
-
-[[package]]
 name = "toml_parser"
 version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
 dependencies = [
- "winnow 1.0.3",
+ "winnow",
 ]
-
-[[package]]
-name = "toml_write"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "toml_writer"
@@ -1322,15 +1309,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
-]
-
-[[package]]
-name = "winnow"
-version = "0.7.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
-dependencies = [
- "memchr",
 ]
 
 [[package]]
