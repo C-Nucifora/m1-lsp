@@ -1140,3 +1140,179 @@ fn prepare_m1prj_offers_leaf_rejects_compound() {
         );
     });
 }
+
+// ---- workspace/willRenameFiles (#250) ----------------------------------
+
+/// The TextDocumentEdits of `we` whose target URI ends with `suffix`.
+fn op_edits_for(we: &WorkspaceEdit, suffix: &str) -> Vec<TextEdit> {
+    let Some(DocumentChanges::Operations(ops)) = &we.document_changes else {
+        return vec![];
+    };
+    ops.iter()
+        .filter_map(|op| match op {
+            DocumentChangeOperation::Edit(e) if e.text_document.uri.path().ends_with(suffix) => {
+                Some(e.edits.iter().map(|x| match x {
+                    OneOf::Left(t) => t.clone(),
+                    OneOf::Right(a) => a.text_edit.clone(),
+                }))
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// The RenameFile ops of `we`.
+fn rename_ops(we: &WorkspaceEdit) -> Vec<RenameFile> {
+    let Some(DocumentChanges::Operations(ops)) = &we.document_changes else {
+        return vec![];
+    };
+    ops.iter()
+        .filter_map(|op| match op {
+            DocumentChangeOperation::Op(ResourceOp::Rename(r)) => Some(r.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn file_rename_result(
+    store: &ProjectStore,
+    dir: &std::path::Path,
+    old: &str,
+    new: &str,
+) -> Result<Option<WorkspaceEdit>, String> {
+    let old_uri = Url::from_file_path(dir.join(old)).unwrap();
+    let new_uri = Url::from_file_path(dir.join(new)).unwrap();
+    let no_open = |_: &Url| None;
+    store.with_project(|p| {
+        execute_file_rename(
+            &old_uri,
+            &new_uri,
+            PositionEncoding::Utf16,
+            p.expect("project loaded"),
+            &no_open,
+        )
+    })
+}
+
+#[test]
+fn file_rename_of_group_segment_runs_the_cascade() {
+    let (tmp, store) = setup();
+    let a = "local a = Engine.Threshold;\n";
+    let b = "local e = Root.Engine.Threshold;\n";
+    std::fs::write(tmp.path().join("Engine.Update.m1scr"), a).unwrap();
+    std::fs::write(tmp.path().join("Other.Update.m1scr"), b).unwrap();
+    store.discover_and_load(tmp.path()).unwrap();
+
+    // Renaming `Engine.Update.m1scr` -> `Motor.Update.m1scr` implies the group
+    // rename Root.Engine -> Root.Motor.
+    let we = file_rename_result(
+        &store,
+        tmp.path(),
+        "Engine.Update.m1scr",
+        "Motor.Update.m1scr",
+    )
+    .expect("cascade should succeed")
+    .expect("an edit is produced");
+
+    // .m1prj: the group declaration + every descendant Name= gains Motor.
+    let prj = op_edits_for(&we, "Project.m1prj");
+    assert!(prj.len() >= 5, "group + descendants, got {}", prj.len());
+    assert!(prj.iter().all(|e| e.new_text == "Motor"));
+
+    // Both scripts' resolving references are rewritten.
+    assert_eq!(op_edits_for(&we, "Engine.Update.m1scr").len(), 1);
+    assert_eq!(op_edits_for(&we, "Other.Update.m1scr").len(), 1);
+
+    // The user's own rename is stripped: no RenameFile op for the file the
+    // client is already renaming (and Root.Engine backs no other script).
+    assert!(
+        rename_ops(&we).is_empty(),
+        "requested rename must be stripped"
+    );
+}
+
+#[test]
+fn file_rename_updates_an_explicit_filename_attribute() {
+    const PRJ_EXPLICIT: &str = r#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Engine"/>
+  <Component Classname="BuiltIn.MethodUser" Filename="Custom Name.m1scr" Name="Root.Engine.Update"/>
+</Project>"#;
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Project.m1prj"), PRJ_EXPLICIT).unwrap();
+    std::fs::write(tmp.path().join("Custom Name.m1scr"), "local a = 1;\n").unwrap();
+    let store = ProjectStore::new();
+    store.discover_and_load(tmp.path()).unwrap();
+
+    let we = file_rename_result(&store, tmp.path(), "Custom Name.m1scr", "Other Name.m1scr")
+        .expect("attribute update should succeed")
+        .expect("an edit is produced");
+    let prj = op_edits_for(&we, "Project.m1prj");
+    assert_eq!(prj.len(), 1, "exactly the Filename attribute value");
+    assert_eq!(prj[0].new_text, "Other Name.m1scr");
+    assert!(rename_ops(&we).is_empty());
+}
+
+#[test]
+fn file_rename_of_function_leaf_is_refused_with_guidance() {
+    let (tmp, store) = setup();
+    std::fs::write(tmp.path().join("Engine.Update.m1scr"), "local a = 1;\n").unwrap();
+    store.discover_and_load(tmp.path()).unwrap();
+    let err = file_rename_result(
+        &store,
+        tmp.path(),
+        "Engine.Update.m1scr",
+        "Engine.Tick.m1scr",
+    )
+    .expect_err("leaf change is a symbol rename");
+    assert!(err.contains("rename ‘Root.Engine.Update’"), "got: {err}");
+}
+
+#[test]
+fn file_rename_dropping_the_extension_is_refused() {
+    let (tmp, store) = setup();
+    std::fs::write(tmp.path().join("Engine.Update.m1scr"), "local a = 1;\n").unwrap();
+    store.discover_and_load(tmp.path()).unwrap();
+    let err = file_rename_result(
+        &store,
+        tmp.path(),
+        "Engine.Update.m1scr",
+        "Engine.Update.txt",
+    )
+    .expect_err("extension change breaks the mapping");
+    assert!(err.contains(".m1scr"), "got: {err}");
+}
+
+#[test]
+fn file_rename_of_an_unrelated_file_is_a_no_op() {
+    let (tmp, store) = setup();
+    std::fs::write(tmp.path().join("NotAScript.m1scr"), "local a = 1;\n").unwrap();
+    store.discover_and_load(tmp.path()).unwrap();
+    let r = file_rename_result(&store, tmp.path(), "NotAScript.m1scr", "StillNot.m1scr")
+        .expect("no error");
+    assert!(r.is_none(), "no project symbol -> nothing to do");
+}
+
+#[test]
+fn file_move_keeping_the_basename_is_a_no_op() {
+    let (tmp, store) = setup();
+    std::fs::write(tmp.path().join("Engine.Update.m1scr"), "local a = 1;\n").unwrap();
+    store.discover_and_load(tmp.path()).unwrap();
+    let old_uri = Url::from_file_path(tmp.path().join("Engine.Update.m1scr")).unwrap();
+    let new_uri = Url::from_file_path(tmp.path().join("sub/Engine.Update.m1scr")).unwrap();
+    let no_open = |_: &Url| None;
+    let r = store
+        .with_project(|p| {
+            execute_file_rename(
+                &old_uri,
+                &new_uri,
+                PositionEncoding::Utf16,
+                p.unwrap(),
+                &no_open,
+            )
+        })
+        .expect("no error");
+    assert!(r.is_none(), "basename unchanged -> mapping intact");
+}

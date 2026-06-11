@@ -39,6 +39,7 @@
 //! Out of scope (refused with a message): other file-backed symbols (DBC signals,
 //! firmware-generated scripts); and a value-bearing channel/parameter that itself
 //! has children (rename its leaf members individually).
+mod file_rename;
 mod func;
 mod group;
 mod helpers;
@@ -59,6 +60,7 @@ use tower_lsp::lsp_types::{
 };
 
 // Public API surface (entry points called from backend.rs and code_action.rs).
+pub use file_rename::execute_file_rename;
 pub use helpers::{is_valid_identifier, is_valid_symbol_name};
 pub use local::{is_local_ref, local_ident_at, local_rename_edits};
 pub use m1prj::{execute_m1prj, prepare_m1prj};
