@@ -1597,9 +1597,13 @@ impl LanguageServer for Backend {
         &self,
         params: DocumentDiagnosticParams,
     ) -> Result<DocumentDiagnosticReportResult> {
-        let items = self
-            .diagnostics_for(&params.text_document.uri)
-            .unwrap_or_default();
+        // `diagnostics_for` falls back to a blocking disk read (and full
+        // analyze()) for closed files, so run it on a blocking-aware worker via
+        // `block_in_place` to keep the async runtime healthy (#135, #258).
+        let items = tokio::task::block_in_place(|| {
+            self.diagnostics_for(&params.text_document.uri)
+                .unwrap_or_default()
+        });
         Ok(DocumentDiagnosticReportResult::Report(
             DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
                 related_documents: None,
@@ -1633,28 +1637,36 @@ impl LanguageServer for Backend {
             paths.push(prj);
         }
 
-        let mut items = Vec::with_capacity(paths.len());
-        for path in paths {
-            let Ok(uri) = Url::from_file_path(&path) else {
-                continue;
-            };
-            let Some(diags) = self.diagnostics_for(&uri) else {
-                continue;
-            };
-            // Report the in-editor version for open buffers so the client can
-            // reconcile against its edits; `None` for closed files.
-            let version = self.docs.get(&uri).map(|d| d.version as i64);
-            items.push(WorkspaceDocumentDiagnosticReport::Full(
-                WorkspaceFullDocumentDiagnosticReport {
-                    uri,
-                    version,
-                    full_document_diagnostic_report: FullDocumentDiagnosticReport {
-                        result_id: None,
-                        items: diags,
+        // `diagnostics_for` does blocking disk reads (and full analyze()) for
+        // closed files — the common case here, since closed-file coverage is the
+        // pull path's job (#140) — once per script in the loop. Run the whole
+        // collection under a single `block_in_place` guard so the blocking work
+        // doesn't starve the async runtime (#135, #258).
+        let items = tokio::task::block_in_place(|| {
+            let mut items = Vec::with_capacity(paths.len());
+            for path in paths {
+                let Ok(uri) = Url::from_file_path(&path) else {
+                    continue;
+                };
+                let Some(diags) = self.diagnostics_for(&uri) else {
+                    continue;
+                };
+                // Report the in-editor version for open buffers so the client can
+                // reconcile against its edits; `None` for closed files.
+                let version = self.docs.get(&uri).map(|d| d.version as i64);
+                items.push(WorkspaceDocumentDiagnosticReport::Full(
+                    WorkspaceFullDocumentDiagnosticReport {
+                        uri,
+                        version,
+                        full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                            result_id: None,
+                            items: diags,
+                        },
                     },
-                },
-            ));
-        }
+                ));
+            }
+            items
+        });
 
         Ok(WorkspaceDiagnosticReportResult::Report(
             WorkspaceDiagnosticReport { items },
