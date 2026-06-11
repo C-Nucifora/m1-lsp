@@ -186,27 +186,16 @@ fn chain_end(text: &str, byte: usize) -> usize {
 
 /// `true` when `byte` sits inside a comment or string-literal node, where
 /// code completion is meaningless and would otherwise dump the whole library /
-/// keyword / symbol set into prose (#…). Walks `root`'s descendants for the
-/// smallest node whose byte range contains `byte` and checks its kind.
+/// keyword / symbol set into prose (#…).
 ///
-/// The boundary right at the *end* of a token is treated as outside the token
-/// (`start <= byte < end`), so completion still fires when the cursor sits just
-/// past a closing `"` or at the line break after a `//` comment.
+/// Delegates to [`locate::node_at_byte`], which finds the smallest node
+/// containing `byte` by targeted O(depth) descent rather than a full O(n)
+/// tree scan, and checks that node's kind.
 fn in_comment_or_string(root: Node, byte: usize) -> bool {
+    use crate::features::locate::node_at_byte;
     use m1_core::Kind;
-    let mut best: Option<Node> = None;
-    for n in root.descendants() {
-        let r = n.byte_range();
-        if r.start <= byte && byte < r.end {
-            // Prefer the smallest (innermost) containing node.
-            match &best {
-                Some(b) if (b.byte_range().end - b.byte_range().start) <= (r.end - r.start) => {}
-                _ => best = Some(n),
-            }
-        }
-    }
     matches!(
-        best.map(|n| n.kind()),
+        node_at_byte(root, byte).map(|n| n.kind()),
         Some(Kind::LineComment | Kind::BlockComment | Kind::String | Kind::Interpolation)
     )
 }

@@ -1,23 +1,12 @@
 //! textDocument/inlayHint: an inline `: Type` after each `local` declaration that
 //! has no explicit `<Type>` annotation and whose type is known. Reuses the same
 //! inference as hover (`locate::local_decl_type`), so the two always agree.
+use crate::features::hover::value_type_str;
 use crate::features::locate::local_decl_type;
 use crate::line_index::{LineIndex, PositionEncoding};
 use m1_core::{Field, Kind, Node};
 use m1_typecheck::types::ValueType;
 use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Range};
-
-fn value_type_str(t: &ValueType) -> &'static str {
-    match t {
-        ValueType::Boolean => "Boolean",
-        ValueType::Integer => "Integer",
-        ValueType::Unsigned => "Unsigned",
-        ValueType::Float => "Float",
-        ValueType::Enum(_) => "Enum",
-        ValueType::String => "String",
-        ValueType::Unknown => "Unknown",
-    }
-}
 
 /// Inline hints within `range`: `: Type` after unannotated `local`s, `paramName:`
 /// at call-site arguments, and — when a `project` is loaded — `[unit]` after each
@@ -125,7 +114,7 @@ fn collect(
                 if position.line >= range.start.line && position.line <= range.end.line {
                     out.push(InlayHint {
                         position,
-                        label: InlayHintLabel::String(format!(": {}", value_type_str(&t))),
+                        label: InlayHintLabel::String(format!(": {}", value_type_str(t))),
                         kind: Some(InlayHintKind::TYPE),
                         text_edits: None,
                         tooltip: None,
