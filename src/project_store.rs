@@ -299,18 +299,22 @@ impl ProjectStore {
                 v.extend(lp.project.audit_tags());
                 v.extend(lp.project.audit_display_units());
                 let scripts = scripts_from_disk(&lp.script_files);
+                // Parse every script once (m1-typecheck v0.35.0 parse-once API)
+                // and share the CSTs across both project-wide passes instead of
+                // letting each pass reparse from source.
+                let parsed = m1_typecheck::parsed::parse_all(&scripts);
                 // T088 and T097 (recursive-call, m1-typecheck#187) are
                 // default-on like the CLI; T089 stays behind its opt-in.
                 v.extend(m1_typecheck::schedule::check(
                     &lp.project,
-                    &scripts,
+                    &parsed,
                     true,
                     rate_inversion,
                     true,
                 ));
                 v.extend(m1_typecheck::schedule::check_usage(
                     &lp.project,
-                    &scripts,
+                    &parsed,
                     true,
                     true,
                 ));
