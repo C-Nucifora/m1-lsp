@@ -6,8 +6,8 @@ use m1_core::Node;
 use m1_typecheck::project::Project;
 use std::collections::HashSet;
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionTextEdit, Documentation, InsertTextFormat, Range,
-    TextEdit,
+    CompletionItem, CompletionItemKind, CompletionTextEdit, Documentation, InsertTextFormat,
+    MarkupContent, MarkupKind, Range, TextEdit,
 };
 
 /// The construct skeleton inserted when an M1 control-flow / declaration keyword
@@ -204,7 +204,12 @@ fn in_comment_or_string(root: Node, byte: usize) -> bool {
 /// (`range`) with `text` — both the visible label and the inserted text. Setting
 /// an explicit edit + filter is what stops the client appending the path after
 /// the already-typed prefix.
-fn path_item(text: &str, range: Range, detail: Option<String>) -> CompletionItem {
+fn path_item(
+    text: &str,
+    range: Range,
+    detail: Option<String>,
+    symbol_path: &str,
+) -> CompletionItem {
     CompletionItem {
         label: text.to_string(),
         kind: Some(CompletionItemKind::FIELD),
@@ -217,7 +222,31 @@ fn path_item(text: &str, range: Range, detail: Option<String>) -> CompletionItem
             range,
             new_text: text.to_string(),
         })),
+        // The full symbol path, for completionItem/resolve (#267): project
+        // completion returns hundreds of items on a real corpus, so the rich
+        // hover-grade documentation is filled in lazily per selected item
+        // instead of inflating the whole list payload.
+        data: Some(serde_json::Value::String(symbol_path.to_string())),
         ..Default::default()
+    }
+}
+
+/// `completionItem/resolve` (#267): fill in hover-grade documentation for a
+/// project-symbol item from the path stashed in `item.data`.
+pub fn resolve_item(item: &mut CompletionItem, loaded: Option<&LoadedProject>) {
+    let Some(serde_json::Value::String(path)) = &item.data else {
+        return;
+    };
+    let Some(lp) = loaded else { return };
+    let Some(sym) = lp.project.symbols().get(path) else {
+        return;
+    };
+    let md = crate::features::hover::symbol_markdown(sym, Some(&lp.project));
+    if !md.is_empty() {
+        item.documentation = Some(Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: md,
+        }));
     }
 }
 
@@ -374,7 +403,7 @@ pub fn completions(
             if rel.is_empty() {
                 continue; // the bare `Root` group — nothing to reference
             }
-            items.push(path_item(rel, edit_range, ty.clone()));
+            items.push(path_item(rel, edit_range, ty.clone(), &sym.path));
             if let Some(g) = &group
                 && let Some(tail) = sym.path.strip_prefix(&format!("{g}."))
             {
@@ -384,7 +413,7 @@ pub fn completions(
                     Some(t) => format!("{rel}  ·  {t}"),
                     None => rel.to_string(),
                 };
-                items.push(path_item(tail, edit_range, Some(detail)));
+                items.push(path_item(tail, edit_range, Some(detail), &sym.path));
             }
         }
     }

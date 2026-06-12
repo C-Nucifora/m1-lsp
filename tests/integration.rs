@@ -53,7 +53,7 @@ async fn initialize_advertises_capabilities() {
     let resp = read_msg(&mut client).await;
     let caps = &resp["result"]["capabilities"];
     assert_eq!(caps["documentFormattingProvider"], json!(true));
-    assert_eq!(caps["textDocumentSync"], json!(1)); // FULL == 1
+    assert_eq!(caps["textDocumentSync"], json!(2)); // INCREMENTAL == 2 (#270)
     assert_eq!(caps["hoverProvider"], json!(true));
     assert_eq!(caps["definitionProvider"], json!(true));
     assert_eq!(caps["referencesProvider"], json!(true));

@@ -42,6 +42,10 @@ pub struct Backend {
     /// clients re-request open docs on change themselves; for project-model
     /// changes the server nudges them with `workspace/diagnostic/refresh`.
     client_pull_diagnostics: std::sync::atomic::AtomicBool,
+    /// Whether the client supports `window/workDoneProgress` (set during
+    /// `initialize`). Gates `$/progress` reporting for the long operations —
+    /// workspace diagnostics over a real corpus and project-wide rename (#266).
+    progress_support: std::sync::atomic::AtomicBool,
     /// Client supports `workspace/inlayHint/refresh` / `…/semanticTokens/refresh`
     /// / `…/codeLens/refresh` — nudged after every project-model reload so unit
     /// hints, token colors and rate lenses don't go stale until the user types
@@ -87,6 +91,9 @@ struct DocContext {
     line_index: crate::line_index::LineIndex,
     enc: PositionEncoding,
     file_name: Option<String>,
+    /// The document's incrementally-maintained tree (#270). Shared, not
+    /// re-parsed: `parse()` is a pointer clone.
+    cst: std::sync::Arc<m1_core::Cst>,
 }
 
 /// Outcome of reconciling freshly-computed pull diagnostics against the cached
@@ -106,8 +113,8 @@ impl DocContext {
 
     /// Parse the document text into a CST. The caller holds the returned `Cst` so
     /// `Node`s borrowed from it stay valid.
-    fn parse(&self) -> m1_core::Cst {
-        m1_core::parse(&self.text)
+    fn parse(&self) -> std::sync::Arc<m1_core::Cst> {
+        self.cst.clone()
     }
 }
 
@@ -143,6 +150,7 @@ impl Backend {
             watch_dynamic: std::sync::atomic::AtomicBool::new(false),
             change_annotation_support: std::sync::atomic::AtomicBool::new(false),
             client_pull_diagnostics: std::sync::atomic::AtomicBool::new(false),
+            progress_support: std::sync::atomic::AtomicBool::new(false),
             inlay_refresh_support: std::sync::atomic::AtomicBool::new(false),
             semtok_refresh_support: std::sync::atomic::AtomicBool::new(false),
             code_lens_refresh_support: std::sync::atomic::AtomicBool::new(false),
@@ -162,11 +170,25 @@ impl Backend {
     /// `didChangeConfiguration` can re-resolve against the same workspace.
     fn apply_config(&self, root: &std::path::Path) {
         let editor = self.editor_settings.read().unwrap().clone();
-        let cfg = M1Config::resolve(editor.as_ref(), root);
+        let (cfg, issues) = M1Config::resolve_with_issues(editor.as_ref(), root);
         self.lint.set_lint_config(&cfg.lint);
         self.formatter.set_format_options(&cfg.format);
         *self.config.write().unwrap() = cfg;
         *self.config_root.write().unwrap() = Some(root.to_path_buf());
+        // Surface config problems instead of silently falling back (#278):
+        // a malformed m1-tools.toml or a typo'd key looks exactly like "the
+        // LSP ignored my setting" without this. Sent fire-and-forget — config
+        // application itself must never block on the client.
+        if !issues.is_empty() {
+            let client = self.client.clone();
+            tokio::spawn(async move {
+                for issue in issues {
+                    client
+                        .log_message(MessageType::WARNING, format!("m1-lsp config: {issue}"))
+                        .await;
+                }
+            });
+        }
     }
 
     /// Re-resolve config against the last known root (used by
@@ -234,16 +256,81 @@ impl Backend {
     /// request handler ([`DocContext`]). `None` when the document isn't open — the
     /// caller returns its empty response, as the raw [`get_doc`](Self::get_doc) did.
     fn doc_context(&self, uri: &Url) -> Option<DocContext> {
-        let (text, line_index) = self.get_doc(uri)?;
+        let doc = self.docs.get(uri)?;
         Some(DocContext {
-            text,
-            line_index,
+            text: doc.text.clone(),
+            line_index: doc.line_index.clone(),
             enc: self.enc(),
             file_name: crate::features::locate::file_name_of(uri),
+            cst: doc.cst.clone(),
         })
     }
 
     /// Fallback project discovery (#73). `initialize` loads the project from the
+    /// Create a `$/progress` token and send `Begin` (#266). Returns `None`
+    /// (and sends nothing) when the client did not advertise
+    /// `window.workDoneProgress` — every later call is then a no-op, so call
+    /// sites stay branch-free.
+    async fn progress_begin(&self, id: &str, title: &str) -> Option<NumberOrString> {
+        if !self
+            .progress_support
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return None;
+        }
+        let token = NumberOrString::String(format!("m1-lsp/{id}"));
+        if self
+            .client
+            .send_request::<tower_lsp::lsp_types::request::WorkDoneProgressCreate>(
+                WorkDoneProgressCreateParams {
+                    token: token.clone(),
+                },
+            )
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        self.send_progress(
+            &token,
+            WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: title.to_string(),
+                ..Default::default()
+            }),
+        )
+        .await;
+        Some(token)
+    }
+
+    async fn progress_report(&self, token: &Option<NumberOrString>, message: String) {
+        if let Some(t) = token {
+            self.send_progress(
+                t,
+                WorkDoneProgress::Report(WorkDoneProgressReport {
+                    message: Some(message),
+                    ..Default::default()
+                }),
+            )
+            .await;
+        }
+    }
+
+    async fn progress_end(&self, token: Option<NumberOrString>) {
+        if let Some(t) = token {
+            self.send_progress(&t, WorkDoneProgress::End(Default::default()))
+                .await;
+        }
+    }
+
+    async fn send_progress(&self, token: &NumberOrString, value: WorkDoneProgress) {
+        self.client
+            .send_notification::<tower_lsp::lsp_types::notification::Progress>(ProgressParams {
+                token: token.clone(),
+                value: ProgressParamsValue::WorkDone(value),
+            })
+            .await;
+    }
+
     /// client's `rootUri`/workspace folder, but some clients (or certain
     /// single-file open flows) never send one, leaving the store empty — so
     /// hover/definition/rename silently degrade. When a `.m1scr` is opened and no
@@ -360,11 +447,14 @@ impl Backend {
                 .with_project(|p| p.and_then(|lp| Url::from_file_path(&lp.m1prj_path).ok()));
             return Some(if active.as_ref() == Some(uri) {
                 let filter = self.config.read().unwrap().diagnostics.clone();
+                let prj = self
+                    .store
+                    .with_project(|p| p.map(|lp| lp.m1prj_path.clone()));
                 self.store
                     .project_diagnostics_with(filter.select.contains("T089"))
                     .iter()
                     .filter(|d| filter.allows_subject(d.code.as_str(), d.subject.as_deref()))
-                    .map(|d| crate::convert::type_diagnostic(d, &lindex, enc))
+                    .map(|d| crate::convert::type_diagnostic(d, &lindex, enc, prj.as_deref()))
                     .collect()
             } else {
                 vec![]
@@ -463,12 +553,15 @@ impl Backend {
         let li = crate::line_index::LineIndex::new(&text);
         let enc = self.enc();
         let filter = self.config.read().unwrap().diagnostics.clone();
+        let prj = self
+            .store
+            .with_project(|p| p.map(|lp| lp.m1prj_path.clone()));
         let diags: Vec<Diagnostic> = self
             .store
             .project_diagnostics_with(filter.select.contains("T089"))
             .iter()
             .filter(|d| filter.allows_subject(d.code.as_str(), d.subject.as_deref()))
-            .map(|d| crate::convert::type_diagnostic(d, &li, enc))
+            .map(|d| crate::convert::type_diagnostic(d, &li, enc, prj.as_deref()))
             .collect();
         let version = self.docs.get(&uri).map(|d| d.version);
         self.client.publish_diagnostics(uri, diags, version).await;
@@ -525,7 +618,12 @@ fn server_capabilities(encoding: PositionEncodingKind) -> ServerCapabilities {
                 ..Default::default()
             }),
         }),
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        // INCREMENTAL (#270): didChange arrives as ranged edits which the
+        // Document applies via m1_core::Edit + Cst::reparse — tree reuse per
+        // keystroke instead of a from-scratch parse.
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(
+            TextDocumentSyncKind::INCREMENTAL,
+        )),
         document_formatting_provider: Some(OneOf::Left(true)),
         document_range_formatting_provider: Some(OneOf::Left(true)),
         // #234: re-indent the just-closed block when `}` is typed — pasted
@@ -568,6 +666,9 @@ fn server_capabilities(encoding: PositionEncodingKind) -> ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec![".".into()]),
+            // Project-symbol documentation is filled in lazily via
+            // completionItem/resolve (#267) to keep the list payload small.
+            resolve_provider: Some(true),
             ..Default::default()
         }),
         signature_help_provider: Some(SignatureHelpOptions {
@@ -618,6 +719,15 @@ impl LanguageServer for Backend {
         // push and pull in separate collections (VS Code) shows everything twice.
         self.client_pull_diagnostics.store(
             client_supports_pull_diagnostics(&params.capabilities),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.progress_support.store(
+            params
+                .capabilities
+                .window
+                .as_ref()
+                .and_then(|w| w.work_done_progress)
+                .unwrap_or(false),
             std::sync::atomic::Ordering::Relaxed,
         );
 
@@ -753,8 +863,19 @@ impl LanguageServer for Backend {
                     glob_pattern: GlobPattern::String("**/*.m1cfg".into()),
                     kind: None,
                 },
+                // .m1dbc CAN databases feed the project model (augment_dbc) and
+                // are already reload triggers in project_store::is_watched —
+                // without this registration the events never arrived (#276).
+                FileSystemWatcher {
+                    glob_pattern: GlobPattern::String("**/*.m1dbc".into()),
+                    kind: None,
+                },
                 FileSystemWatcher {
                     glob_pattern: GlobPattern::String("**/.m1lint.toml".into()),
+                    kind: None,
+                },
+                FileSystemWatcher {
+                    glob_pattern: GlobPattern::String("**/.m1fmt.toml".into()),
                     kind: None,
                 },
                 FileSystemWatcher {
@@ -809,18 +930,31 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        // FULL sync: the last content change holds the entire new text.
-        if let Some(change) = params.content_changes.into_iter().last() {
-            let uri = params.text_document.uri;
-            self.docs.insert(
-                uri.clone(),
-                Document::new(change.text, params.text_document.version),
-            );
-            // The edited buffer can change script reads/writes — drop the cached
-            // call graph (rebuilt on the next call-hierarchy request).
-            self.store.invalidate_call_graph();
-            self.publish(uri).await;
+        // INCREMENTAL sync (#270): apply each ranged change in order (per the
+        // LSP, every range refers to the state after the previous change);
+        // `range: None` remains the full-replacement fallback. Each ranged
+        // change reparses incrementally, reusing untouched subtrees.
+        let uri = params.text_document.uri;
+        let enc = self.enc();
+        if let Some(mut doc) = self.docs.get_mut(&uri) {
+            for change in params.content_changes {
+                doc.apply_change(change.range, &change.text, enc);
+            }
+            doc.version = params.text_document.version;
+        } else if let Some(change) = params.content_changes.into_iter().last() {
+            // No open document (shouldn't happen): only a full change can
+            // seed one.
+            if change.range.is_none() {
+                self.docs.insert(
+                    uri.clone(),
+                    Document::new(change.text, params.text_document.version),
+                );
+            }
         }
+        // The edited buffer can change script reads/writes — drop the cached
+        // call graph (rebuilt on the next call-hierarchy request).
+        self.store.invalidate_call_graph();
+        self.publish(uri).await;
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
@@ -1080,6 +1214,12 @@ impl LanguageServer for Backend {
         Ok(Some(CompletionResponse::Array(items)))
     }
 
+    async fn completion_resolve(&self, mut item: CompletionItem) -> Result<CompletionItem> {
+        self.store
+            .with_project(|p| completion::resolve_item(&mut item, p));
+        Ok(item)
+    }
+
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
         let tdp = params.text_document_position_params;
         let Some(doc) = self.doc_context(&tdp.text_document.uri) else {
@@ -1269,6 +1409,9 @@ impl LanguageServer for Backend {
         let enc = doc.enc;
         // Open buffers win over on-disk copies so an in-flight edit is seen.
         let open_text = |u: &Url| self.docs.get(u).map(|d| d.text.clone());
+        // Project-wide rename reads + parses every script — seconds of silent
+        // wall-clock on a real corpus; a begin/end pair is enough (#266).
+        let progress = self.progress_begin("rename", "m1-lsp: renaming").await;
         // A project-wide rename reads + parses every script. Those functions
         // borrow the live project for the duration, so we keep the RwLock guard
         // around the call but run it under `block_in_place` so the blocking
@@ -1306,6 +1449,7 @@ impl LanguageServer for Backend {
                 })
             })
         };
+        self.progress_end(progress).await;
         // An Err is surfaced to the user (Ok(None) would make the client
         // silently do nothing); a successful edit may span several files.
         match result {
@@ -1573,7 +1717,7 @@ impl LanguageServer for Backend {
         let config_change = params.changes.iter().find_map(|c| {
             let p = c.uri.to_file_path().ok()?;
             let name = p.file_name().and_then(|n| n.to_str())?;
-            matches!(name, ".m1lint.toml" | "m1-tools.toml").then_some(p)
+            matches!(name, ".m1lint.toml" | ".m1fmt.toml" | "m1-tools.toml").then_some(p)
         });
         if let Some(p) = &config_change
             && let Some(dir) = p.parent()
@@ -1710,14 +1854,28 @@ impl LanguageServer for Backend {
             .map(|p| (&p.uri, p.value.as_str()))
             .collect();
 
+        // On a real corpus this walks ~200 scripts and takes seconds — report
+        // progress so the editor shows what is happening instead of a frozen
+        // spinner (#266).
+        let progress = self
+            .progress_begin("workspace-diagnostics", "m1-lsp: checking workspace")
+            .await;
+        let total = paths.len();
+
         // `diagnostics_for` does blocking disk reads (and full analyze()) for
         // closed files — the common case here, since closed-file coverage is the
         // pull path's job (#140) — once per script in the loop. Run the whole
         // collection under a single `block_in_place` guard so the blocking work
         // doesn't starve the async runtime (#135, #258).
+        let handle = tokio::runtime::Handle::current();
         let items = tokio::task::block_in_place(|| {
             let mut items = Vec::with_capacity(paths.len());
-            for path in paths {
+            for (done, path) in paths.into_iter().enumerate() {
+                if done % 25 == 0 && done > 0 {
+                    handle.block_on(
+                        self.progress_report(&progress, format!("{done}/{total} scripts")),
+                    );
+                }
                 let Ok(uri) = Url::from_file_path(&path) else {
                     continue;
                 };
@@ -1753,6 +1911,7 @@ impl LanguageServer for Backend {
             }
             items
         });
+        self.progress_end(progress).await;
 
         Ok(WorkspaceDiagnosticReportResult::Report(
             WorkspaceDiagnosticReport { items },
