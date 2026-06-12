@@ -174,6 +174,15 @@ pub struct ProjectStore {
     /// by [`Self::invalidate_call_graph`] on any document edit/open/close and on
     /// every project (re)load, so a rebuild always reflects the live buffers.
     call_graph: RwLock<Option<CallGraph>>,
+    /// Memoized project-scope diagnostics (the `.m1prj`-anchored audit), keyed by
+    /// the `rate_inversion` (T089) flag they were computed under. Computing them
+    /// re-reads **every** project script from disk and re-runs the scheduling /
+    /// usage checks (see [`Self::project_diagnostics_with`]); pull diagnostics
+    /// (#259) poll this per `workspace/diagnostic` request, so without the cache a
+    /// pull-capable client re-reads the whole workspace on every open/change.
+    /// Dropped by [`Self::invalidate_call_graph`] alongside the call graph — the
+    /// same edit/open/close/save/reload points at which it could change.
+    project_diags: RwLock<Option<(bool, Vec<m1_typecheck::diagnostics::TypeDiagnostic>)>>,
 }
 
 impl ProjectStore {
@@ -202,11 +211,14 @@ impl ProjectStore {
         f(guard.as_ref())
     }
 
-    /// Drop the cached call-hierarchy graph so the next call-hierarchy request
-    /// rebuilds it from the current project + buffers. Cheap (just clears the
-    /// cell); called on any document edit/open/close and on every project reload.
+    /// Drop the per-project caches (call-hierarchy graph and memoized
+    /// project-scope diagnostics) so the next request recomputes them from the
+    /// current project + buffers. Cheap (just clears the cells); called on any
+    /// document edit/open/close/save and on every project reload — exactly the
+    /// points at which either cache could go stale.
     pub fn invalidate_call_graph(&self) {
         *self.call_graph.write().unwrap() = None;
+        *self.project_diags.write().unwrap() = None;
     }
 
     /// Run `f` against the loaded project and its call-hierarchy graph, building
@@ -262,14 +274,25 @@ impl ProjectStore {
     /// missing writer would make its channels look never-assigned), so they read
     /// every `.m1scr` under the root from disk — exactly like the CLI's
     /// `gather_project_scripts`, keyed by basename to match
-    /// `Project::function_symbol_for_script`. Project-scope diagnostics are
-    /// recomputed on project (re)load, not per-keystroke, so the per-call script
-    /// re-read is not on a hot path.
+    /// `Project::function_symbol_for_script`.
+    ///
+    /// This whole-workspace re-read used to run on project (re)load only, but
+    /// pull diagnostics (#140) call it per `workspace/diagnostic` poll, and
+    /// pull-capable clients (VS Code, nvim ≥0.10) re-poll on every open/change —
+    /// so it *is* now on a hot path. The result is therefore memoized (keyed by
+    /// the `rate_inversion` flag, its only non-project input) and dropped by
+    /// [`Self::invalidate_call_graph`] on any edit/open/close/save/reload.
     pub fn project_diagnostics_with(
         &self,
         rate_inversion: bool,
     ) -> Vec<m1_typecheck::diagnostics::TypeDiagnostic> {
-        self.with_project(|p| match p {
+        // Serve the memoized set when it was computed under the same flag.
+        if let Some((flag, diags)) = self.project_diags.read().unwrap().as_ref()
+            && *flag == rate_inversion
+        {
+            return diags.clone();
+        }
+        let computed = self.with_project(|p| match p {
             Some(lp) => {
                 let mut v = lp.project.missing_cfg_parameters();
                 v.extend(lp.project.audit());
@@ -291,10 +314,19 @@ impl ProjectStore {
                     true,
                     true,
                 ));
+                Some(v)
+            }
+            None => None,
+        });
+        // Only cache when a project is loaded; with none loaded the empty result
+        // is cheap and a project may load before the next poll.
+        match computed {
+            Some(v) => {
+                *self.project_diags.write().unwrap() = Some((rate_inversion, v.clone()));
                 v
             }
             None => Vec::new(),
-        })
+        }
     }
 
     /// Discover + load from `start_dir`, replacing any cached project. Returns
@@ -659,6 +691,47 @@ mod tests {
                 "old symbol must be gone"
             );
         });
+    }
+
+    // #259: project-scope diagnostics are memoized (they otherwise re-read every
+    // script from disk per pull-diagnostic poll) and the cache is dropped by
+    // `invalidate_call_graph`, the shared edit/open/close/save/reload hook.
+    #[test]
+    fn project_diagnostics_are_memoized_and_invalidated() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_project(tmp.path());
+        std::fs::write(tmp.path().join("A.m1scr"), "x = 1;\n").unwrap();
+        let store = ProjectStore::new();
+        assert!(store.discover_and_load(tmp.path()).unwrap());
+
+        // Load (via discover_and_load -> invalidate_call_graph) leaves the cache empty.
+        assert!(
+            store.project_diags.read().unwrap().is_none(),
+            "cache starts empty after load"
+        );
+
+        // First call computes and caches under the rate_inversion flag it was given.
+        let first_len = store.project_diagnostics_with(false).len();
+        {
+            let cached = store.project_diags.read().unwrap();
+            let (flag, diags) = cached.as_ref().expect("first call populates the cache");
+            assert!(!*flag, "cached under the rate_inversion=false flag");
+            assert_eq!(
+                diags.len(),
+                first_len,
+                "cached set matches the returned set"
+            );
+        }
+
+        // A second call with the same flag is served from the cache (same result).
+        assert_eq!(store.project_diagnostics_with(false).len(), first_len);
+
+        // The shared invalidation hook drops the cache.
+        store.invalidate_call_graph();
+        assert!(
+            store.project_diags.read().unwrap().is_none(),
+            "invalidate_call_graph drops the project-diagnostics cache"
+        );
     }
 
     // A parameter-bearing .m1prj plus a matching .m1cfg, used to verify that the

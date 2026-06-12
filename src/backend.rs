@@ -64,6 +64,16 @@ pub struct Backend {
     semtok_prev: DashMap<Url, (String, Vec<SemanticToken>)>,
     /// Monotonic source of semantic-token result ids.
     semtok_seq: std::sync::atomic::AtomicU64,
+    /// Per-document snapshot of the last pull-diagnostic response (`result_id` →
+    /// the items that id labels), backing the LSP 3.17 `result_id`/`Unchanged`
+    /// protocol on `textDocument/diagnostic` and `workspace/diagnostic` (#259).
+    /// When a poll recomputes the same items the client already holds (matching
+    /// `previous_result_id`), the server answers `Unchanged` instead of
+    /// re-serializing the full set. Same shape as `semtok_prev`.
+    diag_prev: DashMap<Url, (String, Vec<Diagnostic>)>,
+    /// Monotonic source of pull-diagnostic result ids; a fresh id is minted only
+    /// when a document's diagnostics actually change.
+    diag_seq: std::sync::atomic::AtomicU64,
 }
 
 /// Everything a request handler needs about one open document, gathered once: the
@@ -77,6 +87,15 @@ struct DocContext {
     line_index: crate::line_index::LineIndex,
     enc: PositionEncoding,
     file_name: Option<String>,
+}
+
+/// Outcome of reconciling freshly-computed pull diagnostics against the cached
+/// snapshot for a document (see [`Backend::reconcile_diag`], #259): the
+/// `result_id` to report, and whether the client already holds this exact set
+/// (so the handler can answer `Unchanged`).
+struct DiagSync {
+    id: String,
+    unchanged: bool,
 }
 
 impl DocContext {
@@ -132,6 +151,8 @@ impl Backend {
             config_root: std::sync::RwLock::new(None),
             semtok_prev: DashMap::new(),
             semtok_seq: std::sync::atomic::AtomicU64::new(0),
+            diag_prev: DashMap::new(),
+            diag_seq: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -162,6 +183,38 @@ impl Backend {
         self.semtok_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             .to_string()
+    }
+
+    /// Reconcile freshly-computed pull diagnostics for `uri` against the cached
+    /// snapshot, returning the `result_id` to report and whether the client's
+    /// `previous_result_id` still labels the current set (#259).
+    ///
+    /// - If `items` equal the cached set, the cached `result_id` is reused;
+    ///   `unchanged` is `true` when that id also matches `previous`, so the
+    ///   handler can answer `Unchanged` and skip re-sending the items.
+    /// - Otherwise a fresh id is minted and the snapshot replaced; `unchanged`
+    ///   is `false`, so the handler sends a full report.
+    ///
+    /// Storing only on change keeps result ids stable across no-op polls, which
+    /// is what lets a poll short-circuit to `Unchanged`.
+    fn reconcile_diag(&self, uri: &Url, items: &[Diagnostic], previous: Option<&str>) -> DiagSync {
+        if let Some(entry) = self.diag_prev.get(uri)
+            && entry.1 == items
+        {
+            let id = entry.0.clone();
+            let unchanged = previous == Some(id.as_str());
+            return DiagSync { id, unchanged };
+        }
+        let id = self
+            .diag_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .to_string();
+        self.diag_prev
+            .insert(uri.clone(), (id.clone(), items.to_vec()));
+        DiagSync {
+            id,
+            unchanged: false,
+        }
     }
 
     fn enc(&self) -> PositionEncoding {
@@ -1597,18 +1650,30 @@ impl LanguageServer for Backend {
         &self,
         params: DocumentDiagnosticParams,
     ) -> Result<DocumentDiagnosticReportResult> {
+        let uri = &params.text_document.uri;
         // `diagnostics_for` falls back to a blocking disk read (and full
         // analyze()) for closed files, so run it on a blocking-aware worker via
         // `block_in_place` to keep the async runtime healthy (#135, #258).
-        let items = tokio::task::block_in_place(|| {
-            self.diagnostics_for(&params.text_document.uri)
-                .unwrap_or_default()
-        });
+        let items = tokio::task::block_in_place(|| self.diagnostics_for(uri).unwrap_or_default());
+        // LSP 3.17 result_id/Unchanged (#259): if the recomputed set matches the
+        // one the client already holds (its `previous_result_id`), answer
+        // `Unchanged` instead of re-serializing every item.
+        let sync = self.reconcile_diag(uri, &items, params.previous_result_id.as_deref());
+        if sync.unchanged {
+            return Ok(DocumentDiagnosticReportResult::Report(
+                DocumentDiagnosticReport::Unchanged(RelatedUnchangedDocumentDiagnosticReport {
+                    related_documents: None,
+                    unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
+                        result_id: sync.id,
+                    },
+                }),
+            ));
+        }
         Ok(DocumentDiagnosticReportResult::Report(
             DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
                 related_documents: None,
                 full_document_diagnostic_report: FullDocumentDiagnosticReport {
-                    result_id: None,
+                    result_id: Some(sync.id),
                     items,
                 },
             }),
@@ -1622,7 +1687,7 @@ impl LanguageServer for Backend {
     /// is loaded.
     async fn workspace_diagnostic(
         &self,
-        _params: WorkspaceDiagnosticParams,
+        params: WorkspaceDiagnosticParams,
     ) -> Result<WorkspaceDiagnosticReportResult> {
         // Snapshot the paths to report: every discovered script, and the project
         // file itself (for the project-scope audit).
@@ -1636,6 +1701,14 @@ impl LanguageServer for Backend {
         {
             paths.push(prj);
         }
+
+        // The result ids the client says it already holds, by URI (LSP 3.17),
+        // so a per-document poll can short-circuit to `Unchanged` (#259).
+        let previous: std::collections::HashMap<&Url, &str> = params
+            .previous_result_ids
+            .iter()
+            .map(|p| (&p.uri, p.value.as_str()))
+            .collect();
 
         // `diagnostics_for` does blocking disk reads (and full analyze()) for
         // closed files — the common case here, since closed-file coverage is the
@@ -1654,12 +1727,25 @@ impl LanguageServer for Backend {
                 // Report the in-editor version for open buffers so the client can
                 // reconcile against its edits; `None` for closed files.
                 let version = self.docs.get(&uri).map(|d| d.version as i64);
+                let sync = self.reconcile_diag(&uri, &diags, previous.get(&uri).copied());
+                // Unchanged since the client's last result id: skip the items.
+                if sync.unchanged {
+                    items.push(WorkspaceDocumentDiagnosticReport::Unchanged(
+                        WorkspaceUnchangedDocumentDiagnosticReport {
+                            uri,
+                            version,
+                            unchanged_document_diagnostic_report:
+                                UnchangedDocumentDiagnosticReport { result_id: sync.id },
+                        },
+                    ));
+                    continue;
+                }
                 items.push(WorkspaceDocumentDiagnosticReport::Full(
                     WorkspaceFullDocumentDiagnosticReport {
                         uri,
                         version,
                         full_document_diagnostic_report: FullDocumentDiagnosticReport {
-                            result_id: None,
+                            result_id: Some(sync.id),
                             items: diags,
                         },
                     },
