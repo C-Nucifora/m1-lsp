@@ -605,13 +605,14 @@ dependencies = [
 
 [[package]]
 name = "m1-fmt"
-version = "0.11.2"
-source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.11.2#dd8494245e079107ca50874de7098dd835fbc681"
+version = "0.12.0"
+source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.12.0#1033cc7d2f28f5537be1c1c8b7d7a56764681f99"
 dependencies = [
  "clap",
  "libc",
  "m1-core",
  "m1-workspace",
+ "rayon",
  "toml",
 ]
 
@@ -631,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "m1-lsp"
-version = "0.36.0"
+version = "0.37.0"
 dependencies = [
  "dashmap 6.2.1",
  "m1-core",
@@ -649,8 +650,8 @@ dependencies = [
 
 [[package]]
 name = "m1-typecheck"
-version = "0.34.2"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.34.2#4b2146e7ff2100ae89b2801caec2f3d52211f8b3"
+version = "0.35.0"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.35.0#77b24c9e19170a5452f0eb867cdd988f4e428edf"
 dependencies = [
  "clap",
  "m1-core",
