@@ -110,6 +110,17 @@ fn collect(n: Node, li: &LineIndex, enc: PositionEncoding) -> Vec<DocumentSymbol
                     out.push(container(label, child, kids, li, enc));
                 }
             }
+            // #269: an `expand (VAR = start to end)` compile-time loop is a
+            // nesting construct (L009 counts it). Surface it as a container, like
+            // if/when, labelled by its loop variable, so its repeated body folds
+            // in the outline instead of flattening into the parent scope.
+            Kind::ExpandStatement => {
+                let kids = collect(child, li, enc);
+                if !kids.is_empty() {
+                    let label = header_label("expand", child.child_by_field(Field::Variable));
+                    out.push(container(label, child, kids, li, enc));
+                }
+            }
             // Descend through blocks, is/else clauses, and anything else so the
             // symbols inside them surface under the nearest block container.
             _ => out.extend(collect(child, li, enc)),
@@ -322,6 +333,30 @@ mod tests {
         assert!(syms[0].name.starts_with("when"), "label: {}", syms[0].name);
         let kids = syms[0].children.as_ref().expect("when has children");
         assert!(kids.iter().any(|k| k.name == "Out"));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn nests_symbols_under_expand_block() {
+        // #269: an `expand` compile-time loop is a container in the outline, like
+        // if/when — its body symbols nest under it instead of flattening into the
+        // parent scope, and the expand itself is visible.
+        let src = "expand (i = 0 to 3) {\nOut = 1;\n}\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let syms = document_symbols(cst.root(), &li, PositionEncoding::Utf16);
+        assert_eq!(
+            syms.len(),
+            1,
+            "expected one top-level expand container: {syms:?}"
+        );
+        assert!(
+            syms[0].name.starts_with("expand"),
+            "label should name the expand: {}",
+            syms[0].name
+        );
+        let kids = syms[0].children.as_ref().expect("expand has children");
+        assert!(kids.iter().any(|k| k.name == "Out"), "got {kids:?}");
     }
 
     #[test]
