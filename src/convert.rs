@@ -43,13 +43,39 @@ pub fn core_diagnostic(d: &CoreDiag, li: &LineIndex, enc: PositionEncoding) -> L
     }
 }
 
-use m1_typecheck::diagnostics::TypeDiagnostic;
-use tower_lsp::lsp_types::DiagnosticTag;
+use m1_typecheck::diagnostics::{RelatedPlace, TypeDiagnostic};
+use tower_lsp::lsp_types::{DiagnosticRelatedInformation, DiagnosticTag, Location, Position, Url};
 
-pub fn type_diagnostic(d: &TypeDiagnostic, li: &LineIndex, enc: PositionEncoding) -> LspDiag {
+pub fn type_diagnostic(
+    d: &TypeDiagnostic,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    project_path: Option<&std::path::Path>,
+) -> LspDiag {
     let code = d.code.as_str();
     // T062 flags use of a deprecated overload; tag it so editors strike it through.
     let tags = (code == "T062").then(|| vec![DiagnosticTag::DEPRECATED]);
+    // Two-location diagnostics (m1-typecheck#200): T030/T085/T086 carry their
+    // declaration site as a 0-based project-file line; the LSP knows the
+    // project path, so it becomes clickable DiagnosticRelatedInformation.
+    let related_information = project_path
+        .filter(|_| !d.related.is_empty())
+        .and_then(|prj| Url::from_file_path(prj).ok())
+        .map(|url| {
+            d.related
+                .iter()
+                .map(|r| {
+                    let RelatedPlace::Project { line } = r.place;
+                    DiagnosticRelatedInformation {
+                        location: Location {
+                            uri: url.clone(),
+                            range: Range::new(Position::new(line, 0), Position::new(line, 0)),
+                        },
+                        message: r.message.clone(),
+                    }
+                })
+                .collect()
+        });
     LspDiag {
         range: range(&d.inner.byte_range, li, enc),
         severity: Some(severity(d.inner.severity)),
@@ -57,6 +83,7 @@ pub fn type_diagnostic(d: &TypeDiagnostic, li: &LineIndex, enc: PositionEncoding
         source: Some("m1-typecheck".to_string()),
         message: d.inner.message.clone(),
         tags,
+        related_information,
         ..Default::default()
     }
 }
@@ -79,7 +106,7 @@ mod tests {
             Severity::Warning,
             "float equality".into(),
         );
-        let lsp = type_diagnostic(&d, &li, PositionEncoding::Utf16);
+        let lsp = type_diagnostic(&d, &li, PositionEncoding::Utf16, None);
         assert_eq!(lsp.source.as_deref(), Some("m1-typecheck"));
         assert_eq!(lsp.severity, Some(DiagnosticSeverity::WARNING));
         assert!(matches!(lsp.code, Some(NumberOrString::String(ref s)) if s == "T002"));

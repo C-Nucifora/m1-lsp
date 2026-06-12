@@ -27,15 +27,18 @@ fn uri_path(uri: &Url) -> PathBuf {
 impl TypeProvider for M1Type {
     fn types(&self, uri: &Url, src: &str, li: &LineIndex, enc: PositionEncoding) -> Vec<LspDiag> {
         let path = uri_path(uri);
-        let result = self.store.with_project(|p| match p {
-            Some(lp) => check_script(&lp.project, &path, src),
-            None => check_script_no_project(src),
+        let (result, prj) = self.store.with_project(|p| match p {
+            Some(lp) => (
+                check_script(&lp.project, &path, src),
+                Some(lp.m1prj_path.clone()),
+            ),
+            None => (check_script_no_project(src), None),
         });
         // Syntax errors are reported by m1-core in analyze(); ignore them here.
         result
             .diagnostics
             .iter()
-            .map(|d| type_diagnostic(d, li, enc))
+            .map(|d| type_diagnostic(d, li, enc, prj.as_deref()))
             .collect()
     }
 

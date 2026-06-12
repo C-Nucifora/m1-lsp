@@ -156,7 +156,7 @@ fn meta_badges_markdown(sym: &Symbol) -> String {
     s
 }
 
-fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
+pub(crate) fn symbol_markdown(sym: &Symbol, project: Option<&Project>) -> String {
     let mut s = header_markdown(sym);
     // For objects, show the package class instead of a (meaningless) value type.
     if let Some(obj) = object_markdown(sym) {

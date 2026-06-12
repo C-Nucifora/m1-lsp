@@ -67,29 +67,94 @@ pub struct M1Config {
 
 impl M1Config {
     /// Resolve the effective config for a project rooted at `root`, layering
-    /// `editor` settings (JSON, same shape as the toml) over the defaults and the
-    /// workspace `m1-tools.toml` over both. With no `m1-tools.toml`, a legacy
-    /// `.m1lint.toml` still configures the lint section (back-compat).
+    /// `editor` settings (JSON, same shape as the toml) over the defaults, the
+    /// workspace `m1-tools.toml` over both, and the tool-specific files over
+    /// the unified file — mirroring the CLI's relative order (#268):
+    /// `.m1fmt.toml` overlays the format section; with no `m1-tools.toml`, a
+    /// legacy `.m1lint.toml` still takes over the lint section (back-compat).
     pub fn resolve(editor: Option<&serde_json::Value>, root: &Path) -> M1Config {
+        Self::resolve_with_issues(editor, root).0
+    }
+
+    /// Like [`Self::resolve`], but also reports config problems that were
+    /// previously swallowed (#278): a malformed `m1-tools.toml` (which would
+    /// otherwise silently fall back to defaults, looking like "the LSP
+    /// ignored my setting"), unknown keys (typos keeping a tool default), and
+    /// editor-settings payloads that fail to deserialize. Each issue is one
+    /// human-readable line for `window/logMessage`/`showMessage`.
+    pub fn resolve_with_issues(
+        editor: Option<&serde_json::Value>,
+        root: &Path,
+    ) -> (M1Config, Vec<String>) {
+        let mut issues = Vec::new();
         let mut cfg = M1Config::default();
-        if let Some(v) = editor
-            && let Ok(tc) = serde_json::from_value::<M1ToolsConfig>(v.clone())
-        {
-            apply(tc, &mut cfg);
+        if let Some(v) = editor {
+            match serde_json::from_value::<M1ToolsConfig>(v.clone()) {
+                Ok(tc) => apply(tc, &mut cfg),
+                Err(e) => issues.push(format!("editor settings ignored (invalid shape): {e}")),
+            }
         }
-        match M1ToolsConfig::discover(root) {
-            Some(tc) => apply(tc, &mut cfg),
+        match M1ToolsConfig::discover_result(root) {
+            Ok(Some(found)) => {
+                for key in &found.unknown_keys {
+                    issues.push(format!(
+                        "{}: unknown key `{key}` (typo? the tool default stays in effect)",
+                        found.path.display()
+                    ));
+                }
+                apply(found.config, &mut cfg);
+            }
             // No unified file: keep the editor/default lint config unless a legacy
             // `.m1lint.toml` is present, which then takes over the lint section.
-            None => {
+            Ok(None) => {
                 if m1_workspace::find_upward(root, ".m1lint.toml").is_some()
                     && let Ok(lint) = LintConfig::discover(root)
                 {
                     cfg.lint = lint;
                 }
             }
+            Err(e) => issues.push(format!("{e} — falling back to the layers below it")),
         }
-        cfg
+        // `.m1fmt.toml` was honoured by the m1-fmt CLI but silently ignored
+        // here, so format-on-save and the CLI disagreed for teams configured
+        // through the tool file (#268). Same precedence as the CLI: it
+        // overrides the unified file's [format] values.
+        if let Some(fc) = m1_fmt::config::discover(root) {
+            apply_fmt_file(fc, &mut cfg.format);
+        }
+        (cfg, issues)
+    }
+}
+
+/// Overlay a `.m1fmt.toml` (already parsed by m1-fmt's own discovery) onto the
+/// resolved `FormatOptions` (#268). Unset keys leave the lower layers alone.
+fn apply_fmt_file(fc: m1_fmt::config::FileConfig, fmt: &mut FormatOptions) {
+    if let Some(n) = fc.max_line_length {
+        fmt.line_width = n;
+    }
+    if let Some(n) = fc.max_blank_lines {
+        fmt.max_blank_lines = n;
+    }
+    if let Some(s) = fc.indent_style {
+        fmt.indent_style = s;
+    }
+    if let Some(n) = fc.indent_width {
+        fmt.indent_width = n;
+    }
+    if let Some(b) = fc.brace_style {
+        fmt.brace_style = b;
+    }
+    if let Some(n) = fc.continuation_indent {
+        fmt.continuation_indent = n;
+    }
+    if let Some(b) = fc.align_assignments {
+        fmt.align_assignments = b;
+    }
+    if let Some(b) = fc.reflow_comments {
+        fmt.reflow_comments = b;
+    }
+    if let Some(b) = fc.final_blank_line {
+        fmt.final_blank_line = b;
     }
 }
 
@@ -136,6 +201,20 @@ fn apply(tc: M1ToolsConfig, cfg: &mut M1Config) {
         .and_then(m1_fmt::config::parse_brace_style)
     {
         cfg.format.brace_style = s;
+    }
+    // The full formatter-knob surface (#277): editor formatting honours the
+    // same unified keys as the m1-fmt CLI.
+    if let Some(n) = tc.format.continuation_indent {
+        cfg.format.continuation_indent = n;
+    }
+    if let Some(b) = tc.format.align_assignments {
+        cfg.format.align_assignments = b;
+    }
+    if let Some(b) = tc.format.reflow_comments {
+        cfg.format.reflow_comments = b;
+    }
+    if let Some(b) = tc.format.final_blank_line {
+        cfg.format.final_blank_line = b;
     }
     if let Some(ig) = tc.diagnostics.ignore {
         cfg.diagnostics.ignore = ig.into_iter().collect();
@@ -198,6 +277,26 @@ pub fn scaffold() -> String {
     );
     let _ = writeln!(s, "indent_width = {}", fmt.indent_width);
     let _ = writeln!(s, "brace_style = \"{brace}\"      # \"allman\" | \"kr\"");
+    let _ = writeln!(
+        s,
+        "continuation_indent = {}  # extra indent levels on wrapped lines",
+        fmt.continuation_indent
+    );
+    let _ = writeln!(
+        s,
+        "align_assignments = {}  # align `=` of contiguous simple assignments (opt-in)",
+        fmt.align_assignments
+    );
+    let _ = writeln!(
+        s,
+        "reflow_comments = {}    # split over-width // comments (opt-in)",
+        fmt.reflow_comments
+    );
+    let _ = writeln!(
+        s,
+        "final_blank_line = {}   # end the file with one blank line (pairs with L027)",
+        fmt.final_blank_line
+    );
     s.push('\n');
 
     s.push_str("[diagnostics]\n");
@@ -300,5 +399,77 @@ mod tests {
         assert!(toml.contains("brace_style"));
         assert!(toml.contains("indent_style"));
         assert!(toml.contains("indent_width"));
+        // #277: the full formatter-knob surface is documented too.
+        assert!(toml.contains("continuation_indent"));
+        assert!(toml.contains("align_assignments"));
+        assert!(toml.contains("reflow_comments"));
+        assert!(toml.contains("final_blank_line"));
+    }
+
+    #[test]
+    fn unified_format_knobs_reach_format_options() {
+        // #277: editor formatting honours the same unified keys as the CLI.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("m1-tools.toml"),
+            "[format]\ncontinuation_indent = 3\nalign_assignments = true\n\
+             reflow_comments = true\nfinal_blank_line = true\n",
+        )
+        .unwrap();
+        let cfg = M1Config::resolve(None, tmp.path());
+        assert_eq!(cfg.format.continuation_indent, 3);
+        assert!(cfg.format.align_assignments);
+        assert!(cfg.format.reflow_comments);
+        assert!(cfg.format.final_blank_line);
+    }
+
+    #[test]
+    fn m1fmt_toml_overrides_unified_format() {
+        // #268: the tool-specific file outranks the unified file, like the CLI.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("m1-tools.toml"),
+            "[format]\nbrace_style = \"kr\"\nline_width = 100\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join(".m1fmt.toml"),
+            "brace_style = \"allman\"\nfinal_blank_line = true\n",
+        )
+        .unwrap();
+        let cfg = M1Config::resolve(None, tmp.path());
+        assert_eq!(cfg.format.brace_style, m1_fmt::BraceStyle::Allman);
+        assert!(cfg.format.final_blank_line);
+        assert_eq!(
+            cfg.format.line_width, 100,
+            "unset tool-file keys fall through"
+        );
+    }
+
+    #[test]
+    fn malformed_unified_config_is_reported_not_swallowed() {
+        // #278: a broken m1-tools.toml surfaces as an issue line instead of
+        // silently behaving like no config; unknown keys flag typos.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("m1-tools.toml"), "[format\noops").unwrap();
+        let (_, issues) = M1Config::resolve_with_issues(None, tmp.path());
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].contains("m1-tools.toml"), "{issues:?}");
+
+        std::fs::write(
+            tmp.path().join("m1-tools.toml"),
+            "[format]\nline_wdith = 100\n",
+        )
+        .unwrap();
+        let (_, issues) = M1Config::resolve_with_issues(None, tmp.path());
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].contains("line_wdith"), "{issues:?}");
+
+        let (_, issues) =
+            M1Config::resolve_with_issues(Some(&serde_json::json!("not an object")), tmp.path());
+        assert!(
+            issues.iter().any(|i| i.contains("editor settings")),
+            "{issues:?}"
+        );
     }
 }
