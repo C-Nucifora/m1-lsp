@@ -1645,15 +1645,31 @@ impl LanguageServer for Backend {
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         let uri = params.text_document.uri;
-        let Some(doc) = self.doc_context(&uri) else {
+        // Single lookup: fetch the document once and derive everything from it.
+        // A second `docs.get` for the format-action block would silently drop
+        // "Format Document"/"Format Selection" if the document was closed or
+        // replaced between the two calls (#287).
+        let Some(raw_doc) = self.docs.get(&uri) else {
             return Ok(None);
         };
-        let enc = doc.enc;
+        let enc = self.enc();
+        let text = raw_doc.text.clone();
+        let line_index = raw_doc.line_index.clone();
+        // Compute format edits while still holding the guard so the text and
+        // line-index used here are coherent with the rest of this request.
+        let fmt_doc_edits = format_edits(&raw_doc, enc, self.formatter.as_ref());
+        let fmt_sel_edits = if params.range.start.line < params.range.end.line {
+            range_format_edits(&raw_doc, params.range, self.formatter.as_ref())
+        } else {
+            None
+        };
+        drop(raw_doc);
+
         // The project model backs the T020 "did you mean" enum-member fix (#159).
         let mut actions = self.store.with_project(|p| {
             code_action::code_actions(
-                &doc.text,
-                &doc.line_index,
+                &text,
+                &line_index,
                 enc,
                 &uri,
                 &params.context.diagnostics,
@@ -1663,13 +1679,13 @@ impl LanguageServer for Backend {
         // Whole-file "fix all auto-fixable lint issues" via the shared m1-lint
         // fixer — covers every fixable rule (L003/L007/L011/L018…), not just the
         // hand-ported few (#158).
-        if let Some(fixed) = self.lint.fix(&doc.text)
-            && fixed != doc.text
+        if let Some(fixed) = self.lint.fix(&text)
+            && fixed != text
         {
             actions.push(code_action::fix_all_lint_action(
                 &uri,
-                &doc.text,
-                &doc.line_index,
+                &text,
+                &line_index,
                 enc,
                 fixed,
             ));
@@ -1677,8 +1693,8 @@ impl LanguageServer for Backend {
         // Selection-driven refactors, offered independently of diagnostics (#174):
         // "Extract to local" on a selected expression, "Inline local" on a local.
         actions.extend(code_action::refactors(
-            &doc.text,
-            &doc.line_index,
+            &text,
+            &line_index,
             enc,
             &uri,
             params.range,
@@ -1687,15 +1703,11 @@ impl LanguageServer for Backend {
         // so the menu can format clean code. "Format Document" appears when
         // formatting would change the file; "Format Selection" when the request
         // range spans more than one line.
-        if let Some(doc) = self.docs.get(&uri) {
-            if let Some(edits) = format_edits(&doc, enc, self.formatter.as_ref()) {
-                actions.push(code_action::format_action("Format Document", &uri, edits));
-            }
-            if params.range.start.line < params.range.end.line
-                && let Some(edits) = range_format_edits(&doc, params.range, self.formatter.as_ref())
-            {
-                actions.push(code_action::format_action("Format Selection", &uri, edits));
-            }
+        if let Some(edits) = fmt_doc_edits {
+            actions.push(code_action::format_action("Format Document", &uri, edits));
+        }
+        if let Some(edits) = fmt_sel_edits {
+            actions.push(code_action::format_action("Format Selection", &uri, edits));
         }
         Ok((!actions.is_empty()).then_some(actions))
     }
@@ -2004,6 +2016,90 @@ mod pull_diagnostics_tests {
         assert!(
             client_supports_pull_diagnostics(&caps),
             "textDocument.diagnostic present => pull client (push must be suppressed)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod code_action_format_tests {
+    use super::{Backend, ProjectStore};
+    use crate::analysis::{NoLint, NoTypes};
+    use crate::format::Formatter;
+    use std::sync::Arc;
+    use tower_lsp::{LanguageServer, LspService, lsp_types::*};
+
+    // A trivial formatter that appends a newline so it always produces a
+    // change, making `format_edits` return `Some(edits)` in every test run.
+    struct AlwaysAddsNewline;
+    impl Formatter for AlwaysAddsNewline {
+        fn format(&self, src: &str) -> Option<String> {
+            Some(format!("{src}\n"))
+        }
+    }
+
+    // Regression guard for #287: the `code_action` handler previously called
+    // `docs.get(&uri)` a second time for the format-action block. If the
+    // document was closed or replaced between the two lookups the format
+    // actions ("Format Document" / "Format Selection") silently disappeared
+    // from the response. The fix fetches the document once and reuses it.
+    //
+    // This test opens a document and requests code actions from a backend
+    // configured with a formatter that always produces a change. It asserts
+    // that "Format Document" is present in the response, confirming the
+    // format-action path reached a live document.
+    //
+    // `code_action` indirectly triggers `block_in_place` through the LSP
+    // client, so the test needs the multi-thread runtime.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn format_document_action_present_when_doc_is_open() {
+        let (service, _socket) = LspService::new(|client| {
+            Backend::with_backends(
+                client,
+                Box::new(NoLint),
+                Box::new(NoTypes),
+                Box::new(AlwaysAddsNewline),
+                Arc::new(ProjectStore::new()),
+            )
+        });
+        let backend = service.inner();
+        let uri = Url::parse("file:///test.m1scr").unwrap();
+
+        // Open the document so the handler finds it via docs.get.
+        backend
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "m1scr".to_owned(),
+                    version: 1,
+                    text: "x = 1\n".to_owned(),
+                },
+            })
+            .await;
+
+        let result = backend
+            .code_action(CodeActionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                context: CodeActionContext {
+                    diagnostics: vec![],
+                    only: None,
+                    trigger_kind: None,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .expect("code_action must not error");
+
+        let actions = result.expect("code_action must return Some when doc is open");
+
+        let has_format_document = actions.iter().any(
+            |a| matches!(a, CodeActionOrCommand::CodeAction(ca) if ca.title == "Format Document"),
+        );
+        assert!(
+            has_format_document,
+            "\"Format Document\" must appear in code actions when the doc is open and \
+             the formatter produces a change; got: {actions:?}"
         );
     }
 }
