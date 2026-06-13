@@ -108,7 +108,7 @@ struct DiagSync {
 impl DocContext {
     /// Byte offset of an LSP `position` within this document.
     fn byte(&self, position: Position) -> usize {
-        self.line_index.offset(position, &self.text, self.enc)
+        self.line_index.offset(position, self.enc)
     }
 
     /// Parse the document text into a CST. The caller holds the returned `Cst` so

@@ -32,7 +32,9 @@ impl LineIndex {
         Position::new(line as u32, col as u32)
     }
 
-    pub fn offset(&self, pos: Position, _text: &str, enc: PositionEncoding) -> usize {
+    /// Byte offset of `pos`, computed against this index's own text — mirrors
+    /// [`position`](Self::position), which likewise takes no text argument.
+    pub fn offset(&self, pos: Position, enc: PositionEncoding) -> usize {
         self.inner
             .offset_in(&self.text, pos.line as usize, pos.character as usize, enc)
     }
