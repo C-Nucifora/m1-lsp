@@ -40,11 +40,8 @@ impl Document {
             self.cst = Arc::new(m1_core::parse(&self.text));
             return;
         };
-        let start = self.line_index.offset(range.start, &self.text, enc);
-        let end = self
-            .line_index
-            .offset(range.end, &self.text, enc)
-            .max(start);
+        let start = self.line_index.offset(range.start, enc);
+        let end = self.line_index.offset(range.end, enc).max(start);
         let edit = m1_core::Edit {
             start_byte: start,
             old_end_byte: end,

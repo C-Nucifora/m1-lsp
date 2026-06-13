@@ -133,8 +133,8 @@ pub fn code_actions(
     if let Some(project) = project {
         let table = project.symbols();
         for d in diagnostics.iter().filter(|d| is_t020(d)) {
-            let start = li.offset(d.range.start, text, enc);
-            let end = li.offset(d.range.end, text, enc);
+            let start = li.offset(d.range.start, enc);
+            let end = li.offset(d.range.end, enc);
             let Some((head, member)) = text.get(start..end).and_then(|s| s.rsplit_once('.')) else {
                 continue;
             };
@@ -179,8 +179,8 @@ pub fn code_actions(
     if !l016.is_empty() {
         let cst = m1_core::parse(text);
         for d in l016 {
-            let start = li.offset(d.range.start, text, enc);
-            let end = li.offset(d.range.end, text, enc);
+            let start = li.offset(d.range.start, enc);
+            let end = li.offset(d.range.end, enc);
             let Some(name) = text.get(start..end) else {
                 continue;
             };
@@ -334,7 +334,7 @@ pub fn refactors(
     if let Some(a) = extract_local(text, li, enc, uri, range, root) {
         out.push(a);
     }
-    if let Some(a) = inline_local(text, li, enc, uri, range, root) {
+    if let Some(a) = inline_local(li, enc, uri, range, root) {
         out.push(a);
     }
     out
@@ -402,7 +402,7 @@ fn suppress_edit(
     d: &Diagnostic,
     code: &str,
 ) -> Option<TextEdit> {
-    let offset = li.offset(d.range.start, text, enc);
+    let offset = li.offset(d.range.start, enc);
     let node = cst.node_at_offset(offset);
     let stmt = enclosing_statement(node);
     if matches!(stmt.kind(), Kind::LineComment | Kind::BlockComment) {
@@ -424,7 +424,7 @@ fn suppress_edit(
     // An existing standalone `// @m1:allow(...)` directly above: append the
     // code to its list instead of stacking a second annotation line.
     if stmt_line > 0 {
-        let prev_start = li.offset(Position::new(stmt_line - 1, 0), text, enc);
+        let prev_start = li.offset(Position::new(stmt_line - 1, 0), enc);
         let prev_end = line_start.saturating_sub(1); // strip the `\n`
         let prev_line = &text[prev_start..prev_end];
         let trimmed = prev_line.trim_start();
@@ -517,8 +517,8 @@ fn extract_local(
     range: Range,
     root: Node,
 ) -> Option<CodeActionOrCommand> {
-    let mut s = li.offset(range.start, text, enc);
-    let mut e = li.offset(range.end, text, enc);
+    let mut s = li.offset(range.start, enc);
+    let mut e = li.offset(range.end, enc);
     // Trim whitespace inside the selection so a trailing/leading space (common in
     // a drag-select) still lines up with an expression node's exact span.
     while s < e && text[s..].chars().next().is_some_and(char::is_whitespace) {
@@ -591,14 +591,13 @@ fn extract_local(
 /// local, the local has no initializer, or it is reassigned anywhere (so its
 /// value isn't a single constant expression).
 fn inline_local(
-    text: &str,
     li: &LineIndex,
     enc: PositionEncoding,
     uri: &Url,
     range: Range,
     root: Node,
 ) -> Option<CodeActionOrCommand> {
-    let byte = li.offset(range.start, text, enc);
+    let byte = li.offset(range.start, enc);
     let ident = crate::features::rename::local_ident_at(root, byte)?;
     let name = ident.text();
 
@@ -728,8 +727,8 @@ fn operator_edit(
     enc: PositionEncoding,
     d: &Diagnostic,
 ) -> Option<(String, &'static str, TextEdit)> {
-    let start = li.offset(d.range.start, text, enc);
-    let end = li.offset(d.range.end, text, enc);
+    let start = li.offset(d.range.start, enc);
+    let end = li.offset(d.range.end, enc);
     // get() (not indexing): a range produced under a different position encoding
     // may not land on a char boundary — skip rather than panic.
     let op = text.get(start..end).filter(|s| !s.is_empty())?;
@@ -752,8 +751,8 @@ fn loop_keyword(
     if !is_unsupported_c_token(d) {
         return None;
     }
-    let start = li.offset(d.range.start, text, enc);
-    let end = li.offset(d.range.end, text, enc);
+    let start = li.offset(d.range.start, enc);
+    let end = li.offset(d.range.end, enc);
     match text.get(start..end)? {
         "while" => Some("while"),
         "for" => Some("for"),
@@ -802,7 +801,7 @@ fn nearest_enum_member(typo: &str, members: &[(String, i64)]) -> Option<String> 
 
 /// The leading whitespace (indentation) of `line`.
 fn line_indent(text: &str, li: &LineIndex, enc: PositionEncoding, line: u32) -> String {
-    let line_start = li.offset(Position::new(line, 0), text, enc);
+    let line_start = li.offset(Position::new(line, 0), enc);
     text[line_start..]
         .chars()
         .take_while(|c| *c == ' ' || *c == '\t')
@@ -841,8 +840,8 @@ mod tests {
         };
         // Apply the single edit to produce the fixed source.
         let edit = a.edit?.changes?.into_values().next()?.into_iter().next()?;
-        let start = li.offset(edit.range.start, src, enc);
-        let end = li.offset(edit.range.end, src, enc);
+        let start = li.offset(edit.range.start, enc);
+        let end = li.offset(edit.range.end, enc);
         let mut s = src.to_string();
         s.replace_range(start..end, &edit.new_text);
         Some(s)
@@ -881,8 +880,8 @@ mod tests {
             .iter()
             .map(|e| {
                 (
-                    li.offset(e.range.start, src, ENC),
-                    li.offset(e.range.end, src, ENC),
+                    li.offset(e.range.start, ENC),
+                    li.offset(e.range.end, ENC),
                     e.new_text.clone(),
                 )
             })
@@ -1062,7 +1061,7 @@ mod tests {
             .unwrap();
         assert_eq!(edit.new_text, ";");
         // Applying it produces valid source.
-        let start = li.offset(edit.range.start, src, enc);
+        let start = li.offset(edit.range.start, enc);
         let mut s = src.to_string();
         s.insert_str(start, &edit.new_text);
         assert_eq!(s, "x = 1;\n");
@@ -1135,8 +1134,8 @@ mod tests {
             .into_iter()
             .next()
             .unwrap();
-        let start = li.offset(edit.range.start, src, enc);
-        let end = li.offset(edit.range.end, src, enc);
+        let start = li.offset(edit.range.start, enc);
+        let end = li.offset(edit.range.end, enc);
         let mut s = src.to_string();
         s.replace_range(start..end, &edit.new_text);
         assert_eq!(s, "x = 1;\n");
