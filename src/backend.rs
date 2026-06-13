@@ -968,6 +968,7 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri;
         self.docs.remove(&uri);
         self.semtok_prev.remove(&uri);
+        self.diag_prev.remove(&uri);
         // The graph would now read this file from disk instead of the buffer.
         self.store.invalidate_call_graph();
         self.client.publish_diagnostics(uri, vec![], None).await;
@@ -1926,6 +1927,48 @@ impl LanguageServer for Backend {
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod did_close_tests {
+    use super::Backend;
+    use tower_lsp::{LanguageServer, LspService, lsp_types::*};
+
+    // Regression guard: `did_close` must remove the closed document's entry from
+    // `diag_prev`. Before the fix the handler cleared `docs` and `semtok_prev` but
+    // left `diag_prev` alone, leaking a stale cache entry on every close. Each
+    // close/reopen cycle accumulated an orphaned entry that was never reclaimed.
+    //
+    // The handler calls `publish_diagnostics` which hits the client socket; that
+    // path uses `block_in_place` internally, so the test requires the multi-thread
+    // runtime.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn did_close_removes_diag_prev_entry() {
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+
+        let uri = Url::parse("file:///test.m1scr").unwrap();
+
+        // Seed diag_prev as if a pull-diagnostic poll had previously run.
+        backend
+            .diag_prev
+            .insert(uri.clone(), ("result-1".to_owned(), vec![]));
+        assert!(
+            backend.diag_prev.contains_key(&uri),
+            "precondition: diag_prev must contain the URI before close"
+        );
+
+        backend
+            .did_close(DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+            })
+            .await;
+
+        assert!(
+            !backend.diag_prev.contains_key(&uri),
+            "did_close must remove the URI from diag_prev to prevent a cache leak"
+        );
     }
 }
 
