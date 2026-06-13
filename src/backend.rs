@@ -1785,6 +1785,12 @@ impl LanguageServer for Backend {
         for uri in uris {
             self.publish(uri).await;
         }
+        // `publish` no-ops for pull-diagnostics clients (VS Code), so the loop
+        // above leaves their on-screen diagnostics stale until the next edit
+        // (#281). Mirror the watched-files path: nudge pull clients to re-pull
+        // (and refresh project-derived views), so a settings change — e.g.
+        // newly ignoring a code — takes effect immediately.
+        self.publish_project_diagnostics().await;
     }
 
     /// Pull diagnostics for a single document (#140). Runs the same analysis as

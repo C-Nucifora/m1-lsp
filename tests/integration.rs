@@ -599,6 +599,127 @@ async fn pull_diagnostic_returns_unchanged_for_matching_result_id() {
     );
 }
 
+// #281: `didChangeConfiguration` must refresh diagnostics for pull-diagnostics
+// clients (VS Code). The handler used to only loop `publish`, which no-ops for
+// pull clients, so a settings change stayed invisible until the next edit. After
+// the fix it nudges pull clients via `workspace/diagnostic/refresh`, exactly like
+// the watched-files (`.m1cfg`/config) path.
+#[tokio::test(flavor = "multi_thread")]
+async fn did_change_configuration_refreshes_pull_clients() {
+    use std::io::Write;
+    use tower_lsp::lsp_types::Url;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let scripts = tmp.path().join("Scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    std::fs::File::create(tmp.path().join("Project.m1prj"))
+        .unwrap()
+        .write_all(b"<?xml version=\"1.0\"?>\n<Project>\n  <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root\"/>\n</Project>")
+        .unwrap();
+    let script = scripts.join("Widget.m1scr");
+    std::fs::write(&script, "local x = 0;\nx = a == b;\n").unwrap();
+
+    let root_uri = Url::from_file_path(tmp.path()).unwrap();
+    let script_uri = Url::from_file_path(&script).unwrap();
+
+    let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+    // Initialize as a pull-diagnostics client: declare `textDocument.diagnostic`.
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "processId":null,"rootUri":root_uri,
+            "capabilities":{"textDocument":{"diagnostic":{"dynamicRegistration":false}},
+                "workspace":{"diagnostics":{"refreshSupport":true}}}}}),
+    )
+    .await;
+    let _ = read_response(&mut client, 1).await;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    // Open a file producing a finding, then pull it so the client "holds" it.
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":script_uri,"languageId":"m1","version":1,
+                "text":"local x = 0;\nx = a == b;\n"}}}),
+    )
+    .await;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":2,"method":"textDocument/diagnostic","params":{
+            "textDocument":{"uri":script_uri}}}),
+    )
+    .await;
+    // Drain everything the open/initialize/pull path emitted (the server already
+    // sends one `workspace/diagnostic/refresh` at `initialized`); answer any
+    // server→client requests so the server doesn't stall, and stop once the
+    // wire is quiet. From here on, anything new is caused by the config change.
+    drain(&mut client).await;
+
+    // A settings change. Before the fix the server emitted nothing here (no push
+    // to a pull client, no refresh); after the fix it must request a refresh.
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"workspace/didChangeConfiguration","params":{
+            "settings":{"diagnostics":{"ignore":["L004"]}}}}),
+    )
+    .await;
+
+    // The server must now send a fresh `workspace/diagnostic/refresh` request
+    // (server→client) — this is the whole point of #281.
+    let refresh = read_until_method(&mut client, "workspace/diagnostic/refresh").await;
+    assert!(
+        refresh.get("id").is_some(),
+        "refresh must be a request the client can answer; got {refresh}"
+    );
+    let id = refresh["id"].clone();
+    write_msg(&mut client, &json!({"jsonrpc":"2.0","id":id,"result":null})).await;
+}
+
+// Read messages until one with the given `method` arrives (skipping the server's
+// interleaved notifications), answering any server→client requests so the server
+// doesn't block on a pending response. Time-bounded so a missing message fails
+// fast and deterministically (a pre-fix server that never refreshes would
+// otherwise leave this read blocked forever).
+async fn read_until_method(stream: &mut DuplexStream, method: &str) -> Value {
+    let deadline = std::time::Duration::from_secs(3);
+    loop {
+        let msg = tokio::time::timeout(deadline, read_msg(stream))
+            .await
+            .unwrap_or_else(|_| panic!("did not observe a `{method}` message within {deadline:?}"));
+        if msg.get("method").and_then(|m| m.as_str()) == Some(method) {
+            return msg;
+        }
+        // Answer any other server request so it can make progress.
+        if let Some(id) = msg.get("id")
+            && msg.get("method").is_some()
+        {
+            write_msg(stream, &json!({"jsonrpc":"2.0","id":id,"result":null})).await;
+        }
+    }
+}
+
+// Drain pending server→client traffic until the wire goes quiet (a short read
+// timeout elapses), answering any requests so the server doesn't stall.
+async fn drain(stream: &mut DuplexStream) {
+    while let Ok(msg) =
+        tokio::time::timeout(std::time::Duration::from_millis(300), read_msg(stream)).await
+    {
+        if let Some(id) = msg.get("id")
+            && msg.get("method").is_some()
+        {
+            write_msg(stream, &json!({"jsonrpc":"2.0","id":id,"result":null})).await;
+        }
+    }
+}
+
 // Direct-call tests of the pure analysis path (no transport needed).
 #[test]
 fn analyze_reports_syntax_error() {

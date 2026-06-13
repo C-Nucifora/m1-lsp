@@ -104,16 +104,18 @@ impl M1Config {
                 }
                 apply(found.config, &mut cfg);
             }
-            // No unified file: keep the editor/default lint config unless a legacy
-            // `.m1lint.toml` is present, which then takes over the lint section.
-            Ok(None) => {
-                if m1_workspace::find_upward(root, ".m1lint.toml").is_some()
-                    && let Ok(lint) = LintConfig::discover(root)
-                {
-                    cfg.lint = lint;
-                }
-            }
+            Ok(None) => {}
             Err(e) => issues.push(format!("{e} — falling back to the layers below it")),
+        }
+        // `.m1lint.toml` was only honoured when no `m1-tools.toml` existed (and
+        // then it wholesale-replaced the lint section), so the editor and the
+        // `m1-lint` CLI disagreed whenever a unified file was present (#280).
+        // Mirror the CLI / `.m1fmt.toml` (#268) precedence: overlay only the
+        // file's set keys on top of the unified file, never resetting the lower
+        // layers.
+        match cfg.lint.apply_discovered_file(root) {
+            Ok(_) => {}
+            Err(e) => issues.push(format!(".m1lint.toml ignored (invalid): {e}")),
         }
         // `.m1fmt.toml` was honoured by the m1-fmt CLI but silently ignored
         // here, so format-on-save and the CLI disagreed for teams configured
@@ -443,6 +445,29 @@ mod tests {
         assert_eq!(
             cfg.format.line_width, 100,
             "unset tool-file keys fall through"
+        );
+    }
+
+    #[test]
+    fn m1lint_toml_overlays_unified_lint() {
+        // #280: the tool-specific lint file outranks the unified file (like the
+        // CLI / `.m1fmt.toml`), and only its set keys override — the unified
+        // file's other lint values fall through, never reset to defaults.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("m1-tools.toml"),
+            "[lint]\nmax_line_length = 100\nmax_nesting_depth = 9\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join(".m1lint.toml"), "max_line_length = 80\n").unwrap();
+        let cfg = M1Config::resolve(None, tmp.path());
+        assert_eq!(
+            cfg.lint.max_line_length, 80,
+            "tool file outranks the unified file"
+        );
+        assert_eq!(
+            cfg.lint.max_nesting_depth, 9,
+            "unset tool-file keys fall through to the unified file"
         );
     }
 
