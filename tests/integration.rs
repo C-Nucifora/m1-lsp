@@ -683,6 +683,87 @@ async fn did_change_configuration_refreshes_pull_clients() {
     write_msg(&mut client, &json!({"jsonrpc":"2.0","id":id,"result":null})).await;
 }
 
+// #NNN: `didChangeWatchedFiles` for a created/deleted `.m1scr` must refresh
+// diagnostics for pull-diagnostics clients (VS Code). Before the fix the handler
+// called `refresh_scripts()` and returned early (the `!touches_project &&
+// config_change.is_none()` guard), so pull clients never received a
+// `workspace/diagnostic/refresh` and newly-created scripts stayed invisible until
+// a manual re-pull.
+#[tokio::test(flavor = "multi_thread")]
+async fn scripts_changed_refreshes_pull_clients() {
+    use std::io::Write;
+    use tower_lsp::lsp_types::Url;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let scripts = tmp.path().join("Scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    std::fs::File::create(tmp.path().join("Project.m1prj"))
+        .unwrap()
+        .write_all(b"<?xml version=\"1.0\"?>\n<Project>\n  <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root\"/>\n</Project>")
+        .unwrap();
+    let script = scripts.join("Widget.m1scr");
+    std::fs::write(&script, "local x = 0;\nx = a == b;\n").unwrap();
+
+    let root_uri = Url::from_file_path(tmp.path()).unwrap();
+    let script_uri = Url::from_file_path(&script).unwrap();
+
+    let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+    // Initialize as a pull-diagnostics client: declare `textDocument.diagnostic`.
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "processId":null,"rootUri":root_uri,
+            "capabilities":{"textDocument":{"diagnostic":{"dynamicRegistration":false}},
+                "workspace":{"diagnostics":{"refreshSupport":true}}}}}),
+    )
+    .await;
+    let _ = read_response(&mut client, 1).await;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    // Open a file and drain all server traffic from initialization.
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":script_uri,"languageId":"m1","version":1,
+                "text":"local x = 0;\nx = a == b;\n"}}}),
+    )
+    .await;
+    drain(&mut client).await;
+
+    // Simulate a new `.m1scr` being created in the workspace.  This is a
+    // watched-files notification for a `.m1scr` file only — it does NOT touch
+    // a `.m1prj`/`.m1cfg` (so `touches_project` is false) and it is not a
+    // config-file change (so `config_change` is None).  Before the fix the
+    // handler returned early after `refresh_scripts()` and never sent a refresh.
+    let new_script = scripts.join("NewScript.m1scr");
+    std::fs::write(&new_script, "local y = 0;\n").unwrap();
+    let new_script_uri = Url::from_file_path(&new_script).unwrap();
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{
+            "changes":[{"uri":new_script_uri,"type":1}]}}),
+    )
+    .await;
+
+    // The server must send a `workspace/diagnostic/refresh` so the pull client
+    // re-pulls and sees the newly created script.
+    let refresh = read_until_method(&mut client, "workspace/diagnostic/refresh").await;
+    assert!(
+        refresh.get("id").is_some(),
+        "refresh must be a request the client can answer; got {refresh}"
+    );
+    let id = refresh["id"].clone();
+    write_msg(&mut client, &json!({"jsonrpc":"2.0","id":id,"result":null})).await;
+}
+
 // Read messages until one with the given `method` arrives (skipping the server's
 // interleaved notifications), answering any server→client requests so the server
 // doesn't block on a pending response. Time-bounded so a missing message fails

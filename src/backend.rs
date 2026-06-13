@@ -1736,7 +1736,7 @@ impl LanguageServer for Backend {
         if scripts_changed {
             self.store.refresh_scripts();
         }
-        if !touches_project && config_change.is_none() {
+        if !touches_project && config_change.is_none() && !scripts_changed {
             return;
         }
         // Reload the project from the known .m1prj path if any, else rediscover.
