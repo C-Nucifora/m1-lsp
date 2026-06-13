@@ -380,8 +380,8 @@ pub fn apply_workspace_edit_to(
         .iter()
         .map(|e| {
             (
-                li.offset(e.range.start, text, enc),
-                li.offset(e.range.end, text, enc),
+                li.offset(e.range.start, enc),
+                li.offset(e.range.end, enc),
                 e.new_text.as_str(),
             )
         })
