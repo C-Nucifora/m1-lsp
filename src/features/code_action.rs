@@ -241,12 +241,20 @@ pub fn code_actions(
         };
         let line = d.range.start.line;
         let indent = line_indent(text, li, enc, line);
+        // Emit syntactically-valid M1 matching the completion snippet shape
+        // (completion.rs::construct_snippet("when")): a `//` line comment,
+        // lowercase keywords with a parenthesised subject, `is (pattern)`
+        // clauses, and the manual-mandated tabs + Allman braces (#282). The old
+        // stub used `--` comments, `When … { Is …: }` and 4-space/K&R layout —
+        // none of which parse, and L010 would flag the indentation.
         let stub = format!(
-            "{indent}-- TODO: `{kw}` is not supported in M1 — rewrite as a WhenStatement\n\
-             {indent}When State.Phase {{\n\
-             {indent}    Is Phase.Init: -- …\n\
-             {indent}}}
-"
+            "{indent}// TODO: `{kw}` is not supported in M1 — rewrite as a WhenStatement\n\
+             {indent}when (subject)\n\
+             {indent}{{\n\
+             {indent}\tis (Value)\n\
+             {indent}\t{{\n\
+             {indent}\t}}\n\
+             {indent}}}\n"
         );
         let pos = Position::new(line, 0);
         out.push(quickfix(
@@ -1176,12 +1184,36 @@ mod tests {
             .into_iter()
             .next()
             .unwrap();
-        assert!(edit.new_text.contains("When State.Phase"));
-        assert!(edit.new_text.contains("not supported in M1"));
-        // Indentation of the construct is preserved on the inserted stub.
+        // #282: the inserted stub is syntactically-valid M1 — lowercase
+        // `when (…)` with `is (…)` clauses, a `//` comment, not the old
+        // `When … { Is …: }`/`--` shape.
         assert!(
-            edit.new_text.starts_with("    --"),
+            edit.new_text.contains("when (subject)"),
+            "{:?}",
+            edit.new_text
+        );
+        assert!(edit.new_text.contains("is (Value)"), "{:?}", edit.new_text);
+        assert!(edit.new_text.contains("// TODO"), "{:?}", edit.new_text);
+        assert!(!edit.new_text.contains("--"), "no `--` comments in M1");
+        assert!(!edit.new_text.contains("When State.Phase"));
+        // Indentation of the construct is preserved on the inserted stub, and
+        // the inner indentation is tabs (manual-mandated / L010), Allman braces.
+        assert!(
+            edit.new_text.starts_with("    // TODO"),
             "got: {:?}",
+            edit.new_text
+        );
+        assert!(
+            edit.new_text.contains("\tis (Value)"),
+            "tabs: {:?}",
+            edit.new_text
+        );
+        // The stub on its own parses with zero syntax errors.
+        assert!(
+            m1_core::parse(edit.new_text.trim_start())
+                .syntax_diagnostics()
+                .is_empty(),
+            "stub should parse cleanly: {:?}",
             edit.new_text
         );
     }
