@@ -1085,7 +1085,7 @@ impl LanguageServer for Backend {
     /// textDocument/declaration: for project symbols this is the same `.m1prj`
     /// `<Component>` (or backing file) site as definition — the LSP-canonical home
     /// for the jump (#168). Declaration == definition here, so both share
-    /// [`resolve_goto`](Self::resolve_goto).
+    /// the private `resolve_goto` resolver.
     async fn goto_declaration(
         &self,
         params: request::GotoDeclarationParams,
