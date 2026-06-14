@@ -90,7 +90,7 @@ impl M1Config {
         let mut cfg = M1Config::default();
         if let Some(v) = editor {
             match serde_json::from_value::<M1ToolsConfig>(v.clone()) {
-                Ok(tc) => apply(tc, &mut cfg),
+                Ok(tc) => apply(tc, &mut cfg, &mut issues),
                 Err(e) => issues.push(format!("editor settings ignored (invalid shape): {e}")),
             }
         }
@@ -102,7 +102,7 @@ impl M1Config {
                         found.path.display()
                     ));
                 }
-                apply(found.config, &mut cfg);
+                apply(found.config, &mut cfg, &mut issues);
             }
             Ok(None) => {}
             Err(e) => issues.push(format!("{e} — falling back to the layers below it")),
@@ -162,8 +162,10 @@ fn apply_fmt_file(fc: m1_fmt::config::FileConfig, fmt: &mut FormatOptions) {
 
 /// Overlay a parsed unified config onto `cfg`; unset fields leave the lower layer
 /// untouched. `[format].indent_style` is shared — it drives both the formatter and
-/// the linter (L010).
-fn apply(tc: M1ToolsConfig, cfg: &mut M1Config) {
+/// the linter (L010). Problems that would otherwise be swallowed (a
+/// `[diagnostics.severity]` entry naming an unknown code or level, #278) are
+/// pushed onto `issues` for `window/logMessage`.
+fn apply(tc: M1ToolsConfig, cfg: &mut M1Config, issues: &mut Vec<String>) {
     if let Some(n) = tc.lint.max_line_length {
         cfg.lint.max_line_length = n;
     }
@@ -230,6 +232,22 @@ fn apply(tc: M1ToolsConfig, cfg: &mut M1Config) {
     }
     if let Some(se) = tc.diagnostics.select {
         cfg.diagnostics.select = se.into_iter().collect();
+    }
+    // `[diagnostics.severity]` per-rule reclassification (#110): route it through
+    // the *same* m1-lint helper the CLI uses (`apply_severity_overrides`) so the
+    // editor and `m1-lint` can't drift — an `L010 = "error"` in the unified file
+    // reclassifies the rule identically in both. A later `.m1lint.toml [severity]`
+    // overlay (applied after this layer in `resolve_with_issues`) still wins.
+    // The unified table is workspace-validated for code *shape* (L###/T###/named),
+    // but only lint codes are reclassifiable here, so an entry the lint layer
+    // can't take (e.g. a typecheck T-code) surfaces as an issue rather than
+    // silently vanishing.
+    if let Some(sev) = &tc.diagnostics.severity
+        && let Err(e) = cfg
+            .lint
+            .apply_severity_overrides(sev.iter().map(|(c, l)| (c.as_str(), l.as_str())))
+    {
+        issues.push(format!("[diagnostics.severity] ignored: {e}"));
     }
 }
 
@@ -468,6 +486,49 @@ mod tests {
         assert_eq!(
             cfg.lint.max_nesting_depth, 9,
             "unset tool-file keys fall through to the unified file"
+        );
+    }
+
+    #[test]
+    fn unified_severity_reaches_lint_config() {
+        // #110: a `[diagnostics.severity]` entry in the unified file must reach the
+        // lint backend (it was parsed by the workspace but never applied here), so
+        // an `L010 = "error"` override actually reclassifies the rule in the editor —
+        // the same effect the m1-lint CLI gets from the shared helper.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("m1-tools.toml"),
+            "[diagnostics.severity]\nL010 = \"error\"\n",
+        )
+        .unwrap();
+        let (cfg, issues) = M1Config::resolve_with_issues(None, tmp.path());
+        assert!(
+            issues.is_empty(),
+            "valid severity must not warn: {issues:?}"
+        );
+        assert_eq!(
+            cfg.lint
+                .severity_overrides
+                .get(&m1_lint::diagnostic::LintCode::L010),
+            Some(&m1_core::Severity::Error),
+            "L010 severity override must reach the lint config"
+        );
+    }
+
+    #[test]
+    fn unknown_severity_code_is_reported_not_swallowed() {
+        // A code the lint layer can't reclassify (here a bogus code) surfaces as an
+        // issue line rather than silently doing nothing.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("m1-tools.toml"),
+            "[diagnostics.severity]\nL999 = \"error\"\n",
+        )
+        .unwrap();
+        let (_, issues) = M1Config::resolve_with_issues(None, tmp.path());
+        assert!(
+            issues.iter().any(|i| i.contains("severity")),
+            "expected a [diagnostics.severity] issue: {issues:?}"
         );
     }
 

@@ -835,6 +835,7 @@ mod tests {
     fn channel(value_type: ValueType, declared_type: Option<&str>) -> Symbol {
         Symbol {
             path: "Root.Demo.X".into(),
+            reference_target: None,
             kind: SymbolKind::Channel,
             value_type,
             declared_type: declared_type.map(Into::into),
@@ -902,6 +903,7 @@ mod tests {
     fn hover_shows_security_level() {
         let sym = Symbol {
             path: "Root.Engine.Throttle".into(),
+            reference_target: None,
             kind: SymbolKind::Channel,
             value_type: ValueType::Float,
             declared_type: None,
@@ -931,6 +933,7 @@ mod tests {
     fn hover_shows_script_call_rate() {
         let sym = Symbol {
             path: "Root.Engine.Control".into(),
+            reference_target: None,
             kind: SymbolKind::Method,
             value_type: ValueType::Unknown,
             declared_type: None,
@@ -1001,6 +1004,7 @@ mod tests {
         use m1_typecheck::symbols::TableAxis;
         let sym = Symbol {
             path: "Root.Control.Limiting.Torque".into(),
+            reference_target: None,
             kind: SymbolKind::Table,
             value_type: ValueType::Unknown,
             declared_type: None,
@@ -1046,6 +1050,7 @@ mod tests {
         use m1_typecheck::symbols::CanMeta;
         let sym = Symbol {
             path: "SBG DBC.Auto Slip.Angle Slip".into(),
+            reference_target: None,
             kind: SymbolKind::Channel,
             value_type: ValueType::Integer,
             declared_type: None,
