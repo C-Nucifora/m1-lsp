@@ -277,9 +277,26 @@ pub fn build_scope<'p>(
     }
 }
 
+/// Render a sample/call rate as a `Hz` value for display: drop a trailing `.0`
+/// for whole numbers, otherwise print the float. Shared by call-hierarchy and
+/// code-lens so rate rendering stays consistent.
+pub(crate) fn fmt_hz(hz: f64) -> String {
+    if hz.fract() == 0.0 {
+        format!("{}", hz as i64)
+    } else {
+        format!("{hz}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fmt_hz_drops_trailing_zero_for_whole_numbers() {
+        assert_eq!(fmt_hz(1.0), "1");
+        assert_eq!(fmt_hz(2.5), "2.5");
+    }
 
     #[test]
     fn locates_bare_identifier() {

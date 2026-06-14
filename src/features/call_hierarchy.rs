@@ -24,7 +24,7 @@
 //! in [`crate::project_store::ProjectStore`] and dropped on any buffer/project
 //! change, so the freshness contract still holds.
 use crate::convert::range;
-use crate::features::locate::build_scope;
+use crate::features::locate::{build_scope, fmt_hz};
 use crate::features::references::path_occurrences;
 use crate::line_index::{LineIndex, PositionEncoding};
 use crate::project_store::LoadedProject;
@@ -189,14 +189,6 @@ impl CallGraph {
             selection_range: node.anchor,
             data: Some(json!({ "k": "s", "file": node.file_name })),
         }
-    }
-}
-
-fn fmt_hz(hz: f64) -> String {
-    if hz.fract() == 0.0 {
-        format!("{}", hz as i64)
-    } else {
-        format!("{hz}")
     }
 }
 
