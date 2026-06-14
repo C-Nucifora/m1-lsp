@@ -146,10 +146,9 @@ fn member_parent(text: &str, byte: usize) -> Option<String> {
 /// there is no `.` in the run. Used only to detect a DBC-message parent (#169).
 fn member_parent_with_spaces(text: &str, byte: usize) -> Option<String> {
     let before = &text[..byte.min(text.len())];
-    let start = before
-        .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == ' '))
-        .map(|i| i + 1)
-        .unwrap_or(0);
+    let start = path_run_start(before, |c| {
+        c.is_alphanumeric() || c == '_' || c == '.' || c == ' '
+    });
     let chain = before[start..].trim_start();
     let dot = chain.rfind('.')?;
     let parent = chain[..dot].trim();
@@ -163,10 +162,23 @@ fn member_parent_with_spaces(text: &str, byte: usize) -> Option<String> {
 /// `member_parent`: stops at the first char that can't be part of a path token.
 fn chain_start(text: &str, byte: usize) -> usize {
     let before = &text[..byte.min(text.len())];
-    before
-        .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
-        .map(|i| i + 1)
-        .unwrap_or(0)
+    path_run_start(before, |c| c.is_alphanumeric() || c == '_' || c == '.')
+}
+
+/// Byte offset where the trailing run of path chars (per `is_path`) in `s`
+/// begins. Scans back to the last char that is *not* a path char and advances
+/// past it by that char's UTF-8 width — never by a bare `+ 1`, which would land
+/// mid-codepoint when the delimiter is multibyte (e.g. the Windows-1252 `°`,
+/// em-dashes, smart quotes) and panic the subsequent slice. ASCII delimiters
+/// advance by 1, so behaviour is unchanged for the common case. Returns 0 when
+/// the whole prefix is path chars.
+fn path_run_start(s: &str, is_path: impl Fn(char) -> bool) -> usize {
+    match s.rfind(|c: char| !is_path(c)) {
+        // `s[i..]` begins at rfind's returned boundary, so `.chars().next()` is
+        // the delimiter char; skip exactly its byte width to the path run start.
+        Some(i) => i + s[i..].chars().next().map_or(1, char::len_utf8),
+        None => 0,
+    }
 }
 
 /// Byte offset where the identifier/dot run *containing or starting at* `byte`
@@ -1032,5 +1044,37 @@ mod tests {
                 .contains("is (${2:"),
             "when expands to a when…is skeleton"
         );
+    }
+
+    #[test]
+    fn non_ascii_delimiter_before_path_does_not_panic() {
+        // A stray non-ASCII char (e.g. `°` U+00B0 — the canonical MoTeC
+        // Windows-1252 degree sign the toolchain goes to lengths to support, or
+        // an em-dash / smart quote) sitting in a code position immediately
+        // before a dotted path must not panic the completion request. The path
+        // back-scan in `member_parent`/`member_parent_with_spaces`/`chain_start`
+        // treats such a char as a delimiter, and previously advanced past it by
+        // exactly one byte — landing mid-codepoint and panicking the slice
+        // (same DoS class as the mid-codepoint slicing hardened in #132).
+        for src in [
+            "x = °Calculate.Max\n",  // degree sign (2 bytes in UTF-8)
+            "x = —Calculate.Max\n",  // em-dash (3 bytes)
+            "x = “Calculate.Max\n",  // smart quote (3 bytes)
+            "x = °Demo Frame.Sig\n", // exercises member_parent_with_spaces too
+        ] {
+            let cst = m1_core::parse(src);
+            // Cursor immediately after the leaf, i.e. end of the dotted run.
+            let byte = src.trim_end_matches('\n').len();
+            // Must return (an empty / generic list) rather than panic.
+            let _ = completions(
+                cst.root(),
+                None,
+                None,
+                src,
+                byte,
+                &crate::line_index::LineIndex::new(src),
+                crate::line_index::PositionEncoding::Utf16,
+            );
+        }
     }
 }
