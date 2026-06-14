@@ -11,6 +11,7 @@ pub mod folding;
 pub mod goto;
 pub mod hover;
 pub mod inlay;
+pub mod intrinsics_render;
 pub mod locate;
 pub mod references;
 pub mod rename;

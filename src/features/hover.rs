@@ -392,16 +392,14 @@ fn dbc_signal_markdown(sym: &Symbol, project: Option<&Project>) -> Option<String
     Some(lines.join("\n\n"))
 }
 
+use crate::features::intrinsics_render::signature_label;
 use m1_typecheck::intrinsics::Overload;
 
-/// `(p1: T1, p2: T2) -> Ret` for one overload signature.
+/// `path(p1: T1, p2: T2) -> Ret` for one overload signature. Shares the single
+/// renderer with `signatureHelp` so the two popups can't drift (see
+/// [`crate::features::intrinsics_render`]).
 fn signature(path: &str, ov: &Overload) -> String {
-    let params: Vec<String> = ov
-        .params
-        .iter()
-        .map(|p| format!("{}: {}", p.name, p.ty))
-        .collect();
-    format!("{path}({}) -> {}", params.join(", "), ov.returns)
+    signature_label(path, ov)
 }
 
 fn builtin_object_markdown(name: &str) -> String {
