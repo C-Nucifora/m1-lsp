@@ -605,8 +605,8 @@ dependencies = [
 
 [[package]]
 name = "m1-fmt"
-version = "0.13.0"
-source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.13.0#3b3992348a8735a8536b55da34666fdbe9b8a2a6"
+version = "0.15.1"
+source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.15.1#bc29963ec486079178b49d780e9a0ff88b72b3ae"
 dependencies = [
  "clap",
  "libc",
@@ -618,8 +618,8 @@ dependencies = [
 
 [[package]]
 name = "m1-lint"
-version = "0.19.0"
-source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.19.0#55e1f93b01be58866b4a78f5a7635f60ce1fcbd3"
+version = "0.22.0"
+source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.22.0#ef43488979f162442bffc4d80ade745fd086ef9b"
 dependencies = [
  "clap",
  "glob",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "m1-lsp"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "dashmap 6.2.1",
  "m1-core",
@@ -650,8 +650,8 @@ dependencies = [
 
 [[package]]
 name = "m1-typecheck"
-version = "0.36.0"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.36.0#b23b981d03cb00ec097ddd2a4abb1b08855d8644"
+version = "0.40.1"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.40.1#112bd47df85a4404ab91f505eef62c72004302bd"
 dependencies = [
  "clap",
  "m1-core",
@@ -664,8 +664,8 @@ dependencies = [
 
 [[package]]
 name = "m1-workspace"
-version = "0.10.0"
-source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.10.0#ec54c4617260a66d016d08629f3e2ae3beac413f"
+version = "0.11.0"
+source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.11.0#f137b67fc6defee0077981bd0f55a60652330a38"
 dependencies = [
  "serde",
  "serde_ignored",
