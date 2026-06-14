@@ -266,6 +266,24 @@ impl Backend {
         })
     }
 
+    /// Resolve the goto target at a cursor position, shared by
+    /// `textDocument/definition` and `textDocument/declaration` (declaration ==
+    /// definition for M1 symbols, #168). Project symbols
+    /// (channels/params/functions/DBC) resolve via the project; a bare `local`
+    /// resolves in-file and works even with no project loaded (#141). `None` when
+    /// the document isn't open or nothing resolves.
+    fn resolve_goto(&self, tdp: &TextDocumentPositionParams) -> Option<Location> {
+        let uri = &tdp.text_document.uri;
+        let doc = self.doc_context(uri)?;
+        let byte = doc.byte(tdp.position);
+        let cst = doc.parse();
+        self.store
+            .with_project(|p| {
+                p.and_then(|lp| goto::goto(cst.root(), byte, lp, doc.file_name.as_deref()))
+            })
+            .or_else(|| goto::goto_local(cst.root(), byte, uri, &doc.line_index, doc.enc))
+    }
+
     /// Fallback project discovery (#73). `initialize` loads the project from the
     /// Create a `$/progress` token and send `Begin` (#266). Returns `None`
     /// (and sends nothing) when the client did not advertise
@@ -1059,46 +1077,22 @@ impl LanguageServer for Backend {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let tdp = params.text_document_position_params;
-        let uri = tdp.text_document.uri;
-        let Some(doc) = self.doc_context(&uri) else {
-            return Ok(None);
-        };
-        let byte = doc.byte(tdp.position);
-        let cst = doc.parse();
-        // Project symbols (channels/params/functions/DBC) resolve via the
-        // project; a bare `local` resolves in-file and works even with no project
-        // loaded (#141).
-        let loc = self
-            .store
-            .with_project(|p| {
-                p.and_then(|lp| goto::goto(cst.root(), byte, lp, doc.file_name.as_deref()))
-            })
-            .or_else(|| goto::goto_local(cst.root(), byte, &uri, &doc.line_index, doc.enc));
-        Ok(loc.map(GotoDefinitionResponse::Scalar))
+        Ok(self
+            .resolve_goto(&params.text_document_position_params)
+            .map(GotoDefinitionResponse::Scalar))
     }
 
     /// textDocument/declaration: for project symbols this is the same `.m1prj`
     /// `<Component>` (or backing file) site as definition — the LSP-canonical home
-    /// for the jump (#168).
+    /// for the jump (#168). Declaration == definition here, so both share
+    /// the private `resolve_goto` resolver.
     async fn goto_declaration(
         &self,
         params: request::GotoDeclarationParams,
     ) -> Result<Option<request::GotoDeclarationResponse>> {
-        let tdp = params.text_document_position_params;
-        let uri = tdp.text_document.uri;
-        let Some(doc) = self.doc_context(&uri) else {
-            return Ok(None);
-        };
-        let byte = doc.byte(tdp.position);
-        let cst = doc.parse();
-        let loc = self
-            .store
-            .with_project(|p| {
-                p.and_then(|lp| goto::goto(cst.root(), byte, lp, doc.file_name.as_deref()))
-            })
-            .or_else(|| goto::goto_local(cst.root(), byte, &uri, &doc.line_index, doc.enc));
-        Ok(loc.map(request::GotoDeclarationResponse::Scalar))
+        Ok(self
+            .resolve_goto(&params.text_document_position_params)
+            .map(request::GotoDeclarationResponse::Scalar))
     }
 
     /// textDocument/typeDefinition: from an enum-typed channel/parameter, jump to
