@@ -13,6 +13,7 @@
 //!    signature is `Name() -> ReturnType`. An *unmodelled* firmware method, by
 //!    contrast, has an unknown parameter list — it is not asserted to be
 //!    parameterless (#105).
+use crate::features::intrinsics_render::signature_label;
 use crate::features::locate::{build_scope, node_at_byte};
 use m1_core::{Field, Kind, Node};
 use m1_typecheck::intrinsics::Overload;
@@ -58,15 +59,9 @@ fn sig_info(path: &str, ov: &Overload) -> SignatureInformation {
             documentation: None,
         })
         .collect();
-    let label = format!(
-        "{path}({}) -> {}",
-        ov.params
-            .iter()
-            .map(|p| format!("{}: {}", p.name, p.ty))
-            .collect::<Vec<_>>()
-            .join(", "),
-        ov.returns
-    );
+    // Share the top-level label string with hover so the two popups stay in
+    // lock-step (see `crate::features::intrinsics_render`).
+    let label = signature_label(path, ov);
     let doc = if ov.doc.is_empty() {
         None
     } else {
@@ -255,6 +250,37 @@ mod tests {
         assert!(
             !unknown.contains("no declared parameters"),
             "got: {unknown}"
+        );
+    }
+
+    #[test]
+    fn label_matches_hover_signature_block() {
+        // The signature-help label and the hover code block render the same
+        // overload through the one shared formatter, so they must be byte-for-byte
+        // identical for a given call. This guards against the two popups drifting
+        // if the signature display format ever changes.
+        use crate::features::hover::hover;
+        use crate::line_index::{LineIndex, PositionEncoding};
+        use tower_lsp::lsp_types::{HoverContents, MarkupContent};
+
+        let src = "x = Calculate.Max(a, b);\n";
+        let cst = m1_core::parse(src);
+
+        // signature-help label for the call.
+        let sh = help(src, "Calculate.Max(").unwrap();
+        let sh_label = sh.signatures[0].label.clone();
+
+        // hover markdown over the function name -> the ``` ... ``` code block.
+        let li = LineIndex::new(src);
+        let byte = src.find("Max").unwrap();
+        let h = hover(cst.root(), byte, None, None, &li, PositionEncoding::Utf16).unwrap();
+        let HoverContents::Markup(MarkupContent { value, .. }) = h.contents else {
+            panic!("expected markup hover");
+        };
+
+        assert!(
+            value.contains(&sh_label),
+            "hover block must contain the exact signature-help label.\nlabel: {sh_label}\nhover:\n{value}"
         );
     }
 
