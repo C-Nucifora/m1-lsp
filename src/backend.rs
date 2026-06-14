@@ -889,13 +889,26 @@ impl LanguageServer for Backend {
                     kind: None,
                 },
             ];
+            let options =
+                match serde_json::to_value(DidChangeWatchedFilesRegistrationOptions { watchers }) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.client
+                            .log_message(
+                                MessageType::ERROR,
+                                format!(
+                                    "m1-lsp: failed to serialize file-watcher options, \
+                                     dynamic file-watching disabled: {e}"
+                                ),
+                            )
+                            .await;
+                        return;
+                    }
+                };
             let reg = Registration {
                 id: "m1-lsp-watch-project".into(),
                 method: "workspace/didChangeWatchedFiles".into(),
-                register_options: Some(
-                    serde_json::to_value(DidChangeWatchedFilesRegistrationOptions { watchers })
-                        .unwrap(),
-                ),
+                register_options: Some(options),
             };
             let _ = self.client.register_capability(vec![reg]).await;
         } else {

@@ -100,6 +100,27 @@ mod tests {
         assert_eq!(shape(&doc.cst), shape(&fresh));
     }
 
+    /// #290: a backwards/inverted range (end < start) is clamped to a
+    /// zero-width range at `start` so the server never panics or corrupts
+    /// state. The resulting buffer text and CST must match a fresh parse of
+    /// the same final text.
+    #[test]
+    fn backwards_range_clamped_to_zero_width() {
+        // Document: "local x = 1;\n"
+        // Send a ranged change with end < start (col 5 → col 3 on line 0).
+        // The clamp turns this into a zero-width insertion at col 5,
+        // i.e. the new_text is just inserted there and nothing is deleted.
+        let mut doc = Document::new("local x = 1;\n".into(), 1);
+        // Inverted range: start=(0,5) end=(0,3) — end is before start.
+        doc.apply_change(Some(range(0, 5, 0, 3)), "_extra", PositionEncoding::Utf16);
+        // With end clamped to start (byte 5), replace_range(5..5, "_extra")
+        // inserts at position 5: "local_extra x = 1;\n"
+        let expected = "local_extra x = 1;\n";
+        assert_eq!(doc.text, expected);
+        let fresh = m1_core::parse(&doc.text);
+        assert_eq!(shape(&doc.cst), shape(&fresh));
+    }
+
     #[test]
     fn full_replacement_fallback_still_works() {
         let mut doc = Document::new("local x = 1;\n".into(), 1);
