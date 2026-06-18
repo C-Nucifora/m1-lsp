@@ -1,5 +1,7 @@
 //! textDocument/documentSymbol: a nested outline — locals and assignment
-//! targets, with `when`/`if` blocks as containing nodes (#32).
+//! targets, with `when`/`if`/`expand` blocks as containing nodes (#32). Each
+//! `when...is` state and each `if...else`/`else if` branch is its own container
+//! so the outline can be navigated per-state and per-branch.
 use crate::convert::range;
 use crate::line_index::{LineIndex, PositionEncoding};
 use m1_core::{Field, Kind, Node};
@@ -132,8 +134,44 @@ fn collect(n: Node, li: &LineIndex, enc: PositionEncoding) -> Vec<DocumentSymbol
                     out.push(container(label, child, kids, li, enc));
                 }
             }
-            // Descend through blocks, is/else clauses, and anything else so the
-            // symbols inside them surface under the nearest block container.
+            // A `when...is` state: each `is (<enumerator>)` clause is its own
+            // navigation unit, so the real corpus's per-state state machines can
+            // be browsed by state instead of every state's statements flattening
+            // together under the single `when`. Label by the matched enumerator.
+            Kind::IsClause => {
+                let kids = collect(child, li, enc);
+                if !kids.is_empty() {
+                    let label = header_label("is", child.child_by_field(Field::State));
+                    out.push(container(label, child, kids, li, enc));
+                }
+            }
+            // An `else` / `else if` clause is its own navigation unit, distinct
+            // from the `if` consequence. A chained else-if (the clause's child is
+            // an `if_statement`) is labelled `else if (<cond>)`; a plain else is
+            // labelled `else`. Either way its body nests under the clause rather
+            // than flattening into the `if` container.
+            Kind::ElseClause => {
+                let else_if = child
+                    .children()
+                    .into_iter()
+                    .find(|c| c.kind() == Kind::IfStatement);
+                // For a chained else-if, collect the inner `if`'s own body
+                // directly (consequence + any further else clause) so it doesn't
+                // also surface as a nested `if (...)` container — the `else if`
+                // label already carries the condition.
+                let (label, kids) = match else_if {
+                    Some(if_stmt) => (
+                        header_label("else if", if_stmt.child_by_field(Field::Condition)),
+                        collect(if_stmt, li, enc),
+                    ),
+                    None => ("else".to_string(), collect(child, li, enc)),
+                };
+                if !kids.is_empty() {
+                    out.push(container(label, child, kids, li, enc));
+                }
+            }
+            // Descend through blocks and anything else so the symbols inside them
+            // surface under the nearest block container.
             _ => out.extend(collect(child, li, enc)),
         }
     }
@@ -342,8 +380,21 @@ mod tests {
             "expected one top-level when container: {syms:?}"
         );
         assert!(syms[0].name.starts_with("when"), "label: {}", syms[0].name);
-        let kids = syms[0].children.as_ref().expect("when has children");
-        assert!(kids.iter().any(|k| k.name == "Out"));
+        // The assignment nests under the `is (true)` state container, which is the
+        // when's child — states are their own navigation units.
+        let states = syms[0].children.as_ref().expect("when has children");
+        let is_state = states
+            .iter()
+            .find(|s| s.name.starts_with("is"))
+            .expect("an `is` state container");
+        assert!(
+            is_state
+                .children
+                .as_ref()
+                .expect("is state has children")
+                .iter()
+                .any(|k| k.name == "Out")
+        );
     }
 
     #[test]
@@ -386,6 +437,142 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|k| k.name == "Out")
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn each_is_state_gets_its_own_container() {
+        // The real corpus uses `when...is` as a per-state state machine. Each `is`
+        // state must be its own navigation unit in the outline, labelled by its
+        // enumerator, holding only its own statements — not all states flattened
+        // together under the single `when`.
+        let src = "when (mode) {\nis (Driving) {\nA = 1;\n}\nis (Override) {\nB = 2;\n}\n}\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let syms = document_symbols(cst.root(), &li, PositionEncoding::Utf16);
+        assert_eq!(syms.len(), 1, "one top-level when container: {syms:?}");
+        let states = syms[0].children.as_ref().expect("when has children");
+        assert_eq!(
+            states.len(),
+            2,
+            "two `is` states should be two distinct containers, not flattened: {states:?}"
+        );
+        let driving = states
+            .iter()
+            .find(|s| s.name.contains("Driving"))
+            .expect("is (Driving) container");
+        let override_ = states
+            .iter()
+            .find(|s| s.name.contains("Override"))
+            .expect("is (Override) container");
+        assert!(driving.name.starts_with("is"), "label: {}", driving.name);
+        // Each state holds ONLY its own statement.
+        let driving_kids = driving.children.as_ref().expect("Driving has children");
+        assert!(driving_kids.iter().any(|k| k.name == "A"));
+        assert!(
+            !driving_kids.iter().any(|k| k.name == "B"),
+            "B belongs to the Override state, not Driving: {driving_kids:?}"
+        );
+        let override_kids = override_.children.as_ref().expect("Override has children");
+        assert!(override_kids.iter().any(|k| k.name == "B"));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn else_branch_nests_separately_from_if_consequence() {
+        // The `else` block is its own navigation unit, distinct from the `if`
+        // consequence — not flattened together under the one `if` container.
+        let src = "if (ready) {\nA = 1;\n} else {\nB = 2;\n}\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let syms = document_symbols(cst.root(), &li, PositionEncoding::Utf16);
+        assert_eq!(syms.len(), 1, "one top-level if container: {syms:?}");
+        let kids = syms[0].children.as_ref().expect("if has children");
+        // The if-consequence statement is a direct leaf of the `if` container.
+        assert!(
+            kids.iter().any(|k| k.name == "A"),
+            "if consequence A should be under the if: {kids:?}"
+        );
+        // The else block is its own container, NOT a leaf sibling of A.
+        let else_c = kids
+            .iter()
+            .find(|k| k.name.starts_with("else"))
+            .expect("an `else` container: {kids:?}");
+        assert!(
+            !kids.iter().any(|k| k.name == "B"),
+            "B belongs to the else branch, not directly under the if: {kids:?}"
+        );
+        assert!(
+            else_c
+                .children
+                .as_ref()
+                .expect("else has children")
+                .iter()
+                .any(|k| k.name == "B"),
+            "B should be under the else container"
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn chained_else_if_is_labelled_distinctly() {
+        // `else if` is a chained alternative; it should read `else if (<cond>)`,
+        // distinct from a plain `else`, and nest its own body.
+        let src = "if (a) {\nA = 1;\n} else if (b) {\nB = 2;\n} else {\nC = 3;\n}\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let syms = document_symbols(cst.root(), &li, PositionEncoding::Utf16);
+        assert_eq!(syms.len(), 1, "one top-level if container: {syms:?}");
+        let kids = syms[0].children.as_ref().expect("if has children");
+        let elif = kids
+            .iter()
+            .find(|k| k.name.starts_with("else if"))
+            .unwrap_or_else(|| panic!("an `else if` container labelled distinctly: {kids:?}"));
+        assert!(
+            elif.name.contains('b'),
+            "label should show cond: {}",
+            elif.name
+        );
+        assert!(
+            elif.children
+                .as_ref()
+                .expect("else if has children")
+                .iter()
+                .any(|k| k.name == "B")
+        );
+        // …and the trailing plain `else` nests under the else-if, holding C.
+        let plain_else = elif
+            .children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|k| k.name == "else")
+            .unwrap_or_else(|| {
+                panic!("trailing plain else under the else-if: {:?}", elif.children)
+            });
+        assert!(
+            plain_else
+                .children
+                .as_ref()
+                .expect("else has children")
+                .iter()
+                .any(|k| k.name == "C")
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn empty_is_and_else_clauses_emit_nothing() {
+        // An empty `is`/`else` clause has no statements, so it should not add an
+        // empty container to the outline.
+        let src = "when (mode) {\nis (Driving) {\n}\n}\nif (a) {\n} else {\n}\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let syms = document_symbols(cst.root(), &li, PositionEncoding::Utf16);
+        assert!(
+            syms.is_empty(),
+            "empty clauses should produce no symbols: {syms:?}"
         );
     }
 }
