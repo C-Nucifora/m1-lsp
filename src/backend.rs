@@ -453,20 +453,22 @@ impl Backend {
     /// `li`/`enc` are the line index and position encoding already computed at
     /// each call site — project diagnostics carry a zero byte-range, so any line
     /// index resolves them to line 0, but the encoding still governs column math.
+    ///
+    /// `prj_path` is the active project's `.m1prj` path, supplied by the caller
+    /// (which already holds it). Threading it in keeps the store's project lock
+    /// untouched here and avoids a second redundant read of `m1prj_path`.
     fn project_lsp_diagnostics(
         &self,
         li: &crate::line_index::LineIndex,
         enc: PositionEncoding,
+        prj_path: &std::path::Path,
     ) -> Vec<Diagnostic> {
         let filter = self.config.read().unwrap().diagnostics.clone();
-        let prj = self
-            .store
-            .with_project(|p| p.map(|lp| lp.m1prj_path.clone()));
         self.store
             .project_diagnostics_with(filter.select.contains("T089"))
             .iter()
             .filter(|d| filter.allows_subject(d.code.as_str(), d.subject.as_deref()))
-            .map(|d| crate::convert::type_diagnostic(d, li, enc, prj.as_deref()))
+            .map(|d| crate::convert::type_diagnostic(d, li, enc, Some(prj_path)))
             .collect()
     }
 
@@ -493,13 +495,17 @@ impl Backend {
         };
         let enc = self.enc();
         if is_m1prj(uri) {
-            let active = self
+            let active_path = self
                 .store
-                .with_project(|p| p.and_then(|lp| Url::from_file_path(&lp.m1prj_path).ok()));
-            return Some(if active.as_ref() == Some(uri) {
-                self.project_lsp_diagnostics(&lindex, enc)
-            } else {
-                vec![]
+                .with_project(|p| p.map(|lp| lp.m1prj_path.clone()));
+            let is_active = active_path
+                .as_deref()
+                .and_then(|p| Url::from_file_path(p).ok())
+                .as_ref()
+                == Some(uri);
+            return Some(match active_path.filter(|_| is_active) {
+                Some(prj_path) => self.project_lsp_diagnostics(&lindex, enc, &prj_path),
+                None => vec![],
             });
         }
         Some(analyze(
@@ -594,7 +600,7 @@ impl Backend {
             .unwrap_or_default();
         let li = crate::line_index::LineIndex::new(&text);
         let enc = self.enc();
-        let diags = self.project_lsp_diagnostics(&li, enc);
+        let diags = self.project_lsp_diagnostics(&li, enc, &prj_path);
         let version = self.docs.get(&uri).map(|d| d.version);
         self.client.publish_diagnostics(uri, diags, version).await;
     }
@@ -2190,15 +2196,58 @@ mod project_diagnostics_pipeline_tests {
         );
 
         // The shared helper directly, with the same line index/encoding the
-        // push path computed for this file.
+        // push path computed for this file. The project path is passed in by
+        // the caller (it already holds it), so the helper does not read it back
+        // out of the store a second time.
         let text = std::fs::read_to_string(&prj_path).unwrap_or_default();
         let li = crate::line_index::LineIndex::new(&text);
-        let via_helper = backend.project_lsp_diagnostics(&li, backend.enc());
+        let via_helper = backend.project_lsp_diagnostics(&li, backend.enc(), &prj_path);
 
         assert_eq!(
             via_push, via_helper,
             "the .m1prj push path must produce exactly what the shared \
              project_lsp_diagnostics helper produces — they must not diverge"
+        );
+    }
+
+    // The shared helper must take the project path from its caller (which
+    // already holds it) rather than fetching `m1prj_path` from the store a
+    // second time. This pins the `&Path` parameter: the path the caller passes
+    // is the one threaded into `type_diagnostic`, so it must compile and accept
+    // an externally-supplied path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn project_lsp_diagnostics_takes_caller_supplied_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Project.m1prj"), M1PRJ).unwrap();
+        std::fs::write(tmp.path().join("parameters.m1cfg"), M1CFG).unwrap();
+
+        let store = Arc::new(ProjectStore::new());
+        assert!(
+            store.discover_and_load(tmp.path()).unwrap(),
+            "fixture project must load"
+        );
+
+        let (service, _socket) = LspService::new(|client| {
+            Backend::with_backends(
+                client,
+                Box::new(NoLint),
+                Box::new(NoTypes),
+                Box::new(NoFormat),
+                Arc::clone(&store),
+            )
+        });
+        let backend = service.inner();
+
+        let prj_path = store
+            .with_project(|p| p.map(|lp| lp.m1prj_path.clone()))
+            .expect("project loaded");
+        let text = std::fs::read_to_string(&prj_path).unwrap_or_default();
+        let li = crate::line_index::LineIndex::new(&text);
+
+        let diags = backend.project_lsp_diagnostics(&li, backend.enc(), &prj_path);
+        assert!(
+            !diags.is_empty(),
+            "fixture should surface a project-scope diagnostic (T041); got none"
         );
     }
 }
