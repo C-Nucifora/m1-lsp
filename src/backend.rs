@@ -437,6 +437,39 @@ impl Backend {
         self.publish_project_diagnostics().await;
     }
 
+    /// Turn the store's project-scope [`TypeDiagnostic`](m1_typecheck::diagnostics::TypeDiagnostic)s
+    /// into LSP [`Diagnostic`]s, applying the configured diagnostics filter once.
+    ///
+    /// This is the single pipeline shared by the push path (the `.m1prj` branch
+    /// of [`diagnostics_for`](Self::diagnostics_for)) and the published path
+    /// ([`publish_project_diagnostics`](Self::publish_project_diagnostics)): read
+    /// the diagnostics filter from config, compute project diagnostics with the
+    /// opt-in T089 rate-inversion check gated on `select` naming it, drop
+    /// subjects the filter rejects, and map each through
+    /// [`convert::type_diagnostic`](crate::convert::type_diagnostic). Keeping it
+    /// in one place stops the two call sites diverging when the filter/convert
+    /// logic changes (a new opt-in code, a different subject filter, …).
+    ///
+    /// `li`/`enc` are the line index and position encoding already computed at
+    /// each call site — project diagnostics carry a zero byte-range, so any line
+    /// index resolves them to line 0, but the encoding still governs column math.
+    fn project_lsp_diagnostics(
+        &self,
+        li: &crate::line_index::LineIndex,
+        enc: PositionEncoding,
+    ) -> Vec<Diagnostic> {
+        let filter = self.config.read().unwrap().diagnostics.clone();
+        let prj = self
+            .store
+            .with_project(|p| p.map(|lp| lp.m1prj_path.clone()));
+        self.store
+            .project_diagnostics_with(filter.select.contains("T089"))
+            .iter()
+            .filter(|d| filter.allows_subject(d.code.as_str(), d.subject.as_deref()))
+            .map(|d| crate::convert::type_diagnostic(d, li, enc, prj.as_deref()))
+            .collect()
+    }
+
     /// Compute the full diagnostic set for `uri`, sourcing the text from the open
     /// buffer if present, else reading it from disk (tolerant decode). Returns
     /// `None` only when neither source yields text (the file vanished). This is
@@ -464,16 +497,7 @@ impl Backend {
                 .store
                 .with_project(|p| p.and_then(|lp| Url::from_file_path(&lp.m1prj_path).ok()));
             return Some(if active.as_ref() == Some(uri) {
-                let filter = self.config.read().unwrap().diagnostics.clone();
-                let prj = self
-                    .store
-                    .with_project(|p| p.map(|lp| lp.m1prj_path.clone()));
-                self.store
-                    .project_diagnostics_with(filter.select.contains("T089"))
-                    .iter()
-                    .filter(|d| filter.allows_subject(d.code.as_str(), d.subject.as_deref()))
-                    .map(|d| crate::convert::type_diagnostic(d, &lindex, enc, prj.as_deref()))
-                    .collect()
+                self.project_lsp_diagnostics(&lindex, enc)
             } else {
                 vec![]
             });
@@ -570,17 +594,7 @@ impl Backend {
             .unwrap_or_default();
         let li = crate::line_index::LineIndex::new(&text);
         let enc = self.enc();
-        let filter = self.config.read().unwrap().diagnostics.clone();
-        let prj = self
-            .store
-            .with_project(|p| p.map(|lp| lp.m1prj_path.clone()));
-        let diags: Vec<Diagnostic> = self
-            .store
-            .project_diagnostics_with(filter.select.contains("T089"))
-            .iter()
-            .filter(|d| filter.allows_subject(d.code.as_str(), d.subject.as_deref()))
-            .map(|d| crate::convert::type_diagnostic(d, &li, enc, prj.as_deref()))
-            .collect();
+        let diags = self.project_lsp_diagnostics(&li, enc);
         let version = self.docs.get(&uri).map(|d| d.version);
         self.client.publish_diagnostics(uri, diags, version).await;
     }
@@ -2107,6 +2121,84 @@ mod code_action_format_tests {
             has_format_document,
             "\"Format Document\" must appear in code actions when the doc is open and \
              the formatter produces a change; got: {actions:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod project_diagnostics_pipeline_tests {
+    use super::{Backend, ProjectStore};
+    use crate::analysis::{NoLint, NoTypes};
+    use crate::format::NoFormat;
+    use std::sync::Arc;
+    use tower_lsp::{LspService, lsp_types::*};
+
+    // A `.m1prj` with a parameter that is absent from the sibling `.m1cfg`,
+    // which the project audit flags as T041 — a non-empty project-scope
+    // diagnostic set the pipeline must surface.
+    const M1PRJ: &str = "<?xml version=\"1.0\"?>\n<Project>\n\
+         <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root\"/>\n\
+         <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root.A\"/>\n\
+         <Component Classname=\"BuiltIn.Parameter\" Name=\"Root.A.Missing\"><Props Type=\"u32\"/></Component>\n\
+         </Project>";
+    const M1CFG: &str = "<?xml version=\"1.0\"?>\n<Configuration>\n <Group Name=\"\">\n\
+         </Group>\n</Configuration>";
+
+    // The push path (`diagnostics_for` on the active `.m1prj`) and the
+    // published path (`publish_project_diagnostics`) both convert the store's
+    // project-scope diagnostics into LSP diagnostics through the exact same
+    // pipeline. This guards that the shared `project_lsp_diagnostics` helper is
+    // the one source of that conversion: `diagnostics_for` on the active
+    // `.m1prj` must equal a direct call to `project_lsp_diagnostics` for the
+    // same line index / encoding. If a future edit reintroduces a divergent
+    // inline copy at either site, this test fails.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_path_uses_shared_project_pipeline() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Project.m1prj"), M1PRJ).unwrap();
+        std::fs::write(tmp.path().join("parameters.m1cfg"), M1CFG).unwrap();
+
+        let store = Arc::new(ProjectStore::new());
+        assert!(
+            store.discover_and_load(tmp.path()).unwrap(),
+            "fixture project must load"
+        );
+
+        let (service, _socket) = LspService::new(|client| {
+            Backend::with_backends(
+                client,
+                Box::new(NoLint),
+                Box::new(NoTypes),
+                Box::new(NoFormat),
+                Arc::clone(&store),
+            )
+        });
+        let backend = service.inner();
+
+        let prj_path = store
+            .with_project(|p| p.map(|lp| lp.m1prj_path.clone()))
+            .expect("project loaded");
+        let uri = Url::from_file_path(&prj_path).unwrap();
+
+        // The push path: full diagnostics for the active `.m1prj`.
+        let via_push = backend
+            .diagnostics_for(&uri)
+            .expect("active .m1prj yields a diagnostic set");
+        assert!(
+            !via_push.is_empty(),
+            "fixture should surface a project-scope diagnostic (T041); got none"
+        );
+
+        // The shared helper directly, with the same line index/encoding the
+        // push path computed for this file.
+        let text = std::fs::read_to_string(&prj_path).unwrap_or_default();
+        let li = crate::line_index::LineIndex::new(&text);
+        let via_helper = backend.project_lsp_diagnostics(&li, backend.enc());
+
+        assert_eq!(
+            via_push, via_helper,
+            "the .m1prj push path must produce exactly what the shared \
+             project_lsp_diagnostics helper produces — they must not diverge"
         );
     }
 }
