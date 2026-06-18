@@ -605,8 +605,8 @@ dependencies = [
 
 [[package]]
 name = "m1-fmt"
-version = "0.15.1"
-source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.15.1#bc29963ec486079178b49d780e9a0ff88b72b3ae"
+version = "0.16.0"
+source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.16.0#7550741628de19d7c6dfec8c4c0072f1186f2bf0"
 dependencies = [
  "clap",
  "libc",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "m1-lsp"
-version = "0.42.0"
+version = "0.42.1"
 dependencies = [
  "dashmap 6.2.1",
  "m1-core",
