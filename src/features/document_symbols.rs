@@ -7,6 +7,17 @@ use m1_core::{Field, Kind, Node};
 use tower_lsp::lsp_types::{DocumentSymbol, SymbolKind};
 
 pub fn document_symbols(root: Node, li: &LineIndex, enc: PositionEncoding) -> Vec<DocumentSymbol> {
+    // `collect` recurses through statement-shaped nodes, so a pathologically
+    // deeply-nested document (thousands of nested `if`/`when` blocks) would
+    // overflow the thread stack and abort the whole server with an uncatchable
+    // SIGABRT — the #133 DoS class. Editors request documentSymbol automatically
+    // on file open, so one crafted file would take down language support for the
+    // entire workspace. An empty outline is the safe response to adversarial
+    // input, matching the formatter declining to format too-deep input. The guard
+    // uses m1-core's iterative `max_depth`, so it cannot itself overflow.
+    if root.max_depth() > m1_core::MAX_RECURSION_DEPTH {
+        return Vec::new();
+    }
     collect(root, li, enc)
 }
 

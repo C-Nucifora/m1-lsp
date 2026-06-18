@@ -9,7 +9,7 @@
 //! These run on the default test-harness thread stack (no oversized stack to
 //! mask the bug): pre-fix, a depth-18000 doc already aborted on a 2 MiB thread,
 //! so the 50_000 depth used here is comfortably past the failure point.
-use m1_lsp::features::{folding, locate, references, semantic_tokens};
+use m1_lsp::features::{document_symbols, folding, locate, references, semantic_tokens};
 use m1_lsp::line_index::{LineIndex, PositionEncoding};
 use tower_lsp::lsp_types::Url;
 
@@ -47,6 +47,57 @@ fn semantic_tokens_does_not_overflow_on_deep_input() {
         semantic_tokens::semantic_tokens(cst.root(), None, None, &li, PositionEncoding::Utf16);
     // The lone literal is still classified.
     assert!(!toks.is_empty(), "expected at least the `1` token");
+}
+
+/// `if (1) {` * depth + one assignment + `}` * depth — a single statement nested
+/// `depth` block-levels deep. `document_symbols::collect` only recurses through
+/// statement-shaped nodes (if/when/expand/blocks), so the nested-paren expression
+/// above would not exercise its recursion; nested STATEMENT blocks do.
+fn deeply_nested_blocks(depth: usize) -> String {
+    let mut s = String::with_capacity(depth * 12 + 16);
+    for _ in 0..depth {
+        s.push_str("if (1) {\n");
+    }
+    s.push_str("Out = 1;\n");
+    for _ in 0..depth {
+        s.push_str("}\n");
+    }
+    s
+}
+
+#[test]
+fn document_symbols_does_not_overflow_on_deep_input() {
+    // `document_symbols::collect` is the handler-reachable recursive walker that
+    // was missed in the #133 conversion: editors request textDocument/document
+    // Symbol automatically on file open (outline view), so one crafted file would
+    // abort the whole server with an uncatchable SIGABRT. The public entry now
+    // guards on max_depth, so reaching the assertion below IS the proof.
+    let src = deeply_nested_blocks(DEPTH);
+    let cst = m1_core::parse(&src);
+    let li = LineIndex::new(&src);
+    // Adversarial depth past the guard: the safe response is an empty outline,
+    // mirroring the formatter declining to format too-deep input.
+    let syms = document_symbols::document_symbols(cst.root(), &li, PositionEncoding::Utf16);
+    assert!(
+        syms.is_empty(),
+        "input past MAX_RECURSION_DEPTH should yield an empty outline, not crash"
+    );
+}
+
+#[test]
+fn document_symbols_small_doc_still_nests() {
+    // The depth guard must not regress normal documents: a shallow if-block still
+    // produces its container with the inner assignment.
+    let src = deeply_nested_blocks(2);
+    let cst = m1_core::parse(&src);
+    let li = LineIndex::new(&src);
+    let syms = document_symbols::document_symbols(cst.root(), &li, PositionEncoding::Utf16);
+    assert_eq!(
+        syms.len(),
+        1,
+        "expected one top-level if container: {syms:?}"
+    );
+    assert!(syms[0].name.starts_with("if"));
 }
 
 #[test]
