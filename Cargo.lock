@@ -604,13 +604,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "m1-core"
+version = "0.14.0"
+source = "git+https://github.com/C-Nucifora/m1-core.git?tag=v0.14.0#125db2d433b6441681670472001f1848b5c9934d"
+dependencies = [
+ "tree-sitter",
+ "tree-sitter-m1",
+]
+
+[[package]]
 name = "m1-fmt"
 version = "0.16.0"
 source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.16.0#7550741628de19d7c6dfec8c4c0072f1186f2bf0"
 dependencies = [
  "clap",
  "libc",
- "m1-core",
+ "m1-core 0.12.0",
  "m1-workspace",
  "rayon",
  "toml",
@@ -623,7 +632,7 @@ source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.22.0#ef43488979f1
 dependencies = [
  "clap",
  "glob",
- "m1-core",
+ "m1-core 0.12.0",
  "m1-workspace",
  "rayon",
  "serde_json",
@@ -635,7 +644,7 @@ name = "m1-lsp"
 version = "0.42.1"
 dependencies = [
  "dashmap 6.2.1",
- "m1-core",
+ "m1-core 0.14.0",
  "m1-fmt",
  "m1-lint",
  "m1-typecheck",
@@ -654,7 +663,7 @@ version = "0.40.1"
 source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.40.1#112bd47df85a4404ab91f505eef62c72004302bd"
 dependencies = [
  "clap",
- "m1-core",
+ "m1-core 0.12.0",
  "m1-workspace",
  "roxmltree",
  "serde",
