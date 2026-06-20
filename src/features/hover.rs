@@ -857,6 +857,7 @@ mod tests {
             return_type: None,
             in_params: None,
             table_meta: None,
+            default_value: None,
         }
     }
 
@@ -926,6 +927,7 @@ mod tests {
             return_type: None,
             in_params: None,
             table_meta: None,
+            default_value: None,
         };
         let md = symbol_markdown(&sym, None);
         assert!(md.contains("security: `Protected`"), "got: {md}");
@@ -957,6 +959,7 @@ mod tests {
             return_type: None,
             in_params: None,
             table_meta: None,
+            default_value: None,
         };
         let md = symbol_markdown(&sym, None);
         assert!(md.contains("call rate: `100 Hz`"), "got: {md}");
@@ -1041,6 +1044,7 @@ mod tests {
                 ],
                 output_unit: Some("N.m".into()),
             }),
+            default_value: None,
         };
         let md = symbol_markdown(&sym, None);
         assert!(md.contains("2-D table"), "got: {md}");
@@ -1083,6 +1087,7 @@ mod tests {
             return_type: None,
             in_params: None,
             table_meta: None,
+            default_value: None,
         };
         let md = symbol_markdown(&sym, None);
         assert!(md.contains("CAN Signal"), "got: {md}");
