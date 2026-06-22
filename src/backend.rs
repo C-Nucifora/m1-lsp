@@ -1059,14 +1059,59 @@ impl LanguageServer for Backend {
         };
         let byte = doc.byte(tdp.position);
         let cst = doc.parse();
-        Ok(self.store.with_project(|p| {
-            hover::hover(
-                cst.root(),
-                byte,
-                p.map(|lp| &lp.project),
-                doc.file_name.as_deref(),
-                &doc.line_index,
-                doc.enc,
+
+        // Eval is opt-in and off by default. When disabled, take the plain
+        // `hover` path — byte-identical to before the eval integration (no engine
+        // is ever built and no trace is consulted). When enabled, read the cached
+        // `Trace` via `with_eval` (built once per project/config; never per hover)
+        // and enrich a channel hover with its evaluated value.
+        let eval_cfg = self.eval_config.read().unwrap().clone();
+        if !eval_cfg.enabled {
+            return Ok(self.store.with_project(|p| {
+                hover::hover(
+                    cst.root(),
+                    byte,
+                    p.map(|lp| &lp.project),
+                    doc.file_name.as_deref(),
+                    &doc.line_index,
+                    doc.enc,
+                )
+            }));
+        }
+
+        // The trace build (a whole-project offline run on a cache miss) can be
+        // non-trivial, so run it off the async worker via `block_in_place` (#135),
+        // mirroring the call-graph/diagnostic read paths. Subsequent hovers hit the
+        // cache and do no work.
+        Ok(tokio::task::block_in_place(|| {
+            self.store.with_eval(
+                &eval_cfg,
+                |lp| crate::eval::evaluate(lp, &eval_cfg),
+                |opt| match opt {
+                    Some((lp, trace, provenance)) => hover::hover_with_eval(
+                        cst.root(),
+                        byte,
+                        Some(&lp.project),
+                        doc.file_name.as_deref(),
+                        &doc.line_index,
+                        doc.enc,
+                        Some(hover::EvalContext {
+                            trace: trace.as_ref(),
+                            provenance,
+                            tick: eval_cfg.tick,
+                        }),
+                    ),
+                    // No project loaded: no symbols to resolve, no trace — fall back
+                    // to the plain (project-less) hover for keyword/local docs.
+                    None => hover::hover(
+                        cst.root(),
+                        byte,
+                        None,
+                        doc.file_name.as_deref(),
+                        &doc.line_index,
+                        doc.enc,
+                    ),
+                },
             )
         }))
     }
