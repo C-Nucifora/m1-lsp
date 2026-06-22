@@ -10,6 +10,7 @@ use tower_lsp::{Client, LanguageServer};
 use crate::analysis::{LintProvider, NoLint, NoTypes, TypeProvider, analyze};
 use crate::config::M1Config;
 use crate::document::Document;
+use crate::eval::EvalConfig;
 use crate::features::{
     call_hierarchy, code_action, code_lens, completion, document_link, document_symbols, folding,
     goto, hover, inlay, references, rename, selection_range, semantic_tokens, signature_help,
@@ -57,6 +58,12 @@ pub struct Backend {
     /// the backends. Re-resolved on root discovery, `m1-tools.toml` change, and
     /// `didChangeConfiguration`; its `diagnostics` filter is read on every publish.
     config: std::sync::RwLock<M1Config>,
+    /// The resolved LSP-local evaluation config (`m1.eval.*`), re-read from the
+    /// editor settings on the same `didChangeConfiguration` path as `config`.
+    /// **Disabled by default**: with eval off, hover/inlay behave as today and
+    /// no engine is ever built. This is intentionally *not* part of `M1Config`
+    /// (whose `M1ToolsConfig` is tag-pinned with no `[eval]` section).
+    eval_config: std::sync::RwLock<EvalConfig>,
     /// The last editor settings (`initializationOptions` / `didChangeConfiguration`),
     /// the middle precedence layer beneath `m1-tools.toml`.
     editor_settings: std::sync::RwLock<Option<serde_json::Value>>,
@@ -155,6 +162,7 @@ impl Backend {
             semtok_refresh_support: std::sync::atomic::AtomicBool::new(false),
             code_lens_refresh_support: std::sync::atomic::AtomicBool::new(false),
             config: std::sync::RwLock::new(M1Config::default()),
+            eval_config: std::sync::RwLock::new(EvalConfig::default()),
             editor_settings: std::sync::RwLock::new(None),
             config_root: std::sync::RwLock::new(None),
             semtok_prev: DashMap::new(),
@@ -170,11 +178,19 @@ impl Backend {
     /// `didChangeConfiguration` can re-resolve against the same workspace.
     fn apply_config(&self, root: &std::path::Path) {
         let editor = self.editor_settings.read().unwrap().clone();
-        let (cfg, issues) = M1Config::resolve_with_issues(editor.as_ref(), root);
+        let (cfg, mut issues) = M1Config::resolve_with_issues(editor.as_ref(), root);
         self.lint.set_lint_config(&cfg.lint);
         self.formatter.set_format_options(&cfg.format);
         *self.config.write().unwrap() = cfg;
         *self.config_root.write().unwrap() = Some(root.to_path_buf());
+        // The LSP-local eval config (`m1.eval.*`) rides the same editor-settings
+        // value but is resolved separately from `M1Config` — `M1ToolsConfig` is
+        // tag-pinned with no `[eval]` section. Off by default; a malformed
+        // payload degrades to disabled and adds an issue line below rather than
+        // disabling the rest of config.
+        let (eval_cfg, eval_issues) = EvalConfig::from_editor_settings(editor.as_ref());
+        *self.eval_config.write().unwrap() = eval_cfg;
+        issues.extend(eval_issues);
         // Surface config problems instead of silently falling back (#278):
         // a malformed m1-tools.toml or a typo'd key looks exactly like "the
         // LSP ignored my setting" without this. Sent fire-and-forget — config

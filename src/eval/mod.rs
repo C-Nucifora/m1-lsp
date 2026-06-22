@@ -6,9 +6,14 @@
 //! existing type/symbol information. The LSP runs no second engine and writes no
 //! evaluation logic of its own — it caches a `Trace` and renders it.
 //!
-//! This is the E0 skeleton: it re-exports the m1-eval types the later milestones
-//! build on, with no runtime behaviour yet. With eval disabled or unavailable,
-//! hover and inlay behave exactly as today.
+//! It re-exports the m1-eval types the later milestones build on, and owns the
+//! LSP-local [`EvalConfig`] sourced from `m1.eval.*` editor settings. With eval
+//! disabled or unavailable (the default), hover and inlay behave exactly as
+//! today.
+
+pub mod config;
+
+pub use config::{EvalConfig, TickPolicy};
 
 /// Re-exports of the m1-eval public surface the LSP integration builds on.
 ///
