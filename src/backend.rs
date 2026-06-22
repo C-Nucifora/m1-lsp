@@ -1823,6 +1823,13 @@ impl LanguageServer for Backend {
         // current workspace root and re-publish so the change takes effect live.
         *self.editor_settings.write().unwrap() = Some(editor_settings(params.settings));
         self.reapply_config();
+        // A settings change can re-point or re-enable the eval source (`m1.eval.*`),
+        // and a scenario/log file's *content* may have changed on disk without the
+        // config value changing — so drop the cached trace here too (E3). The
+        // resolved `EvalConfig` hash already forces a rebuild when the value
+        // changes; this also covers the same-value-different-file-content case.
+        // The next hover/inlay request rebuilds against the new config.
+        self.store.invalidate_call_graph();
         let uris: Vec<Url> = self.docs.iter().map(|e| e.key().clone()).collect();
         for uri in uris {
             self.publish(uri).await;

@@ -30,7 +30,7 @@ use std::path::PathBuf;
 /// produces a full per-tick trace and the LSP picks one tick to surface. The
 /// default is the **last** tick — for a settled offline-default run that is the
 /// channel's converged value, which is the most useful single number to show.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TickPolicy {
     /// Read the value at the first tick (`t = time[0]`).
@@ -46,7 +46,7 @@ pub enum TickPolicy {
 /// keys are ignored (forward-compatibility), but a payload whose *shape* is wrong
 /// (e.g. `enabled` set to a string) is rejected — [`Self::from_editor_settings`]
 /// turns that into a disabled default plus an issue line rather than a panic.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EvalConfig {
     /// Master switch. **Off by default**: with eval disabled, hover and inlay
