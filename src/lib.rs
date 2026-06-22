@@ -6,6 +6,7 @@ pub mod config;
 pub mod convert;
 pub mod disk_read;
 pub mod document;
+pub mod eval;
 pub mod features;
 pub mod fmt_backend;
 pub mod format;
