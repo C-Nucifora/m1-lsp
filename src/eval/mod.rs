@@ -12,15 +12,17 @@
 //! today.
 
 pub mod config;
+pub mod engine;
 
 pub use config::{EvalConfig, TickPolicy};
+pub use engine::{EvalOutcome, Provenance, evaluate};
 
 /// Re-exports of the m1-eval public surface the LSP integration builds on.
 ///
 /// Centralising the imports here keeps the dependency boundary explicit: every
 /// type the integration touches is one of m1-eval's own (`Engine`, `Scenario`,
 /// `Trace`, `Value`, `EvalError`), with no `m1-core`/`m1-typecheck` type leaks.
-pub use m1_eval::{Engine, EvalError, Scenario, Trace, Value};
+pub use m1_eval::{Engine, EvalError, RunMode, Scenario, Trace, Value};
 
 #[cfg(test)]
 mod tests {
