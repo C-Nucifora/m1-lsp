@@ -1,5 +1,9 @@
 //! textDocument/hover: describe the symbol/local/opaque under the cursor.
 use crate::convert::range;
+use crate::eval::Trace;
+use crate::eval::config::TickPolicy;
+use crate::eval::engine::Provenance;
+use crate::eval::render::eval_hover_fragment;
 use crate::features::locate::{
     build_scope, node_at_byte, path_at_byte, segment_at_byte, segment_nodes,
 };
@@ -587,6 +591,27 @@ fn reference_keyword_doc(name: &str) -> Option<&'static str> {
         .map(|(_, doc)| *doc)
 }
 
+/// The cached-evaluation view passed into [`hover_with_eval`]: a borrowed
+/// [`Trace`], where it came from, and which tick to read. Bundled so the eval
+/// inputs travel as one optional argument — `None` means "no eval available",
+/// which reproduces the pre-eval hover exactly.
+#[derive(Clone, Copy)]
+pub struct EvalContext<'a> {
+    /// The cached trace whose channel columns hold the evaluated values.
+    pub trace: &'a Trace,
+    /// Where the trace came from, so the value line can be honest (offline
+    /// default vs. configured scenario/log).
+    pub provenance: &'a Provenance,
+    /// Which tick of the trace a value is read from.
+    pub tick: TickPolicy,
+}
+
+/// textDocument/hover entry point — unchanged behaviour, no evaluated values.
+///
+/// This is the long-standing signature every existing call site uses; it simply
+/// delegates to [`hover_with_eval`] with no [`EvalContext`], so its output is
+/// byte-identical to before the eval integration. The backend uses
+/// [`hover_with_eval`] when a cached trace is available.
 pub fn hover(
     root: m1_core::Node,
     byte: usize,
@@ -594,6 +619,26 @@ pub fn hover(
     file_name: Option<&str>,
     li: &LineIndex,
     enc: PositionEncoding,
+) -> Option<Hover> {
+    hover_with_eval(root, byte, project, file_name, li, enc, None)
+}
+
+/// textDocument/hover with an optional cached-evaluation view (E4).
+///
+/// Identical to [`hover`] in every branch except the project-symbol one: when an
+/// [`EvalContext`] is supplied and the resolved symbol has a column in the cached
+/// trace, an evaluated-value fragment (`value: \`50\` (@ t=…)`, with honest
+/// provenance suffixes) is appended after the existing type/symbol markdown. With
+/// `eval == None` — or for a symbol with no trace column (group/function/table) —
+/// the output is exactly what [`hover`] produces.
+pub fn hover_with_eval(
+    root: m1_core::Node,
+    byte: usize,
+    project: Option<&Project>,
+    file_name: Option<&str>,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    eval: Option<EvalContext<'_>>,
 ) -> Option<Hover> {
     // Language-keyword/construct docs (#166). Keyword tokens (`if`, `when`,
     // `expand`, `local`, …) are not part of a dotted path, so `path_at_byte`
@@ -656,7 +701,19 @@ pub fn hover(
             Resolution::Local(t) => {
                 format!("**{prefix}** `local`\n\ntype: `{}`", value_type_str(t))
             }
-            Resolution::Symbol(sym) => symbol_markdown(sym, project),
+            Resolution::Symbol(sym) => {
+                // Type/symbol info is unchanged and always shown first; the
+                // evaluated value (when a trace is available and the symbol has a
+                // column under its canonical path) is appended after it.
+                let mut md = symbol_markdown(sym, project);
+                if let Some(ctx) = eval
+                    && let Some(frag) =
+                        eval_hover_fragment(&sym.path, ctx.trace, ctx.provenance, ctx.tick)
+                {
+                    md.push_str(&frag);
+                }
+                md
+            }
             Resolution::BuiltinObject(name) => builtin_object_markdown(name),
             Resolution::BuiltinFn(overloads) => builtin_fn_markdown(&prefix, &overloads),
             Resolution::Opaque | Resolution::Unresolved => {
@@ -1628,5 +1685,210 @@ mod tests {
         } else {
             panic!("expected markup");
         }
+    }
+
+    // ---- E4: hover-to-evaluate ----
+
+    /// A project fixture with a value-bearing channel (`Root.Demo.Output`), a
+    /// group (`Root.Demo`), a parameter (`Root.Demo.Gain`), a table
+    /// (`Root.Demo.Map`) and a user function (`Root.Demo.Update`) — enough to
+    /// cover "value-bearing vs. not" for the eval fragment.
+    fn eval_project() -> (tempfile::TempDir, Project) {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        std::fs::File::create(&prj)
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Demo"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Demo.Output"><Props Type="f32"/></Component>
+  <Component Classname="BuiltIn.Parameter" Name="Root.Demo.Gain"><Props Type="f32"/></Component>
+  <Component Classname="BuiltIn.Table" Name="Root.Demo.Map"><Props Type="f32"/></Component>
+  <Component Classname="BuiltIn.FuncUser" Name="Root.Demo.Update" Filename="Demo.Update.m1scr"/>
+</Project>"#,
+            )
+            .unwrap();
+        let project = m1_typecheck::Project::load(&prj).unwrap();
+        (tmp, project)
+    }
+
+    /// A one-channel trace at a single tick. `external` flags the channel as a
+    /// Tier-3 / scenario-fed input.
+    fn trace_for(path: &str, value: crate::eval::Value, external: bool) -> Trace {
+        let mut tr = Trace::new();
+        tr.push_tick(0.02);
+        tr.record_channel(path, value);
+        if external {
+            tr.mark_external(path);
+        }
+        tr
+    }
+
+    /// Hover markdown for `find` in `src` against `project`, with an optional
+    /// eval context. Mirrors the shape of `hover_value_at` but exercises the
+    /// eval-aware entry point.
+    fn eval_hover_md(
+        project: &Project,
+        src: &str,
+        find: &str,
+        eval: Option<EvalContext<'_>>,
+    ) -> String {
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find(find).unwrap();
+        let h = hover_with_eval(
+            cst.root(),
+            byte,
+            Some(project),
+            Some("Demo.Update.m1scr"),
+            &li,
+            PositionEncoding::Utf16,
+            eval,
+        )
+        .unwrap_or_else(|| panic!("no hover for `{find}`"));
+        match h.contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        }
+    }
+
+    #[test]
+    fn scenario_hover_shows_value_alongside_type() {
+        let (_tmp, project) = eval_project();
+        let trace = trace_for("Root.Demo.Output", crate::eval::Value::Float(50.0), false);
+        let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
+        let md = eval_hover_md(
+            &project,
+            "Output = 1;\n",
+            "Output",
+            Some(EvalContext {
+                trace: &trace,
+                provenance: &prov,
+                tick: TickPolicy::Last,
+            }),
+        );
+        // The existing type/symbol info is still present and shown first.
+        assert!(md.contains("`channel`"), "type/symbol info kept: {md}");
+        assert!(md.contains("type: `Float`"), "type info kept: {md}");
+        // The evaluated value is appended after it.
+        assert!(md.contains("value: `50`"), "value line present: {md}");
+        // A configured scenario carries no honesty suffix.
+        assert!(!md.contains("offline default"), "no offline label: {md}");
+        assert!(!md.contains("externally driven"), "not external: {md}");
+        // Type comes before value.
+        assert!(
+            md.find("type: `Float`").unwrap() < md.find("value: `50`").unwrap(),
+            "type shown before value: {md}"
+        );
+    }
+
+    #[test]
+    fn offline_default_hover_shows_value_with_label() {
+        let (_tmp, project) = eval_project();
+        let trace = trace_for("Root.Demo.Output", crate::eval::Value::Float(50.0), false);
+        let prov = Provenance::OfflineDefault;
+        let md = eval_hover_md(
+            &project,
+            "Output = 1;\n",
+            "Output",
+            Some(EvalContext {
+                trace: &trace,
+                provenance: &prov,
+                tick: TickPolicy::Last,
+            }),
+        );
+        assert!(md.contains("value: `50`"), "value shown: {md}");
+        assert!(
+            md.contains("(offline default — no scenario)"),
+            "offline default labelled: {md}"
+        );
+    }
+
+    #[test]
+    fn external_channel_hover_is_labelled() {
+        let (_tmp, project) = eval_project();
+        let trace = trace_for("Root.Demo.Output", crate::eval::Value::Float(50.0), true);
+        let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
+        let md = eval_hover_md(
+            &project,
+            "Output = 1;\n",
+            "Output",
+            Some(EvalContext {
+                trace: &trace,
+                provenance: &prov,
+                tick: TickPolicy::Last,
+            }),
+        );
+        assert!(
+            md.contains("(externally driven)"),
+            "external channel labelled: {md}"
+        );
+    }
+
+    #[test]
+    fn eval_off_hover_equals_pre_eval_baseline() {
+        // Regression guard: with no EvalContext, the eval-aware path produces the
+        // exact markdown the long-standing `hover` entry point does.
+        let (_tmp, project) = eval_project();
+        let src = "Output = 1;\n";
+        let baseline = eval_hover_md(&project, src, "Output", None);
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let byte = src.find("Output").unwrap();
+        let via_plain = hover(
+            cst.root(),
+            byte,
+            Some(&project),
+            Some("Demo.Update.m1scr"),
+            &li,
+            PositionEncoding::Utf16,
+        )
+        .unwrap();
+        let plain_md = match via_plain.contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        assert_eq!(baseline, plain_md, "eval-off path equals plain hover");
+        assert!(
+            !baseline.contains("value:"),
+            "no value line when off: {baseline}"
+        );
+    }
+
+    #[test]
+    fn non_value_symbols_get_no_value_line() {
+        // A group, a function, and a table have no channel column in the trace,
+        // so even with a trace available no `value:` line is added.
+        let (_tmp, project) = eval_project();
+        // The trace only has the Output channel; nothing for Demo/Update/Map.
+        let trace = trace_for("Root.Demo.Output", crate::eval::Value::Float(50.0), false);
+        let prov = Provenance::OfflineDefault;
+        let ctx = EvalContext {
+            trace: &trace,
+            provenance: &prov,
+            tick: TickPolicy::Last,
+        };
+        // Group `Demo`.
+        let group_md = eval_hover_md(&project, "Demo.Output = 1;\n", "Demo", Some(ctx));
+        assert!(group_md.contains("`group`"), "is a group: {group_md}");
+        assert!(
+            !group_md.contains("value:"),
+            "group has no value: {group_md}"
+        );
+        // Table `Map`.
+        let table_md = eval_hover_md(&project, "x = Demo.Map;\n", "Map", Some(ctx));
+        assert!(
+            !table_md.contains("value:"),
+            "table has no value: {table_md}"
+        );
+        // Parameter `Gain` — also absent from the trace, so no value line.
+        let param_md = eval_hover_md(&project, "x = Demo.Gain;\n", "Gain", Some(ctx));
+        assert!(
+            !param_md.contains("value:"),
+            "param has no column: {param_md}"
+        );
     }
 }
