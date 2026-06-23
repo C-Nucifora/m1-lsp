@@ -85,12 +85,61 @@ pub fn eval_hover_fragment(
     tick: TickPolicy,
 ) -> Option<String> {
     let column = trace.channels.get(path)?;
+    let mut frag = column_fragment(column, trace, provenance, tick)?;
+    // `(externally driven)` is a *channel* property — an externally-fed input vs.
+    // a computed output — so it only applies to a channel fragment, not an
+    // expression one. Both honesty suffixes can apply at once.
+    if trace.is_external(path) {
+        frag.push_str(" (externally driven)");
+    }
+    Some(frag)
+}
+
+/// Build the hover value fragment for an expression occurrence at
+/// `(file_name, byte_offset)`, or `None` when [`Trace::exprs`] holds no column for
+/// that site.
+///
+/// [`Trace::exprs`] is *sparse*: the offline-default / scenario run only records the
+/// expressions its sink evaluated, so a hovered sub-expression the run never visited
+/// simply yields `None` — no value line, honest rather than an error. The rendered
+/// fragment is identical to [`eval_hover_fragment`]'s (`value: \`50\` (@ t=…)` plus
+/// the `(offline default — no scenario)` suffix for [`Provenance::OfflineDefault`]),
+/// minus the channel-only `(externally driven)` suffix, which does not apply to an
+/// expression value.
+///
+/// Caller's responsibility (a known limitation documented in the eval plan, E5): the
+/// `byte_offset` keys are the evaluator's view of the **saved** script, so the caller
+/// must only consult this when the open buffer is unmodified-since-load — an edited
+/// buffer drifts the offsets and would mis-key. Channel hover ([`eval_hover_fragment`])
+/// is path-keyed and unaffected.
+pub fn eval_expr_fragment(
+    file_name: &str,
+    byte_offset: usize,
+    trace: &Trace,
+    provenance: &Provenance,
+    tick: TickPolicy,
+) -> Option<String> {
+    let column = trace.exprs.get(&(file_name.to_string(), byte_offset))?;
+    column_fragment(column, trace, provenance, tick)
+}
+
+/// Format a single trace value column (channel or expression) into the shared
+/// `value: \`…\` (@ t=…s)` fragment plus the offline-default honesty suffix. Returns
+/// `None` for an empty column (a key present but with no recorded ticks). The
+/// channel-only `(externally driven)` suffix is appended by the caller, since it is
+/// keyed on the channel path the column came from.
+fn column_fragment(
+    column: &[Value],
+    trace: &Trace,
+    provenance: &Provenance,
+    tick: TickPolicy,
+) -> Option<String> {
     if column.is_empty() {
         return None;
     }
-    // Channel columns are aligned to the *end* of the shared time axis (a channel
-    // first seen mid-run is appended, not left-padded), so the column's last entry
-    // is the last tick and its first entry sits `time.len() - column.len()` in.
+    // Columns are aligned to the *end* of the shared time axis (a column first seen
+    // mid-run is appended, not left-padded), so the column's last entry is the last
+    // tick and its first entry sits `time.len() - column.len()` in.
     let (value, time_idx) = match tick {
         TickPolicy::First => (&column[0], trace.time.len().saturating_sub(column.len())),
         TickPolicy::Last => (
@@ -103,13 +152,8 @@ pub fn eval_hover_fragment(
     if let Some(t) = trace.time.get(time_idx) {
         frag.push_str(&format!(" (@ t={}s)", fmt_f64(*t)));
     }
-
-    // Honesty suffixes — both can apply at once.
     if *provenance == Provenance::OfflineDefault {
         frag.push_str(" (offline default — no scenario)");
-    }
-    if trace.is_external(path) {
-        frag.push_str(" (externally driven)");
     }
     Some(frag)
 }
@@ -125,6 +169,17 @@ mod tests {
         for (i, v) in col.into_iter().enumerate() {
             tr.push_tick(i as f64 * 0.01);
             tr.record_channel(path, v);
+        }
+        tr
+    }
+
+    /// A trace with a single expression column at `(file, offset)` over a
+    /// matching-length time axis.
+    fn trace_with_expr(file: &str, offset: usize, col: Vec<Value>) -> Trace {
+        let mut tr = Trace::new();
+        for (i, v) in col.into_iter().enumerate() {
+            tr.push_tick(i as f64 * 0.01);
+            tr.record_expr((file.to_string(), offset), v);
         }
         tr
     }
@@ -283,5 +338,108 @@ mod tests {
         .unwrap();
         assert!(frag.contains("value: `10`"), "first tick value: {frag}");
         assert!(frag.contains("(@ t=0s)"), "first tick time: {frag}");
+    }
+
+    // ---- eval_expr_fragment (E5) ----
+
+    #[test]
+    fn present_expr_site_renders_value_and_time() {
+        let tr = trace_with_expr("demo.m1scr", 42, vec![Value::Int(7); 3]);
+        let frag = eval_expr_fragment(
+            "demo.m1scr",
+            42,
+            &tr,
+            &Provenance::Scenario(PathBuf::from("s.toml")),
+            TickPolicy::Last,
+        )
+        .expect("a recorded (script, offset) yields a fragment");
+        assert!(frag.contains("value: `7`"), "got: {frag}");
+        // Last tick of a 3-tick run at 0.01s spacing is t=0.02s.
+        assert!(frag.contains("(@ t=0.02s)"), "got: {frag}");
+        assert!(frag.starts_with("\n\n"), "got: {frag:?}");
+    }
+
+    #[test]
+    fn absent_expr_site_yields_none() {
+        // A sparse miss — the run never recorded this site — is honest, not an
+        // error: no value line at all.
+        let tr = trace_with_expr("demo.m1scr", 42, vec![Value::Int(7)]);
+        assert!(
+            eval_expr_fragment(
+                "demo.m1scr",
+                99,
+                &tr,
+                &Provenance::Scenario(PathBuf::from("s.toml")),
+                TickPolicy::Last
+            )
+            .is_none(),
+            "an offset with no recorded expr column gets no value line"
+        );
+        // A different file name with the same offset is also a miss.
+        assert!(
+            eval_expr_fragment(
+                "other.m1scr",
+                42,
+                &tr,
+                &Provenance::Scenario(PathBuf::from("s.toml")),
+                TickPolicy::Last
+            )
+            .is_none(),
+            "the key is (script, offset) — a different script does not match"
+        );
+    }
+
+    #[test]
+    fn offline_default_expr_is_labelled() {
+        let tr = trace_with_expr("demo.m1scr", 42, vec![Value::Float(2.5)]);
+        let frag = eval_expr_fragment(
+            "demo.m1scr",
+            42,
+            &tr,
+            &Provenance::OfflineDefault,
+            TickPolicy::Last,
+        )
+        .expect("fragment present");
+        assert!(frag.contains("value: `2.5`"), "got: {frag}");
+        assert!(
+            frag.contains("(offline default — no scenario)"),
+            "offline-default expr value must be labelled: {frag}"
+        );
+    }
+
+    #[test]
+    fn expr_fragment_never_shows_externally_driven() {
+        // `(externally driven)` is a channel-only concept; even if a channel of the
+        // same trace is external, an expression fragment never carries the suffix.
+        let mut tr = trace_with_expr("demo.m1scr", 42, vec![Value::Int(1)]);
+        tr.mark_external("Root.Demo.CanIn");
+        let frag = eval_expr_fragment(
+            "demo.m1scr",
+            42,
+            &tr,
+            &Provenance::Scenario(PathBuf::from("s.toml")),
+            TickPolicy::Last,
+        )
+        .unwrap();
+        assert!(
+            !frag.contains("externally driven"),
+            "expr fragment must not carry the channel-only suffix: {frag}"
+        );
+    }
+
+    #[test]
+    fn empty_expr_column_yields_none() {
+        let mut tr = Trace::new();
+        tr.exprs.insert(("demo.m1scr".to_string(), 42), Vec::new());
+        assert!(
+            eval_expr_fragment(
+                "demo.m1scr",
+                42,
+                &tr,
+                &Provenance::OfflineDefault,
+                TickPolicy::Last
+            )
+            .is_none()
+        );
     }
 }

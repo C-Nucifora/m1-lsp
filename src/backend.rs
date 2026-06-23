@@ -282,6 +282,25 @@ impl Backend {
         })
     }
 
+    /// Whether the open buffer at `uri` is byte-for-byte the file currently on
+    /// disk — the gate for expression-level hover (E5).
+    ///
+    /// [`m1_eval::Trace::exprs`] is keyed by `(script_name, byte_offset)`, and those
+    /// offsets are the evaluator's view of the **saved** script (the project is
+    /// loaded from disk). An unsaved edit shifts the buffer's offsets relative to
+    /// the saved file, so an expr lookup keyed on a buffer offset would mis-key; we
+    /// only allow it when buffer == disk. Channel hover (E4) is path-keyed and never
+    /// depends on this. The disk read uses the same tolerant (UTF-8 → Windows-1252)
+    /// decode the project loader uses, so a Windows-1252 script compares correctly.
+    /// A missing/unreadable file or a non-file URI conservatively returns `false`
+    /// (expr-hover off rather than risk drifted offsets).
+    fn buffer_matches_disk(&self, uri: &Url, buffer_text: &str) -> bool {
+        let Ok(path) = uri.to_file_path() else {
+            return false;
+        };
+        crate::disk_read::read_disk(&path).is_some_and(|disk| disk == buffer_text)
+    }
+
     /// Fallback project discovery (#73). `initialize` loads the project from the
     /// Create a `$/progress` token and send `Begin` (#266). Returns `None`
     /// (and sends nothing) when the client did not advertise
@@ -1079,6 +1098,12 @@ impl LanguageServer for Backend {
             }));
         }
 
+        // Expression-level hover (E5) keys `Trace::exprs` by the *saved* script's
+        // byte offsets; those only line up with the open buffer when it is
+        // unmodified-since-load, so gate it on a buffer == disk check. Channel hover
+        // (E4) is path-keyed and works regardless.
+        let expr_offsets_valid = self.buffer_matches_disk(&tdp.text_document.uri, &doc.text);
+
         // The trace build (a whole-project offline run on a cache miss) can be
         // non-trivial, so run it off the async worker via `block_in_place` (#135),
         // mirroring the call-graph/diagnostic read paths. Subsequent hovers hit the
@@ -1099,6 +1124,7 @@ impl LanguageServer for Backend {
                             trace: trace.as_ref(),
                             provenance,
                             tick: eval_cfg.tick,
+                            expr_offsets_valid,
                         }),
                     ),
                     // No project loaded: no symbols to resolve, no trace — fall back
@@ -2061,6 +2087,59 @@ mod did_close_tests {
         assert!(
             !backend.diag_prev.contains_key(&uri),
             "did_close must remove the URI from diag_prev to prevent a cache leak"
+        );
+    }
+}
+
+#[cfg(test)]
+mod buffer_matches_disk_tests {
+    use super::Backend;
+    use tower_lsp::{LspService, lsp_types::Url};
+
+    // E5 gate: expression-level hover keys `Trace::exprs` by the *saved* script's
+    // byte offsets, so it is only safe when the open buffer equals the file on
+    // disk. `buffer_matches_disk` is that gate.
+    #[test]
+    fn matches_when_buffer_equals_disk_and_not_otherwise() {
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("Demo.Update.m1scr");
+        let on_disk = "Output = 1;\n";
+        std::fs::write(&path, on_disk).unwrap();
+        let uri = Url::from_file_path(&path).unwrap();
+
+        // Buffer identical to disk: the saved offsets line up.
+        assert!(
+            backend.buffer_matches_disk(&uri, on_disk),
+            "an unmodified buffer matches its on-disk file"
+        );
+        // An edited (unsaved) buffer drifts the offsets — gate must be false.
+        assert!(
+            !backend.buffer_matches_disk(&uri, "Output = 999;\n"),
+            "a modified buffer must not match disk"
+        );
+    }
+
+    #[test]
+    fn false_for_missing_file_or_non_file_uri() {
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+
+        // A path with no file on disk: read fails, gate is conservatively false.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = Url::from_file_path(tmp.path().join("nope.m1scr")).unwrap();
+        assert!(
+            !backend.buffer_matches_disk(&missing, "anything"),
+            "a missing file yields no match (expr-hover off, not a drifted lookup)"
+        );
+
+        // A non-file URI cannot be read from disk at all.
+        let non_file = Url::parse("untitled:Untitled-1").unwrap();
+        assert!(
+            !backend.buffer_matches_disk(&non_file, "anything"),
+            "a non-file URI cannot match a disk file"
         );
     }
 }

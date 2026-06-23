@@ -17,7 +17,7 @@ pub mod render;
 
 pub use config::{EvalConfig, TickPolicy};
 pub use engine::{EvalOutcome, Provenance, evaluate};
-pub use render::{eval_hover_fragment, value_markdown};
+pub use render::{eval_expr_fragment, eval_hover_fragment, value_markdown};
 
 /// Re-exports of the m1-eval public surface the LSP integration builds on.
 ///

@@ -967,6 +967,69 @@ async fn hover_with_eval_off_has_no_value_line() {
     assert!(!md.contains("value:"), "no value line when eval off: {md}");
 }
 
+// E5: hovering a sub-expression occurrence the run never recorded an expr value
+// for (here the `scaled` local — `Trace::exprs` only carries call-site values, so
+// this is a sparse miss) adds no `value:` line and leaves the rest of the hover
+// intact. The buffer is unmodified-since-load, so the expr offsets are valid and
+// the lookup actually runs — it simply finds nothing, the honest outcome. Drives
+// the real backend so the buffer == disk gate is exercised end-to-end.
+#[tokio::test(flavor = "multi_thread")]
+async fn expr_hover_sparse_miss_leaves_hover_unchanged() {
+    let (_tmp, root_uri, script_uri, src) = write_eval_fixture();
+
+    let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+
+    // Eval enabled + scenario configured (the expr lookup only runs when eval is on).
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "processId":null,"rootUri":root_uri,"capabilities":{},
+            "initializationOptions":{"eval":{"enabled":true,"scenario":"idle.toml"}}}}),
+    )
+    .await;
+    let _ = read_response(&mut client, 1).await;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    // Open the buffer with text identical to disk (unmodified-since-load): the E5
+    // offset gate (`buffer_matches_disk`) is satisfied, so the expr lookup runs.
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":script_uri,"languageId":"m1","version":1,"text":src}}}),
+    )
+    .await;
+    drain(&mut client).await;
+
+    // Hover the `scaled` local on line 1 (`local scaled = Speed * Gain;`). It is a
+    // non-call sub-expression, so the run recorded no expr value for it.
+    let scaled_col = src.lines().nth(1).unwrap().find("scaled").unwrap() as u64;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{
+            "textDocument":{"uri":script_uri},
+            "position":{"line":1,"character":scaled_col}}}),
+    )
+    .await;
+    let resp = read_response(&mut client, 2).await;
+    let md = resp["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("hover should return markup; got {resp}"));
+    // The local's own symbol info is present; a sparse expr miss adds no value line.
+    assert!(md.contains("`local`"), "local symbol info present: {md}");
+    assert!(
+        !md.contains("value:"),
+        "a sparse expr miss adds no value line: {md}"
+    );
+}
+
 // Direct-call tests of the pure analysis path (no transport needed).
 #[test]
 fn analyze_reports_syntax_error() {
