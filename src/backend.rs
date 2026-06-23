@@ -1343,14 +1343,59 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let cst = doc.parse();
-        let hints = self.store.with_project(|p| {
-            inlay::inlay_hints(
-                cst.root(),
-                params.range,
-                &doc.line_index,
-                doc.enc,
-                p.map(|lp| &lp.project),
-                doc.file_name.as_deref(),
+
+        // Inline computed-value hints (E6) are opt-in: they require eval enabled
+        // *and* `inlay_values` on. Otherwise take the plain path — byte-identical
+        // to before the eval integration (no trace is ever consulted), so the
+        // existing type/unit/param hints are exactly as today.
+        let eval_cfg = self.eval_config.read().unwrap().clone();
+        if !eval_cfg.enabled || !eval_cfg.inlay_values {
+            let hints = self.store.with_project(|p| {
+                inlay::inlay_hints(
+                    cst.root(),
+                    params.range,
+                    &doc.line_index,
+                    doc.enc,
+                    p.map(|lp| &lp.project),
+                    doc.file_name.as_deref(),
+                )
+            });
+            return Ok(Some(hints));
+        }
+
+        // Value hints on: read the cached `Trace` via `with_eval` (built once per
+        // project/config; never per request) and add `= value` hints. The build (a
+        // whole-project offline run on a cache miss) can be non-trivial, so run it
+        // off the async worker via `block_in_place`, mirroring the hover read path.
+        let hints = tokio::task::block_in_place(|| {
+            self.store.with_eval(
+                &eval_cfg,
+                |lp| crate::eval::evaluate(lp, &eval_cfg),
+                |opt| match opt {
+                    Some((lp, trace, provenance)) => inlay::inlay_hints_with_eval(
+                        cst.root(),
+                        params.range,
+                        &doc.line_index,
+                        doc.enc,
+                        Some(&lp.project),
+                        doc.file_name.as_deref(),
+                        Some(inlay::EvalInlayContext {
+                            trace: trace.as_ref(),
+                            provenance,
+                            tick: eval_cfg.tick,
+                        }),
+                    ),
+                    // No project loaded: no symbols to resolve, no trace — fall
+                    // back to the plain (project-less) hints.
+                    None => inlay::inlay_hints(
+                        cst.root(),
+                        params.range,
+                        &doc.line_index,
+                        doc.enc,
+                        None,
+                        doc.file_name.as_deref(),
+                    ),
+                },
             )
         });
         Ok(Some(hints))
