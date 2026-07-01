@@ -1,6 +1,10 @@
 //! textDocument/inlayHint: an inline `: Type` after each `local` declaration that
 //! has no explicit `<Type>` annotation and whose type is known. Reuses the same
 //! inference as hover (`locate::local_decl_type`), so the two always agree.
+use crate::eval::Trace;
+use crate::eval::config::TickPolicy;
+use crate::eval::engine::Provenance;
+use crate::eval::render::value_markdown;
 use crate::features::hover::value_type_str;
 use crate::features::locate::local_decl_type;
 use crate::line_index::{LineIndex, PositionEncoding};
@@ -8,9 +12,28 @@ use m1_core::{Field, Kind, Node};
 use m1_typecheck::types::ValueType;
 use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Range};
 
+/// The cached-evaluation view passed into [`inlay_hints_with_eval`]: a borrowed
+/// [`Trace`], where it came from, and which tick to read. Bundled so the eval
+/// inputs travel as one optional argument — `None` means "no value inlays", which
+/// reproduces the pre-eval inlay output exactly. Mirrors `hover::EvalContext`.
+#[derive(Clone, Copy)]
+pub struct EvalInlayContext<'a> {
+    /// The cached trace whose channel columns hold the evaluated values.
+    pub trace: &'a Trace,
+    /// Where the trace came from, so an offline-default value renders the muted
+    /// marker rather than passing as a measured one.
+    pub provenance: &'a Provenance,
+    /// Which tick of the trace a value is read from.
+    pub tick: TickPolicy,
+}
+
 /// Inline hints within `range`: `: Type` after unannotated `local`s, `paramName:`
 /// at call-site arguments, and — when a `project` is loaded — `[unit]` after each
 /// channel/parameter reference that carries a unit (#154).
+///
+/// This is the long-standing entry point every existing call site uses; it
+/// delegates to [`inlay_hints_with_eval`] with no [`EvalInlayContext`], so its
+/// output is byte-identical to before the eval integration (no `= value` hints).
 pub fn inlay_hints(
     root: Node,
     range: Range,
@@ -19,14 +42,38 @@ pub fn inlay_hints(
     project: Option<&m1_typecheck::project::Project>,
     file_name: Option<&str>,
 ) -> Vec<InlayHint> {
+    inlay_hints_with_eval(root, range, li, enc, project, file_name, None)
+}
+
+/// [`inlay_hints`] plus optional inline computed-value hints (E6).
+///
+/// Identical to [`inlay_hints`] except that, when an [`EvalInlayContext`] is
+/// supplied and a project is loaded, each channel reference / assignment target
+/// that resolves to a symbol with a column in the cached trace also gets a
+/// trailing `= <value>` hint. With `eval == None` — the default — the output is
+/// exactly what [`inlay_hints`] produces. The value hints are gated by the
+/// backend on `EvalConfig.inlay_values` (off by default) *and* an available trace,
+/// so a client that does not opt in sees today's behaviour.
+pub fn inlay_hints_with_eval(
+    root: Node,
+    range: Range,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    project: Option<&m1_typecheck::project::Project>,
+    file_name: Option<&str>,
+    eval: Option<EvalInlayContext<'_>>,
+) -> Vec<InlayHint> {
     let mut out = Vec::new();
-    // One scope (project + group + declaration-order locals) drives both the
-    // local-type hints and the unit hints; with no project it still resolves
+    // One scope (project + group + declaration-order locals) drives the
+    // local-type, unit and value hints; with no project it still resolves
     // literal and local-to-local-copy types (#153).
     let scope = crate::features::locate::build_scope(root, project, file_name);
     collect(root, &range, li, enc, &scope, &mut out);
     if project.is_some() {
         collect_unit_hints(root, &range, li, enc, &scope, &mut out);
+        if let Some(ctx) = eval {
+            collect_value_hints(root, &range, li, enc, &scope, &ctx, &mut out);
+        }
     }
     out
 }
@@ -81,6 +128,78 @@ fn collect_unit_hints(
             });
         }
     }
+}
+
+/// `= <value>` hints after each channel reference / assignment target that
+/// resolves to a project symbol with a column in the cached [`Trace`] (E6). Reuses
+/// the same outermost-path traversal as the unit hints
+/// ([`crate::features::locate::for_each_top_path`]) so reads (`Demo.Output`) and
+/// assignment targets (`Output = …`) are both covered, including bare identifiers
+/// the unit-hint pass skips.
+///
+/// A symbol with no trace column (a group/function/table/parameter the run
+/// produced no value for) simply gets no hint — honest, not an error. An
+/// [`Provenance::OfflineDefault`] value renders the muted `= <value>?` form with a
+/// tooltip, so an inline number is never mistaken for a measured one.
+fn collect_value_hints(
+    root: Node,
+    range: &Range,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    scope: &m1_typecheck::resolve::Scope,
+    ctx: &EvalInlayContext<'_>,
+    out: &mut Vec<InlayHint>,
+) {
+    use m1_typecheck::resolve::{Resolution, resolve};
+    let offline = *ctx.provenance == Provenance::OfflineDefault;
+    crate::features::locate::for_each_top_path(root, |n, _is_write| {
+        let Resolution::Symbol(sym) = resolve(n.text(), scope) else {
+            return;
+        };
+        let Some(column) = ctx.trace.channels.get(&sym.path) else {
+            return;
+        };
+        // Columns are aligned to the *end* of the shared time axis; pick the
+        // tick the policy asks for (the default last tick is a settled run's
+        // converged value). An empty column yields no hint.
+        let value = match ctx.tick {
+            TickPolicy::First => column.first(),
+            TickPolicy::Last => column.last(),
+        };
+        let Some(value) = value else {
+            return;
+        };
+        let position = li.position(n.byte_range().end, enc);
+        if position.line < range.start.line || position.line > range.end.line {
+            return;
+        }
+        // An offline-default value is the evaluator's default world, not a
+        // measured one — append `?` and explain it in a tooltip so the inline
+        // number is never read as ground truth.
+        let rendered = value_markdown(value);
+        let label = if offline {
+            format!("= {rendered}?")
+        } else {
+            format!("= {rendered}")
+        };
+        let tooltip = offline.then(|| {
+            tower_lsp::lsp_types::InlayHintTooltip::String(
+                "offline default — no scenario or log configured; this is the \
+                 evaluator's default world, not a measured value"
+                    .to_string(),
+            )
+        });
+        out.push(InlayHint {
+            position,
+            label: InlayHintLabel::String(label),
+            kind: Some(InlayHintKind::TYPE),
+            text_edits: None,
+            tooltip,
+            padding_left: Some(true),
+            padding_right: Some(false),
+            data: None,
+        });
+    });
 }
 
 fn collect(
@@ -375,5 +494,243 @@ mod tests {
         let h = hints("local count = 0;\n");
         assert_eq!(h[0].position.line, 0);
         assert_eq!(h[0].position.character, 11);
+    }
+
+    // ---- E6: inline computed-value inlay hints ----
+
+    use crate::eval::config::TickPolicy;
+    use crate::eval::engine::Provenance;
+    use crate::eval::{Trace, Value};
+
+    /// A project fixture with a value-bearing channel (`Root.Demo.Output`) whose
+    /// owning function maps to `Demo.Update.m1scr`, so a bare `Output` write in
+    /// that script resolves to `Root.Demo.Output`.
+    fn eval_project() -> (tempfile::TempDir, crate::project_store::ProjectStore) {
+        use crate::project_store::ProjectStore;
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::File::create(tmp.path().join("Project.m1prj"))
+            .unwrap()
+            .write_all(
+                br#"<?xml version="1.0"?>
+<Project>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+  <Component Classname="BuiltIn.GroupCompound" Name="Root.Demo"/>
+  <Component Classname="BuiltIn.Channel" Name="Root.Demo.Output"><Props Type="f32" Qty="V"/></Component>
+  <Component Classname="BuiltIn.FuncUser" Name="Root.Demo.Update" Filename="Demo.Update.m1scr"/>
+</Project>"#,
+            )
+            .unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+        (tmp, store)
+    }
+
+    /// A one-channel trace at a single tick.
+    fn trace_for(path: &str, value: Value) -> Trace {
+        let mut tr = Trace::new();
+        tr.push_tick(0.02);
+        tr.record_channel(path, value);
+        tr
+    }
+
+    /// Inlay hints with an eval context over the `Demo.Update.m1scr` script.
+    fn eval_hints(
+        store: &crate::project_store::ProjectStore,
+        src: &str,
+        ctx: Option<EvalInlayContext<'_>>,
+    ) -> Vec<InlayHint> {
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let full = Range::new(Position::new(0, 0), Position::new(10_000, 0));
+        store.with_project(|p| {
+            inlay_hints_with_eval(
+                cst.root(),
+                full,
+                &li,
+                PositionEncoding::Utf16,
+                p.map(|lp| &lp.project),
+                Some("Demo.Update.m1scr"),
+                ctx,
+            )
+        })
+    }
+
+    /// With a scenario trace and value-inlays on, an assignment target gets a
+    /// trailing `= value` hint.
+    #[test]
+    fn value_hint_on_assignment_target_with_scenario() {
+        let (_tmp, store) = eval_project();
+        let trace = trace_for("Root.Demo.Output", Value::Float(50.0));
+        let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
+        let hs = eval_hints(
+            &store,
+            "Output = 1;\n",
+            Some(EvalInlayContext {
+                trace: &trace,
+                provenance: &prov,
+                tick: TickPolicy::Last,
+            }),
+        );
+        let labels: Vec<String> = hs.iter().map(label).collect();
+        assert!(
+            labels.iter().any(|l| l == "= 50"),
+            "expected a `= 50` value hint on the assignment target: {labels:?}"
+        );
+        // A configured scenario carries no muted marker.
+        assert!(
+            !labels.iter().any(|l| l.contains('?')),
+            "scenario value must not be muted: {labels:?}"
+        );
+    }
+
+    /// The default path (no eval context) emits only the existing type/unit/param
+    /// hints — never a value hint.
+    #[test]
+    fn no_value_hints_without_eval_context() {
+        let (_tmp, store) = eval_project();
+        let hs = eval_hints(&store, "Output = 1;\n", None);
+        let labels: Vec<String> = hs.iter().map(label).collect();
+        assert!(
+            !labels.iter().any(|l| l.starts_with("= ")),
+            "no value hints when eval is off: {labels:?}"
+        );
+    }
+
+    /// The plain `inlay_hints` entry point never emits value hints — it is the
+    /// pre-eval surface, byte-identical to before.
+    #[test]
+    fn plain_inlay_hints_never_emits_value_hints() {
+        let (_tmp, store) = eval_project();
+        let cst = m1_core::parse("Output = 1;\n");
+        let li = LineIndex::new("Output = 1;\n");
+        let full = Range::new(Position::new(0, 0), Position::new(10_000, 0));
+        let hs = store.with_project(|p| {
+            inlay_hints(
+                cst.root(),
+                full,
+                &li,
+                PositionEncoding::Utf16,
+                p.map(|lp| &lp.project),
+                Some("Demo.Update.m1scr"),
+            )
+        });
+        let labels: Vec<String> = hs.iter().map(label).collect();
+        assert!(
+            !labels.iter().any(|l| l.starts_with("= ")),
+            "the plain entry point never adds value hints: {labels:?}"
+        );
+    }
+
+    /// An offline-default value renders a muted marker so an inline number is
+    /// never mistaken for a measured one.
+    #[test]
+    fn offline_default_value_hint_is_muted() {
+        let (_tmp, store) = eval_project();
+        let trace = trace_for("Root.Demo.Output", Value::Float(50.0));
+        let prov = Provenance::OfflineDefault;
+        let hs = eval_hints(
+            &store,
+            "Output = 1;\n",
+            Some(EvalInlayContext {
+                trace: &trace,
+                provenance: &prov,
+                tick: TickPolicy::Last,
+            }),
+        );
+        let labels: Vec<String> = hs.iter().map(label).collect();
+        assert!(
+            labels.iter().any(|l| l == "= 50?"),
+            "offline-default value must render the muted `= 50?` form: {labels:?}"
+        );
+        // The muted hint carries a tooltip explaining the marker.
+        let muted = hs
+            .iter()
+            .find(|h| label(h) == "= 50?")
+            .expect("muted hint present");
+        assert!(
+            muted.tooltip.is_some(),
+            "muted value hint should carry an explanatory tooltip"
+        );
+    }
+
+    /// A value hint also lands on a channel *read* (a `MemberExpression`), not
+    /// only an assignment target.
+    #[test]
+    fn value_hint_on_channel_read() {
+        let (_tmp, store) = eval_project();
+        let trace = trace_for("Root.Demo.Output", Value::Float(50.0));
+        let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
+        let hs = eval_hints(
+            &store,
+            "x = Demo.Output + 1;\n",
+            Some(EvalInlayContext {
+                trace: &trace,
+                provenance: &prov,
+                tick: TickPolicy::Last,
+            }),
+        );
+        let labels: Vec<String> = hs.iter().map(label).collect();
+        assert!(
+            labels.iter().any(|l| l == "= 50"),
+            "expected a `= 50` value hint at the channel read: {labels:?}"
+        );
+    }
+
+    /// A symbol with no column in the trace (here a different channel) gets no
+    /// value hint — honest, not an error.
+    #[test]
+    fn no_value_hint_when_channel_absent_from_trace() {
+        let (_tmp, store) = eval_project();
+        // The trace only carries some *other* channel, not Root.Demo.Output.
+        let trace = trace_for("Root.Demo.Elsewhere", Value::Float(50.0));
+        let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
+        let hs = eval_hints(
+            &store,
+            "Output = 1;\n",
+            Some(EvalInlayContext {
+                trace: &trace,
+                provenance: &prov,
+                tick: TickPolicy::Last,
+            }),
+        );
+        let labels: Vec<String> = hs.iter().map(label).collect();
+        assert!(
+            !labels.iter().any(|l| l.starts_with("= ")),
+            "no value hint for a channel absent from the trace: {labels:?}"
+        );
+    }
+
+    /// The existing unit/type hints are unchanged when an eval context is added —
+    /// value hints are purely additive.
+    #[test]
+    fn value_hints_are_additive_to_existing_hints() {
+        let (_tmp, store) = eval_project();
+        let trace = trace_for("Root.Demo.Output", Value::Float(50.0));
+        let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
+        // `local v = Demo.Output;` produces a `: Float` type hint and a `[V]` unit
+        // hint already; the eval context adds a `= 50` value hint on the read.
+        let hs = eval_hints(
+            &store,
+            "local v = Demo.Output;\n",
+            Some(EvalInlayContext {
+                trace: &trace,
+                provenance: &prov,
+                tick: TickPolicy::Last,
+            }),
+        );
+        let labels: Vec<String> = hs.iter().map(label).collect();
+        assert!(
+            labels.iter().any(|l| l.starts_with(": ")),
+            "the local-type hint is still present: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("[V]")),
+            "the unit hint is still present: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l == "= 50"),
+            "the value hint is added: {labels:?}"
+        );
     }
 }

@@ -1,9 +1,14 @@
 //! Discovery, loading, caching, and reload of the m1-typecheck Project.
+use crate::eval::Trace;
+use crate::eval::config::EvalConfig;
+use crate::eval::engine::{EvalOutcome, Provenance};
 use crate::features::call_hierarchy::CallGraph;
 use m1_typecheck::Project;
 use m1_typecheck::symbols::Symbol;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
 /// A loaded project plus the paths it came from (for reload + goto).
@@ -163,9 +168,72 @@ fn augment(
     Ok(project)
 }
 
+/// Identifies the inputs a cached [`m1_eval::Trace`] was built from, so a stale
+/// cache entry can be detected on the next request.
+///
+/// The trace is a pure function of two things: the **loaded project model** and
+/// the **resolved [`EvalConfig`]**. The project model has no cheap content hash,
+/// so its identity is tracked by a monotonic *reload generation*
+/// ([`ProjectStore::generation`]) that bumps on every (re)load; the config is
+/// hashed directly (it derives [`Hash`]). When either changes the key differs and
+/// [`ProjectStore::with_eval`] rebuilds. This mirrors how the call-graph cache is
+/// invalidated, but keyed rather than blindly dropped, so a no-op config
+/// re-application does not force a needless rebuild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EvalKey {
+    /// The project reload generation the trace was built against.
+    generation: u64,
+    /// A hash of the resolved [`EvalConfig`] the trace was built under.
+    config_hash: u64,
+}
+
+impl EvalKey {
+    /// The key for a trace built at reload `generation` under `cfg`.
+    fn new(generation: u64, cfg: &EvalConfig) -> Self {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        cfg.hash(&mut h);
+        EvalKey {
+            generation,
+            config_hash: h.finish(),
+        }
+    }
+}
+
+/// A cached evaluation: the single shared [`m1_eval::Trace`], its provenance (for
+/// honest rendering downstream), and the [`EvalKey`] it was built under. Held in
+/// an `RwLock<Option<…>>` on the store and reused across hover/inlay requests; a
+/// hover never triggers a fresh run unless the key changed (see
+/// [`ProjectStore::with_eval`]).
+struct CachedEval {
+    /// The shared trace. `Arc` so a handler can cheaply clone a reference out
+    /// from under the cache lock if it needs to drop the guard before rendering.
+    trace: Arc<Trace>,
+    /// Where the trace came from, carried so rendering can be honest about
+    /// offline-default vs configured values.
+    provenance: Provenance,
+    /// The inputs this trace was built from; a mismatch on the next request
+    /// triggers a rebuild.
+    key: EvalKey,
+}
+
 #[derive(Default)]
 pub struct ProjectStore {
     inner: RwLock<Option<LoadedProject>>,
+    /// Monotonic project **reload generation**, bumped on every successful
+    /// (re)load. It stands in for a content hash of the loaded project model
+    /// (which has none) inside [`EvalKey`]: a reload changes the generation, so
+    /// the eval cache built against the old generation is detected as stale and
+    /// rebuilt. Starts at 0; the first load bumps it to 1.
+    generation: AtomicU64,
+    /// Cached, debounced evaluation for the loaded project (E3). Built lazily on
+    /// the first hover/inlay request after an invalidation and reused by every
+    /// subsequent request with the same [`EvalKey`] — so hover/inlay never run a
+    /// trace per request. Dropped by [`Self::invalidate_call_graph`] at the same
+    /// edit/open/close/save/reload points as the other per-project caches (the
+    /// backend also drops it on `did_change_configuration`), and superseded when
+    /// the config or reload generation changes the key. `None` until the first
+    /// build; `None` again after any invalidation.
+    eval_cache: RwLock<Option<CachedEval>>,
     /// Cached call-hierarchy data-flow graph for the loaded project, built lazily
     /// on the first call-hierarchy request and reused across the
     /// `prepare`/`incoming`/`outgoing` requests of one "Show Call Hierarchy"
@@ -211,14 +279,69 @@ impl ProjectStore {
         f(guard.as_ref())
     }
 
-    /// Drop the per-project caches (call-hierarchy graph and memoized
-    /// project-scope diagnostics) so the next request recomputes them from the
-    /// current project + buffers. Cheap (just clears the cells); called on any
-    /// document edit/open/close/save and on every project reload — exactly the
-    /// points at which either cache could go stale.
+    /// Drop the per-project caches (call-hierarchy graph, memoized project-scope
+    /// diagnostics, and the cached eval trace) so the next request recomputes them
+    /// from the current project + buffers. Cheap (just clears the cells); called
+    /// on any document edit/open/close/save and on every project reload — exactly
+    /// the points at which any of these caches could go stale.
+    ///
+    /// The eval cache (E3) is dropped here for the same reason: a buffer edit can
+    /// change the channels a script writes, so a hover after an edit must reflect
+    /// the live project model, not a trace built before it. The trace is keyed on
+    /// the *saved* project model (the honest source for evaluated values), so an
+    /// in-flight edit invalidates and the next hover rebuilds against the
+    /// last-loaded project.
     pub fn invalidate_call_graph(&self) {
         *self.call_graph.write().unwrap() = None;
         *self.project_diags.write().unwrap() = None;
+        *self.eval_cache.write().unwrap() = None;
+    }
+
+    /// Run `f` against the loaded project and its cached evaluation, building (and
+    /// caching) the trace with `build` on a cache miss and reusing it on a hit.
+    /// Shaped exactly like [`Self::with_call_graph`], so hover/inlay never run a
+    /// trace per request: the first request after an invalidation (or after a
+    /// config / reload-generation change) builds once; every subsequent request
+    /// with the same `EvalKey` reads the cache.
+    ///
+    /// `build` produces an [`EvalOutcome`] (trace + provenance + fail-loud issues);
+    /// only the trace and provenance are cached here. The caller surfaces the
+    /// outcome's `issues` once via `window/logMessage` — but since `build` runs
+    /// only on a miss, those issues are logged once per (re)build, not per hover.
+    ///
+    /// `f` receives `None` only when no project is loaded (then `build` never
+    /// runs), mirroring [`Self::with_call_graph`]. On a hit or a fresh build it
+    /// receives the loaded project, the shared [`Arc<Trace>`], and the
+    /// [`Provenance`].
+    ///
+    /// Note: the build runs under the cache's write lock, so a slow whole-project
+    /// run serialises concurrent first-requests (the second waits, then hits the
+    /// just-built cache rather than building again). Callers that must not block
+    /// the async runtime wrap this in `tokio::task::block_in_place` (the pattern
+    /// used for the call-graph reads), so the run happens off the runtime worker.
+    pub fn with_eval<R>(
+        &self,
+        cfg: &EvalConfig,
+        build: impl FnOnce(&LoadedProject) -> EvalOutcome,
+        f: impl FnOnce(Option<(&LoadedProject, &Arc<Trace>, &Provenance)>) -> R,
+    ) -> R {
+        let project = self.inner.read().unwrap();
+        let Some(lp) = project.as_ref() else {
+            return f(None);
+        };
+        let key = EvalKey::new(self.generation.load(Ordering::Acquire), cfg);
+        let mut cache = self.eval_cache.write().unwrap();
+        // Rebuild on a miss or a stale key (config or reload generation changed).
+        if cache.as_ref().map(|c| c.key) != Some(key) {
+            let outcome = build(lp);
+            *cache = Some(CachedEval {
+                trace: Arc::new(outcome.trace),
+                provenance: outcome.provenance,
+                key,
+            });
+        }
+        let cached = cache.as_ref().expect("just built or hit");
+        f(Some((lp, &cached.trace, &cached.provenance)))
     }
 
     /// Run `f` against the loaded project and its call-hierarchy graph, building
@@ -368,6 +491,7 @@ impl ProjectStore {
                     dbc_paths,
                     script_files,
                 });
+                self.bump_generation();
                 self.invalidate_call_graph();
                 Ok(true)
             }
@@ -414,8 +538,17 @@ impl ProjectStore {
             dbc_paths,
             script_files,
         });
+        self.bump_generation();
         self.invalidate_call_graph();
         Ok(true)
+    }
+
+    /// Bump the monotonic reload generation. Called on every successful project
+    /// (re)load so the eval cache's [`EvalKey`] — which folds the generation in —
+    /// detects the model change and rebuilds, even if the resolved [`EvalConfig`]
+    /// is byte-identical across the reload.
+    fn bump_generation(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
     /// True if `path` is the currently-loaded `.m1prj` or `.m1cfg` (reload trigger).
@@ -750,6 +883,180 @@ mod tests {
 <Configuration><Group Name="">
   <Parameter Name="Root.Foo.Gain.Value"><Cell Type="u16" Unit="ratio"><![CDATA[1]]></Cell></Parameter>
 </Group></Configuration>"#;
+
+    use crate::eval::config::EvalConfig;
+    use crate::eval::engine::Provenance;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The mini fixture directory used by the eval-cache tests — a self-contained
+    /// synthetic project (no proprietary content) that the engine can run.
+    fn mini_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mini")
+    }
+
+    // E3: two `with_eval` calls in a row build the trace exactly once — the second
+    // hits the cache. A shared build counter proves no second run happened.
+    #[test]
+    fn with_eval_builds_once_then_hits_cache() {
+        let store = ProjectStore::new();
+        assert!(store.discover_and_load(&mini_dir()).unwrap());
+        let cfg = EvalConfig::default();
+        let builds = AtomicUsize::new(0);
+        let build = |lp: &LoadedProject| {
+            builds.fetch_add(1, Ordering::SeqCst);
+            crate::eval::engine::evaluate(lp, &cfg)
+        };
+
+        // First request: a cache miss, so it builds once.
+        let prov1 = store.with_eval(&cfg, build, |e| {
+            e.map(|(_, _, prov)| prov.clone()).expect("project loaded")
+        });
+        assert_eq!(builds.load(Ordering::SeqCst), 1, "first request builds");
+        assert_eq!(prov1, Provenance::OfflineDefault);
+
+        // Second request with the same config + generation: a cache hit, no rebuild.
+        let prov2 = store.with_eval(&cfg, build, |e| {
+            e.map(|(_, _, prov)| prov.clone()).expect("project loaded")
+        });
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            1,
+            "second request reuses the cache — no second build"
+        );
+        assert_eq!(prov2, prov1, "same cached trace, same provenance");
+    }
+
+    // E3: a configuration change bumps the `EvalKey` (it hashes the resolved
+    // `EvalConfig`), forcing exactly one rebuild on the next request.
+    #[test]
+    fn config_change_forces_rebuild() {
+        let store = ProjectStore::new();
+        assert!(store.discover_and_load(&mini_dir()).unwrap());
+        let builds = AtomicUsize::new(0);
+
+        let cfg_a = EvalConfig::default();
+        store.with_eval(
+            &cfg_a,
+            |lp| {
+                builds.fetch_add(1, Ordering::SeqCst);
+                crate::eval::engine::evaluate(lp, &cfg_a)
+            },
+            |e| assert!(e.is_some()),
+        );
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+
+        // A different config (inlay_values toggled) has a different hash → miss.
+        let cfg_b = EvalConfig {
+            inlay_values: true,
+            ..EvalConfig::default()
+        };
+        store.with_eval(
+            &cfg_b,
+            |lp| {
+                builds.fetch_add(1, Ordering::SeqCst);
+                crate::eval::engine::evaluate(lp, &cfg_b)
+            },
+            |e| assert!(e.is_some()),
+        );
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            2,
+            "a config change forces a rebuild"
+        );
+
+        // Reverting to the first config rebuilds again (the cache holds cfg_b's key).
+        store.with_eval(
+            &cfg_a,
+            |lp| {
+                builds.fetch_add(1, Ordering::SeqCst);
+                crate::eval::engine::evaluate(lp, &cfg_a)
+            },
+            |e| assert!(e.is_some()),
+        );
+        assert_eq!(builds.load(Ordering::SeqCst), 3);
+    }
+
+    // E3: a project reload bumps the reload generation, which is part of the
+    // `EvalKey`, so the cached trace is stale and the next request rebuilds. The
+    // shared `invalidate_call_graph` hook also drops the cache outright.
+    #[test]
+    fn reload_invalidates_eval_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_project(tmp.path());
+        let store = ProjectStore::new();
+        assert!(store.discover_and_load(tmp.path()).unwrap());
+        let cfg = EvalConfig::default();
+        let builds = AtomicUsize::new(0);
+        let build = |lp: &LoadedProject| {
+            builds.fetch_add(1, Ordering::SeqCst);
+            crate::eval::engine::evaluate(lp, &cfg)
+        };
+
+        store.with_eval(&cfg, build, |e| assert!(e.is_some()));
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+
+        // Reload the project (same config): the generation bumps, cache is stale.
+        assert!(store.discover_and_load(tmp.path()).unwrap());
+        store.with_eval(&cfg, build, |e| assert!(e.is_some()));
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            2,
+            "a reload invalidates the cached trace"
+        );
+    }
+
+    // E3: the shared `invalidate_call_graph` hook (edit/open/close/save) drops the
+    // eval cache too, so the next request rebuilds.
+    #[test]
+    fn invalidate_call_graph_drops_eval_cache() {
+        let store = ProjectStore::new();
+        assert!(store.discover_and_load(&mini_dir()).unwrap());
+        let cfg = EvalConfig::default();
+        let builds = AtomicUsize::new(0);
+        let build = |lp: &LoadedProject| {
+            builds.fetch_add(1, Ordering::SeqCst);
+            crate::eval::engine::evaluate(lp, &cfg)
+        };
+
+        store.with_eval(&cfg, build, |e| assert!(e.is_some()));
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert!(
+            store.eval_cache.read().unwrap().is_some(),
+            "the build populated the eval cache"
+        );
+
+        // A buffer edit / open / close / save funnels through this hook.
+        store.invalidate_call_graph();
+        assert!(
+            store.eval_cache.read().unwrap().is_none(),
+            "invalidate_call_graph drops the eval cache"
+        );
+        store.with_eval(&cfg, build, |e| assert!(e.is_some()));
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            2,
+            "after invalidation the next request rebuilds"
+        );
+    }
+
+    // E3: `with_eval` passes `None` to its closure when no project is loaded, and
+    // never builds — mirroring `with_call_graph`'s project-less behaviour.
+    #[test]
+    fn with_eval_no_project_yields_none_without_building() {
+        let store = ProjectStore::new();
+        let cfg = EvalConfig::default();
+        let builds = AtomicUsize::new(0);
+        let got = store.with_eval(
+            &cfg,
+            |lp| {
+                builds.fetch_add(1, Ordering::SeqCst);
+                crate::eval::engine::evaluate(lp, &cfg)
+            },
+            |e| e.is_some(),
+        );
+        assert!(!got, "no project → None");
+        assert_eq!(builds.load(Ordering::SeqCst), 0, "no project → no build");
+    }
 
     #[test]
     fn find_m1cfg_walks_ancestors_and_is_loaded() {

@@ -10,6 +10,7 @@ use tower_lsp::{Client, LanguageServer};
 use crate::analysis::{LintProvider, NoLint, NoTypes, TypeProvider, analyze};
 use crate::config::M1Config;
 use crate::document::Document;
+use crate::eval::EvalConfig;
 use crate::features::{
     call_hierarchy, code_action, code_lens, completion, document_link, document_symbols, folding,
     goto, hover, inlay, references, rename, selection_range, semantic_tokens, signature_help,
@@ -57,6 +58,12 @@ pub struct Backend {
     /// the backends. Re-resolved on root discovery, `m1-tools.toml` change, and
     /// `didChangeConfiguration`; its `diagnostics` filter is read on every publish.
     config: std::sync::RwLock<M1Config>,
+    /// The resolved LSP-local evaluation config (`m1.eval.*`), re-read from the
+    /// editor settings on the same `didChangeConfiguration` path as `config`.
+    /// **Disabled by default**: with eval off, hover/inlay behave as today and
+    /// no engine is ever built. This is intentionally *not* part of `M1Config`
+    /// (whose `M1ToolsConfig` is tag-pinned with no `[eval]` section).
+    eval_config: std::sync::RwLock<EvalConfig>,
     /// The last editor settings (`initializationOptions` / `didChangeConfiguration`),
     /// the middle precedence layer beneath `m1-tools.toml`.
     editor_settings: std::sync::RwLock<Option<serde_json::Value>>,
@@ -155,6 +162,7 @@ impl Backend {
             semtok_refresh_support: std::sync::atomic::AtomicBool::new(false),
             code_lens_refresh_support: std::sync::atomic::AtomicBool::new(false),
             config: std::sync::RwLock::new(M1Config::default()),
+            eval_config: std::sync::RwLock::new(EvalConfig::default()),
             editor_settings: std::sync::RwLock::new(None),
             config_root: std::sync::RwLock::new(None),
             semtok_prev: DashMap::new(),
@@ -170,11 +178,19 @@ impl Backend {
     /// `didChangeConfiguration` can re-resolve against the same workspace.
     fn apply_config(&self, root: &std::path::Path) {
         let editor = self.editor_settings.read().unwrap().clone();
-        let (cfg, issues) = M1Config::resolve_with_issues(editor.as_ref(), root);
+        let (cfg, mut issues) = M1Config::resolve_with_issues(editor.as_ref(), root);
         self.lint.set_lint_config(&cfg.lint);
         self.formatter.set_format_options(&cfg.format);
         *self.config.write().unwrap() = cfg;
         *self.config_root.write().unwrap() = Some(root.to_path_buf());
+        // The LSP-local eval config (`m1.eval.*`) rides the same editor-settings
+        // value but is resolved separately from `M1Config` — `M1ToolsConfig` is
+        // tag-pinned with no `[eval]` section. Off by default; a malformed
+        // payload degrades to disabled and adds an issue line below rather than
+        // disabling the rest of config.
+        let (eval_cfg, eval_issues) = EvalConfig::from_editor_settings(editor.as_ref());
+        *self.eval_config.write().unwrap() = eval_cfg;
+        issues.extend(eval_issues);
         // Surface config problems instead of silently falling back (#278):
         // a malformed m1-tools.toml or a typo'd key looks exactly like "the
         // LSP ignored my setting" without this. Sent fire-and-forget — config
@@ -264,6 +280,25 @@ impl Backend {
             file_name: crate::features::locate::file_name_of(uri),
             cst: doc.cst.clone(),
         })
+    }
+
+    /// Whether the open buffer at `uri` is byte-for-byte the file currently on
+    /// disk — the gate for expression-level hover (E5).
+    ///
+    /// [`m1_eval::Trace::exprs`] is keyed by `(script_name, byte_offset)`, and those
+    /// offsets are the evaluator's view of the **saved** script (the project is
+    /// loaded from disk). An unsaved edit shifts the buffer's offsets relative to
+    /// the saved file, so an expr lookup keyed on a buffer offset would mis-key; we
+    /// only allow it when buffer == disk. Channel hover (E4) is path-keyed and never
+    /// depends on this. The disk read uses the same tolerant (UTF-8 → Windows-1252)
+    /// decode the project loader uses, so a Windows-1252 script compares correctly.
+    /// A missing/unreadable file or a non-file URI conservatively returns `false`
+    /// (expr-hover off rather than risk drifted offsets).
+    fn buffer_matches_disk(&self, uri: &Url, buffer_text: &str) -> bool {
+        let Ok(path) = uri.to_file_path() else {
+            return false;
+        };
+        crate::disk_read::read_disk(&path).is_some_and(|disk| disk == buffer_text)
     }
 
     /// Resolve the goto target at a cursor position, shared by
@@ -1075,14 +1110,66 @@ impl LanguageServer for Backend {
         };
         let byte = doc.byte(tdp.position);
         let cst = doc.parse();
-        Ok(self.store.with_project(|p| {
-            hover::hover(
-                cst.root(),
-                byte,
-                p.map(|lp| &lp.project),
-                doc.file_name.as_deref(),
-                &doc.line_index,
-                doc.enc,
+
+        // Eval is opt-in and off by default. When disabled, take the plain
+        // `hover` path — byte-identical to before the eval integration (no engine
+        // is ever built and no trace is consulted). When enabled, read the cached
+        // `Trace` via `with_eval` (built once per project/config; never per hover)
+        // and enrich a channel hover with its evaluated value.
+        let eval_cfg = self.eval_config.read().unwrap().clone();
+        if !eval_cfg.enabled {
+            return Ok(self.store.with_project(|p| {
+                hover::hover(
+                    cst.root(),
+                    byte,
+                    p.map(|lp| &lp.project),
+                    doc.file_name.as_deref(),
+                    &doc.line_index,
+                    doc.enc,
+                )
+            }));
+        }
+
+        // Expression-level hover (E5) keys `Trace::exprs` by the *saved* script's
+        // byte offsets; those only line up with the open buffer when it is
+        // unmodified-since-load, so gate it on a buffer == disk check. Channel hover
+        // (E4) is path-keyed and works regardless.
+        let expr_offsets_valid = self.buffer_matches_disk(&tdp.text_document.uri, &doc.text);
+
+        // The trace build (a whole-project offline run on a cache miss) can be
+        // non-trivial, so run it off the async worker via `block_in_place` (#135),
+        // mirroring the call-graph/diagnostic read paths. Subsequent hovers hit the
+        // cache and do no work.
+        Ok(tokio::task::block_in_place(|| {
+            self.store.with_eval(
+                &eval_cfg,
+                |lp| crate::eval::evaluate(lp, &eval_cfg),
+                |opt| match opt {
+                    Some((lp, trace, provenance)) => hover::hover_with_eval(
+                        cst.root(),
+                        byte,
+                        Some(&lp.project),
+                        doc.file_name.as_deref(),
+                        &doc.line_index,
+                        doc.enc,
+                        Some(hover::EvalContext {
+                            trace: trace.as_ref(),
+                            provenance,
+                            tick: eval_cfg.tick,
+                            expr_offsets_valid,
+                        }),
+                    ),
+                    // No project loaded: no symbols to resolve, no trace — fall back
+                    // to the plain (project-less) hover for keyword/local docs.
+                    None => hover::hover(
+                        cst.root(),
+                        byte,
+                        None,
+                        doc.file_name.as_deref(),
+                        &doc.line_index,
+                        doc.enc,
+                    ),
+                },
             )
         }))
     }
@@ -1264,14 +1351,59 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let cst = doc.parse();
-        let hints = self.store.with_project(|p| {
-            inlay::inlay_hints(
-                cst.root(),
-                params.range,
-                &doc.line_index,
-                doc.enc,
-                p.map(|lp| &lp.project),
-                doc.file_name.as_deref(),
+
+        // Inline computed-value hints (E6) are opt-in: they require eval enabled
+        // *and* `inlay_values` on. Otherwise take the plain path — byte-identical
+        // to before the eval integration (no trace is ever consulted), so the
+        // existing type/unit/param hints are exactly as today.
+        let eval_cfg = self.eval_config.read().unwrap().clone();
+        if !eval_cfg.enabled || !eval_cfg.inlay_values {
+            let hints = self.store.with_project(|p| {
+                inlay::inlay_hints(
+                    cst.root(),
+                    params.range,
+                    &doc.line_index,
+                    doc.enc,
+                    p.map(|lp| &lp.project),
+                    doc.file_name.as_deref(),
+                )
+            });
+            return Ok(Some(hints));
+        }
+
+        // Value hints on: read the cached `Trace` via `with_eval` (built once per
+        // project/config; never per request) and add `= value` hints. The build (a
+        // whole-project offline run on a cache miss) can be non-trivial, so run it
+        // off the async worker via `block_in_place`, mirroring the hover read path.
+        let hints = tokio::task::block_in_place(|| {
+            self.store.with_eval(
+                &eval_cfg,
+                |lp| crate::eval::evaluate(lp, &eval_cfg),
+                |opt| match opt {
+                    Some((lp, trace, provenance)) => inlay::inlay_hints_with_eval(
+                        cst.root(),
+                        params.range,
+                        &doc.line_index,
+                        doc.enc,
+                        Some(&lp.project),
+                        doc.file_name.as_deref(),
+                        Some(inlay::EvalInlayContext {
+                            trace: trace.as_ref(),
+                            provenance,
+                            tick: eval_cfg.tick,
+                        }),
+                    ),
+                    // No project loaded: no symbols to resolve, no trace — fall
+                    // back to the plain (project-less) hints.
+                    None => inlay::inlay_hints(
+                        cst.root(),
+                        params.range,
+                        &doc.line_index,
+                        doc.enc,
+                        None,
+                        doc.file_name.as_deref(),
+                    ),
+                },
             )
         });
         Ok(Some(hints))
@@ -1815,6 +1947,13 @@ impl LanguageServer for Backend {
         // current workspace root and re-publish so the change takes effect live.
         *self.editor_settings.write().unwrap() = Some(editor_settings(params.settings));
         self.reapply_config();
+        // A settings change can re-point or re-enable the eval source (`m1.eval.*`),
+        // and a scenario/log file's *content* may have changed on disk without the
+        // config value changing — so drop the cached trace here too (E3). The
+        // resolved `EvalConfig` hash already forces a rebuild when the value
+        // changes; this also covers the same-value-different-file-content case.
+        // The next hover/inlay request rebuilds against the new config.
+        self.store.invalidate_call_graph();
         let uris: Vec<Url> = self.docs.iter().map(|e| e.key().clone()).collect();
         for uri in uris {
             self.publish(uri).await;
@@ -2001,6 +2140,59 @@ mod did_close_tests {
         assert!(
             !backend.diag_prev.contains_key(&uri),
             "did_close must remove the URI from diag_prev to prevent a cache leak"
+        );
+    }
+}
+
+#[cfg(test)]
+mod buffer_matches_disk_tests {
+    use super::Backend;
+    use tower_lsp::{LspService, lsp_types::Url};
+
+    // E5 gate: expression-level hover keys `Trace::exprs` by the *saved* script's
+    // byte offsets, so it is only safe when the open buffer equals the file on
+    // disk. `buffer_matches_disk` is that gate.
+    #[test]
+    fn matches_when_buffer_equals_disk_and_not_otherwise() {
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("Demo.Update.m1scr");
+        let on_disk = "Output = 1;\n";
+        std::fs::write(&path, on_disk).unwrap();
+        let uri = Url::from_file_path(&path).unwrap();
+
+        // Buffer identical to disk: the saved offsets line up.
+        assert!(
+            backend.buffer_matches_disk(&uri, on_disk),
+            "an unmodified buffer matches its on-disk file"
+        );
+        // An edited (unsaved) buffer drifts the offsets — gate must be false.
+        assert!(
+            !backend.buffer_matches_disk(&uri, "Output = 999;\n"),
+            "a modified buffer must not match disk"
+        );
+    }
+
+    #[test]
+    fn false_for_missing_file_or_non_file_uri() {
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+
+        // A path with no file on disk: read fails, gate is conservatively false.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = Url::from_file_path(tmp.path().join("nope.m1scr")).unwrap();
+        assert!(
+            !backend.buffer_matches_disk(&missing, "anything"),
+            "a missing file yields no match (expr-hover off, not a drifted lookup)"
+        );
+
+        // A non-file URI cannot be read from disk at all.
+        let non_file = Url::parse("untitled:Untitled-1").unwrap();
+        assert!(
+            !backend.buffer_matches_disk(&non_file, "anything"),
+            "a non-file URI cannot match a disk file"
         );
     }
 }
