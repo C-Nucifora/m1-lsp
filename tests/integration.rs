@@ -311,6 +311,57 @@ async fn goto_definition_resolves_a_local_without_project() {
     assert_eq!(resp["result"]["uri"], json!(uri.as_str()));
 }
 
+// #168: textDocument/declaration mirrors textDocument/definition for project /
+// in-file symbols (declaration == definition). The two handlers share one
+// resolution path; this asserts they return byte-identical locations so the
+// shared helper can't drift between them.
+#[tokio::test]
+async fn goto_declaration_mirrors_goto_definition_for_a_local() {
+    use tower_lsp::lsp_types::Url;
+
+    let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+    write_msg(&mut client, &initialize_msg(1)).await; // rootUri: null -> project-less
+    let _ = read_response(&mut client, 1).await;
+
+    let uri = Url::parse("file:///tmp/Test.m1scr").unwrap();
+    let src = "local myValue = 0;\nmyValue = myValue + 1;\n";
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":uri,"languageId":"m1","version":1,"text":src}}}),
+    )
+    .await;
+    // Same cursor (use-site `myValue`, line 1, char 0) for both requests.
+    let pos = json!({"textDocument":{"uri":uri},"position":{"line":1,"character":0}});
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":pos}),
+    )
+    .await;
+    let def = read_response(&mut client, 2).await;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":3,"method":"textDocument/declaration","params":pos}),
+    )
+    .await;
+    let decl = read_response(&mut client, 3).await;
+
+    assert_eq!(
+        decl["result"], def["result"],
+        "declaration must mirror definition: def={def} decl={decl}"
+    );
+    assert_eq!(
+        decl["result"]["range"]["start"]["line"],
+        json!(0),
+        "declaration on a local should return its declaration on line 0: {decl}"
+    );
+}
+
 #[tokio::test]
 async fn code_action_offers_format_document_without_diagnostics() {
     use tower_lsp::lsp_types::Url;

@@ -18,10 +18,12 @@
 //!    file extension) and run via [`Engine::run`]. Provenance: [`Provenance::Scenario`].
 //! 2. **Log file** ([`EvalConfig::log`]) — counterfactual ground truth. Attached
 //!    with [`Engine::load_log`] and replayed via [`Engine::run_counterfactual_diff`],
-//!    whose `.trace` is the result. Provenance: [`Provenance::Log`]. The
-//!    counterfactual needs a downstream cone, so a log with no channel override
-//!    produces nothing to recompute and fails loud — handled like any other source
-//!    failure (see below).
+//!    whose `.trace` is the result. Provenance: [`Provenance::Log`]. With no channel
+//!    override the counterfactual's downstream cone is empty, so it is the
+//!    evaluator's documented no-op replay: the logged ground truth is reproduced
+//!    verbatim (still [`Provenance::Log`]). A genuine failure — a missing/unreadable
+//!    log, or a real override targeting a channel nothing reads — still fails loud
+//!    and is handled like any other source failure (see below).
 //! 3. **Offline default** — no scenario, no log. A synthesised
 //!    [`RunMode::WholeProject`] scenario with **no inputs** is run, so most channels
 //!    read the evaluator's offline-default world (calibration defaults, zero-seeded
@@ -117,8 +119,9 @@ pub fn evaluate(lp: &LoadedProject, cfg: &EvalConfig) -> EvalOutcome {
     if let Some(rel) = cfg.log.as_ref() {
         let path = resolve_under_root(&lp.root, rel);
         // No override field exists on `EvalConfig` yet (E1); the counterfactual
-        // therefore runs with no overrides. The engine needs a downstream cone, so
-        // a log with no override fails loud and falls back — honestly surfaced.
+        // therefore runs with no overrides. With an empty override set the
+        // downstream cone is empty and the run is the evaluator's no-op replay —
+        // the logged ground truth reproduced verbatim as a `Provenance::Log` trace.
         match run_log_counterfactual(lp, &path, &[]) {
             Ok(trace) => {
                 return EvalOutcome {
@@ -175,9 +178,11 @@ fn run_scenario_file(lp: &LoadedProject, path: &Path) -> Result<Trace, String> {
 }
 
 /// Load the engine, attach a configured log, apply any channel overrides, and
-/// return the counterfactual replay's trace. A missing/unreadable log, an `.ld`
-/// log without the `ld` feature, a malformed override spec, or a counterfactual
-/// with no recomputable cone is returned as a one-line issue.
+/// return the counterfactual replay's trace. With no overrides this is the
+/// evaluator's no-op replay (the logged ground truth reproduced verbatim). A
+/// missing/unreadable log, an `.ld` log without the `ld` feature, a malformed
+/// override spec, or a real override targeting a channel nothing reads is returned
+/// as a one-line issue.
 fn run_log_counterfactual(
     lp: &LoadedProject,
     path: &Path,
@@ -474,11 +479,16 @@ mod tests {
         });
     }
 
-    /// A configured `.csv` log with **no** override has no recomputable cone, so the
-    /// counterfactual fails loud and the run falls back — honest, not a crash. This
-    /// is the expected behaviour until `EvalConfig` grows an override field.
+    /// A configured `.csv` log with **no** override reproduces the log verbatim: an
+    /// empty override set is the evaluator's documented no-op invariant (`--log`
+    /// with no `--override`), so the counterfactual has an empty downstream cone and
+    /// simply replays the logged ground truth. The run therefore succeeds with
+    /// [`Provenance::Log`] and no issue — the logged (measured) channels are carried
+    /// straight through. (This is the E1 state until `EvalConfig` grows an override
+    /// field; with an override, the cone recomputes — see
+    /// `log_with_override_yields_log_provenance_trace`.)
     #[test]
-    fn log_without_override_falls_back_with_issue() {
+    fn log_without_override_reproduces_log_verbatim() {
         let tmp = tempfile::tempdir().unwrap();
         let log = tmp.path().join("run.csv");
         std::fs::write(
@@ -488,21 +498,25 @@ mod tests {
         .unwrap();
         let cfg = EvalConfig {
             enabled: true,
-            log: Some(log),
+            log: Some(log.clone()),
             ..EvalConfig::default()
         };
         with_mini(|lp| {
             let out = evaluate(lp, &cfg);
             assert_eq!(
                 out.provenance,
-                Provenance::OfflineDefault,
-                "a log with no override has no cone; falls back"
+                Provenance::Log(log.clone()),
+                "a log with no override is the no-op counterfactual: replay the log"
             );
-            assert_eq!(out.issues.len(), 1, "{:?}", out.issues);
             assert!(
-                out.issues[0].contains("counterfactual"),
-                "issue names the counterfactual failure: {:?}",
+                out.issues.is_empty(),
+                "the no-op replay does not fail loud: {:?}",
                 out.issues
+            );
+            assert!(
+                out.trace.channels.contains_key("Root.Demo.Output"),
+                "the replayed trace carries the logged channels verbatim: {:?}",
+                out.trace.channels.keys().collect::<Vec<_>>()
             );
         });
     }

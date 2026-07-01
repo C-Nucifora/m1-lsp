@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::RwLock;
 
 use crate::analysis::LintProvider;
-use crate::convert::{range, severity};
+use crate::convert::{LINT_DOCS_BASE, code_description, range, severity};
 use crate::line_index::{LineIndex, PositionEncoding};
 use m1_lint::config::Config;
 use m1_lint::registry::Registry;
@@ -48,6 +48,11 @@ impl LintProvider for M1Lint {
                 range: range(&d.inner.byte_range, li, enc),
                 severity: Some(severity(d.inner.severity)),
                 code: Some(NumberOrString::String(d.code.to_string())),
+                // Mirror the SARIF `helpUri` (m1-lint report.rs) so the rule
+                // code links to its docs in the editor, matching what a CI /
+                // code-scanning consumer already gets. The fragment is the
+                // rule's stable name, exactly as the SARIF emitter uses.
+                code_description: code_description(LINT_DOCS_BASE, d.code.name()),
                 source: Some("m1-lint".to_string()),
                 message: d.inner.message.clone(),
                 ..Default::default()
@@ -104,6 +109,31 @@ mod tests {
         assert!(
             l.fix("x = 1;\n").is_none(),
             "clean source should yield no fix"
+        );
+    }
+
+    #[test]
+    fn lint_diagnostic_sets_code_description_href() {
+        // L004 (`==` -> `eq`) fires deterministically. Its diagnostic must now
+        // carry a clickable docs link whose fragment equals the SARIF
+        // `helpUri` convention (m1-lint report.rs): base#<rule-name>. L004's
+        // stable name is `eq-operator-preferred`.
+        let src = "if (a == b) {\n    x = 1;\n}\n";
+        let li = LineIndex::new(src);
+        let diags = M1Lint::new().lint(src, &li, PositionEncoding::Utf16);
+        let l004 = diags
+            .iter()
+            .find(|d| matches!(&d.code, Some(NumberOrString::String(s)) if s == "L004"))
+            .expect("L004 should fire on `==`");
+        let href = l004
+            .code_description
+            .as_ref()
+            .expect("L004 diagnostic should carry a code_description")
+            .href
+            .as_str();
+        assert_eq!(
+            href, "https://github.com/C-Nucifora/m1-lint#eq-operator-preferred",
+            "editor link must mirror the SARIF helpUri fragment (the rule name)"
         );
     }
 

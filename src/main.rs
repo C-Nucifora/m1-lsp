@@ -46,8 +46,20 @@ async fn main() {
         std::process::exit(2);
     }
 
-    let stdin = tokio::io::stdin();
+    // Normalise stdin before tower-lsp parses it: a paramless request carrying
+    // `"params": null` (spec-permitted, sent by neovim's `vim.lsp` and some
+    // vscode-languageclient versions) is otherwise rejected with -32602, so
+    // `shutdown` never takes and the process can't exit cleanly (#292). We sit a
+    // pump in front of the server that strips top-level `params: null` and
+    // re-frames; the server reads the normalised end of an in-process pipe.
     let stdout = tokio::io::stdout();
+    let (norm_rx, norm_tx) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        // On error or stdin EOF the pump returns; dropping `norm_tx` closes the
+        // pipe, which tower-lsp sees as input EOF and shuts the serve loop down.
+        let _ = m1_lsp::stdin_normalize::pump(tokio::io::stdin(), norm_tx).await;
+    });
+
     let store = Arc::new(m1_lsp::project_store::ProjectStore::new());
     let (service, socket) = LspService::new(move |client| {
         m1_lsp::backend::Backend::with_backends(
@@ -58,5 +70,5 @@ async fn main() {
             store.clone(),
         )
     });
-    Server::new(stdin, stdout, socket).serve(service).await;
+    Server::new(norm_rx, stdout, socket).serve(service).await;
 }

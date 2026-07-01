@@ -396,16 +396,14 @@ fn dbc_signal_markdown(sym: &Symbol, project: Option<&Project>) -> Option<String
     Some(lines.join("\n\n"))
 }
 
+use crate::features::intrinsics_render::signature_label;
 use m1_typecheck::intrinsics::Overload;
 
-/// `(p1: T1, p2: T2) -> Ret` for one overload signature.
+/// `path(p1: T1, p2: T2) -> Ret` for one overload signature. Shares the single
+/// renderer with `signatureHelp` so the two popups can't drift (see
+/// [`crate::features::intrinsics_render`]).
 fn signature(path: &str, ov: &Overload) -> String {
-    let params: Vec<String> = ov
-        .params
-        .iter()
-        .map(|p| format!("{}: {}", p.name, p.ty))
-        .collect();
-    format!("{path}({}) -> {}", params.join(", "), ov.returns)
+    signature_label(path, ov)
 }
 
 fn builtin_object_markdown(name: &str) -> String {
@@ -933,6 +931,7 @@ mod tests {
     fn channel(value_type: ValueType, declared_type: Option<&str>) -> Symbol {
         Symbol {
             path: "Root.Demo.X".into(),
+            reference_target: None,
             kind: SymbolKind::Channel,
             value_type,
             declared_type: declared_type.map(Into::into),
@@ -948,11 +947,13 @@ mod tests {
             dbc_range: None,
             can: None,
             call_rate_hz: None,
+            scheduled: false,
             log_rate_hz: None,
             tags: Vec::new(),
             return_type: None,
             in_params: None,
             table_meta: None,
+            default_value: None,
         }
     }
 
@@ -1000,6 +1001,7 @@ mod tests {
     fn hover_shows_security_level() {
         let sym = Symbol {
             path: "Root.Engine.Throttle".into(),
+            reference_target: None,
             kind: SymbolKind::Channel,
             value_type: ValueType::Float,
             declared_type: None,
@@ -1015,11 +1017,13 @@ mod tests {
             dbc_range: None,
             can: None,
             call_rate_hz: None,
+            scheduled: false,
             log_rate_hz: None,
             tags: Vec::new(),
             return_type: None,
             in_params: None,
             table_meta: None,
+            default_value: None,
         };
         let md = symbol_markdown(&sym, None);
         assert!(md.contains("security: `Protected`"), "got: {md}");
@@ -1029,6 +1033,7 @@ mod tests {
     fn hover_shows_script_call_rate() {
         let sym = Symbol {
             path: "Root.Engine.Control".into(),
+            reference_target: None,
             kind: SymbolKind::Method,
             value_type: ValueType::Unknown,
             declared_type: None,
@@ -1044,11 +1049,13 @@ mod tests {
             dbc_range: None,
             can: None,
             call_rate_hz: Some(100.0),
+            scheduled: false,
             log_rate_hz: None,
             tags: Vec::new(),
             return_type: None,
             in_params: None,
             table_meta: None,
+            default_value: None,
         };
         let md = symbol_markdown(&sym, None);
         assert!(md.contains("call rate: `100 Hz`"), "got: {md}");
@@ -1099,6 +1106,7 @@ mod tests {
         use m1_typecheck::symbols::TableAxis;
         let sym = Symbol {
             path: "Root.Control.Limiting.Torque".into(),
+            reference_target: None,
             kind: SymbolKind::Table,
             value_type: ValueType::Unknown,
             declared_type: None,
@@ -1114,6 +1122,7 @@ mod tests {
             dbc_range: None,
             can: None,
             call_rate_hz: None,
+            scheduled: false,
             log_rate_hz: None,
             tags: Vec::new(),
             return_type: None,
@@ -1131,6 +1140,7 @@ mod tests {
                 ],
                 output_unit: Some("N.m".into()),
             }),
+            default_value: None,
         };
         let md = symbol_markdown(&sym, None);
         assert!(md.contains("2-D table"), "got: {md}");
@@ -1144,6 +1154,7 @@ mod tests {
         use m1_typecheck::symbols::CanMeta;
         let sym = Symbol {
             path: "SBG DBC.Auto Slip.Angle Slip".into(),
+            reference_target: None,
             kind: SymbolKind::Channel,
             value_type: ValueType::Integer,
             declared_type: None,
@@ -1166,11 +1177,13 @@ mod tests {
                 offset: Some(0.0),
             }),
             call_rate_hz: None,
+            scheduled: false,
             log_rate_hz: None,
             tags: Vec::new(),
             return_type: None,
             in_params: None,
             table_meta: None,
+            default_value: None,
         };
         let md = symbol_markdown(&sym, None);
         assert!(md.contains("CAN Signal"), "got: {md}");

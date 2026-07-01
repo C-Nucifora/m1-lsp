@@ -17,7 +17,7 @@
 //!   security levels of the channels it writes — the per-script row of the
 //!   access matrix (the full matrix view is the editor's half, m1-vscode#78).
 use crate::features::call_hierarchy::script_symbol;
-use crate::features::locate::build_scope;
+use crate::features::locate::{build_scope, fmt_hz};
 use crate::features::references::path_occurrences;
 use crate::project_store::LoadedProject;
 use m1_typecheck::resolve::{Resolution, resolve};
@@ -190,14 +190,6 @@ fn reveal_command(loaded: &LoadedProject, title: String, line: Option<u32>) -> C
 
 fn leaf(path: &str) -> &str {
     path.rsplit_once('.').map(|(_, l)| l).unwrap_or(path)
-}
-
-fn fmt_hz(hz: f64) -> String {
-    if hz.fract() == 0.0 {
-        format!("{}", hz as i64)
-    } else {
-        format!("{hz}")
-    }
 }
 
 #[cfg(test)]
