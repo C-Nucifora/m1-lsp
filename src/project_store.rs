@@ -260,6 +260,7 @@ impl ProjectStore {
     /// runs these by default too — this is the LSP catching up, #145):
     ///
     /// - **T092** untagged-component (tag warnings 1142/1549) — `audit_tags`,
+    /// - **T107** dbc-init-missing (error 1375) — `dbc_init::check`.
     /// - **T088** circular-dependency (warning 1640) — `schedule::check`,
     /// - **T093/T094** unassigned-channel / unread-parameter (errors 1627/1631)
     ///   — `schedule::check_usage`.
@@ -318,6 +319,9 @@ impl ProjectStore {
                     true,
                     true,
                 ));
+                // T107 dbc-init-missing (M1 Build Error 1375): a DBC used but
+                // never Init'd — default-on, whole-project.
+                v.extend(m1_typecheck::dbc_init::check(&lp.project, &parsed));
                 Some(v)
             }
             None => None,
