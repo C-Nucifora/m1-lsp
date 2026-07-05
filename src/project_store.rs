@@ -235,7 +235,7 @@ impl ProjectStore {
     /// document edit/open/close/save and on every project reload — the graph reads
     /// open buffers, so it must reflect the latest keystroke.
     ///
-    /// The cross-script analysis cache ([`Self::analysis`]) is deliberately *not*
+    /// The cross-script analysis cache (`Self::analysis`) is deliberately *not*
     /// dropped here: it reads disk, not buffers, so a keystroke on an unsaved
     /// buffer cannot change it, and its own content-hash key rebuilds it when a
     /// file's on-disk bytes actually change. It is cleared only at the project-
@@ -255,7 +255,7 @@ impl ProjectStore {
         *self.analysis.write().unwrap() = None;
     }
 
-    /// Rebuild [`Self::analysis`] when the on-disk project scripts have changed
+    /// Rebuild `Self::analysis` when the on-disk project scripts have changed
     /// since it was last computed (or it is empty). A no-op — returning the warm
     /// cache — when the combined content hash matches, which is the common
     /// per-keystroke case (an unsaved buffer does not touch disk). No project
@@ -316,7 +316,7 @@ impl ProjectStore {
     /// taints, so a per-script editor check can seed the invalid-value analysis
     /// with the project-wide solve (cross-file T080/T081 reach this file's sinks
     /// with their provenance — parity with the CLI's `check_script_with_channels`,
-    /// #78 P3). The taints are built and cached lazily by [`Self::ensure_analysis`];
+    /// #78 P3). The taints are built and cached lazily by `Self::ensure_analysis`;
     /// `f` receives `None` only when no project is loaded.
     pub fn with_cross_script<R>(
         &self,
