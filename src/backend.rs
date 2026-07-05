@@ -7,7 +7,7 @@ use tower_lsp::lsp_types::request::{GotoImplementationParams, GotoImplementation
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use crate::analysis::{LintProvider, NoLint, NoTypes, TypeProvider, analyze};
+use crate::analysis::{LintProvider, NoLint, NoTypes, TypeProvider, analyze, analyze_with_cst};
 use crate::config::M1Config;
 use crate::document::Document;
 use crate::features::{
@@ -172,6 +172,7 @@ impl Backend {
         let editor = self.editor_settings.read().unwrap().clone();
         let (cfg, issues) = M1Config::resolve_with_issues(editor.as_ref(), root);
         self.lint.set_lint_config(&cfg.lint);
+        self.types.set_type_config(&cfg.diagnostics);
         self.formatter.set_format_options(&cfg.format);
         *self.config.write().unwrap() = cfg;
         *self.config_root.write().unwrap() = Some(root.to_path_buf());
@@ -243,18 +244,9 @@ impl Backend {
         *self.encoding.read().unwrap()
     }
 
-    /// The current text and line index of an open document, cloned out so the
-    /// `DashMap` entry guard is released before parsing. `None` when the document
-    /// isn't open. Every request handler that needs the buffer goes through this.
-    fn get_doc(&self, uri: &Url) -> Option<(String, crate::line_index::LineIndex)> {
-        self.docs
-            .get(uri)
-            .map(|d| (d.text.clone(), d.line_index.clone()))
-    }
-
     /// Bundle an open document's text / line index / encoding / basename for a
     /// request handler ([`DocContext`]). `None` when the document isn't open — the
-    /// caller returns its empty response, as the raw [`get_doc`](Self::get_doc) did.
+    /// caller returns its empty response.
     fn doc_context(&self, uri: &Url) -> Option<DocContext> {
         let doc = self.docs.get(uri)?;
         Some(DocContext {
@@ -482,13 +474,20 @@ impl Backend {
     /// project's file, surface the project-scope audit (T041/T050/…) anchored to
     /// it (#139); any other `.m1prj` reports nothing.
     fn diagnostics_for(&self, uri: &Url) -> Option<Vec<Diagnostic>> {
-        let (text, lindex) = match self.get_doc(uri) {
-            Some(doc) => doc,
+        // Open buffers carry the incrementally-maintained CST (#270), reused for
+        // the syntax pass instead of re-parsing every keystroke; closed files (the
+        // pull path's coverage) are read from disk and parsed fresh.
+        let (text, lindex, warm_cst) = match self.docs.get(uri) {
+            Some(doc) => (
+                doc.text.clone(),
+                doc.line_index.clone(),
+                Some(doc.cst.clone()),
+            ),
             None => {
                 let path = uri.to_file_path().ok()?;
                 let text = crate::disk_read::read_disk(&path)?;
                 let li = crate::line_index::LineIndex::new(&text);
-                (text, li)
+                (text, li, None)
             }
         };
         let enc = self.enc();
@@ -502,15 +501,28 @@ impl Backend {
                 vec![]
             });
         }
-        Some(analyze(
-            uri,
-            &text,
-            &lindex,
-            enc,
-            self.lint.as_ref(),
-            self.types.as_ref(),
-            &self.config.read().unwrap().diagnostics,
-        ))
+        let filter = self.config.read().unwrap().diagnostics.clone();
+        Some(match warm_cst {
+            Some(cst) => analyze_with_cst(
+                &cst,
+                uri,
+                &text,
+                &lindex,
+                enc,
+                self.lint.as_ref(),
+                self.types.as_ref(),
+                &filter,
+            ),
+            None => analyze(
+                uri,
+                &text,
+                &lindex,
+                enc,
+                self.lint.as_ref(),
+                self.types.as_ref(),
+                &filter,
+            ),
+        })
     }
 
     async fn publish(&self, uri: Url) {
