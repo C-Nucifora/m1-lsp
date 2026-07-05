@@ -68,9 +68,13 @@ require('m1_lsp').setup({
 ### Diagnostics sources
 
 Diagnostics come from three sources: `m1-core` (syntax), `m1-lint` (style
-rules), and `m1-typecheck` (type rules `T001`-`T011`). When a project is
+rules), and `m1-typecheck` (the type/semantic catalogue `T001`–`T110`, including
+the cross-script invalid-value checks `T080`/`T081`, the M1-Build-parity project
+audits `T092`–`T097`, and the DBC checks `T107`–`T110`). When a project is
 loaded, the type-aware float-equality rule `T002` supersedes the `m1-lint`
-`L006` heuristic (no double-reporting).
+`L006` heuristic (no double-reporting). The full, always-current list of codes is
+in the `m1-tools.toml` written by `m1-lsp --scaffold-config` (and via
+`m1-typecheck --rules`).
 
 ### v2 features (symbol model)
 
@@ -89,12 +93,16 @@ buffer-local keymaps on `LspAttach`:
   group-relative tail for the current file's group) plus in-scope locals. Use
   the Nvim 0.11+ built-in completion (enabled by the snippet) or
   `<C-x><C-o>` via `omnifunc`.
-- **Rename** — `<leader>rn` (or the built-in `grn` on Nvim 0.11+): renames a
-  `local` variable and every reference to it in the file. Only locals are
-  renameable — channels, parameters and other project symbols are declared in
-  `Project.m1prj`, not the script, so `prepareRename` rejects them.
-- **References** — `gr` (or the built-in `grr` on Nvim 0.11+): lists every
-  in-file occurrence of the local / channel / symbol under the cursor.
+- **Rename** — `<leader>rn` (or the built-in `grn` on Nvim 0.11+): **project-
+  wide**. Renaming a `local` rewrites its every use in the file; renaming a
+  channel / parameter / function / other project symbol rewrites its declaration
+  in `Project.m1prj` **and** every reference across all the project's scripts, in
+  one workspace edit (the server re-reads the rewritten `.m1prj` so the new name
+  is live immediately). On a client that supports change annotations the multi-
+  file edit is presented for preview first.
+- **References** — `gr` (or the built-in `grr` on Nvim 0.11+): **project-wide**.
+  Lists every occurrence of the local / channel / parameter / symbol under the
+  cursor across all the project's scripts (a `local` is scoped to its own file).
 - **Document highlights** — occurrences of the symbol under the cursor are
   underlined while it rests there (read vs write classified), via the
   `CursorHold` autocmd in the snippet.

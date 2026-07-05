@@ -174,15 +174,32 @@ pub struct ProjectStore {
     /// by [`Self::invalidate_call_graph`] on any document edit/open/close and on
     /// every project (re)load, so a rebuild always reflects the live buffers.
     call_graph: RwLock<Option<CallGraph>>,
-    /// Memoized project-scope diagnostics (the `.m1prj`-anchored audit), keyed by
-    /// the `rate_inversion` (T089) flag they were computed under. Computing them
-    /// re-reads **every** project script from disk and re-runs the scheduling /
-    /// usage checks (see [`Self::project_diagnostics_with`]); pull diagnostics
-    /// (#259) poll this per `workspace/diagnostic` request, so without the cache a
-    /// pull-capable client re-reads the whole workspace on every open/change.
-    /// Dropped by [`Self::invalidate_call_graph`] alongside the call graph — the
-    /// same edit/open/close/save/reload points at which it could change.
-    project_diags: RwLock<Option<(bool, Vec<m1_typecheck::diagnostics::TypeDiagnostic>)>>,
+    /// Cross-script analysis derived from the loaded project's on-disk scripts:
+    /// the shared parse, the solved channel taints (so cross-file T080/T081 reach
+    /// each file's sinks), and the memoized project-scope diagnostics. Keyed by a
+    /// **content hash** of every project script's bytes, so an unsaved-buffer
+    /// keystroke — which does not change disk — is a cache hit and the
+    /// whole-corpus re-read/re-parse/re-solve reruns only when a file's content
+    /// actually changes on disk (the finding-2 fix: pull diagnostics poll this per
+    /// `workspace/diagnostic` request and pull-capable clients re-poll on every
+    /// open/change). Cleared outright by [`Self::invalidate_analysis`] on project
+    /// (re)load and script-set change — the points where the project model or file
+    /// set changes without the surviving files' content hash moving; plain buffer
+    /// edits leave it alone.
+    analysis: RwLock<Option<ProjectAnalysis>>,
+}
+
+/// The cached cross-script analysis; see [`ProjectStore::analysis`].
+struct ProjectAnalysis {
+    /// Combined hash of every project script's path + on-disk content.
+    content_hash: u64,
+    /// Each script parsed exactly once (m1-typecheck's parse-once API), shared by
+    /// reference across every project-wide pass below.
+    parsed: Vec<m1_typecheck::parsed::ParsedScript>,
+    /// Solved cross-script channel taints (T080/T081 provenance).
+    taints: m1_typecheck::cross_script::ChannelTaints,
+    /// Project-scope diagnostics, memoized per `rate_inversion` (T089) flag.
+    diags: std::collections::HashMap<bool, Vec<m1_typecheck::diagnostics::TypeDiagnostic>>,
 }
 
 impl ProjectStore {
@@ -201,8 +218,10 @@ impl ProjectStore {
         if let Some(lp) = self.inner.write().unwrap().as_mut() {
             lp.script_files = walk_scripts(&lp.root);
         }
-        // The script set changed (file created/deleted) — drop the stale graph.
+        // The script set changed (file created/deleted) — drop the stale graph
+        // and the cross-script analysis (its parse/taints cover the old set).
         self.invalidate_call_graph();
+        self.invalidate_analysis();
     }
 
     /// Read access to the loaded project for the feature handlers.
@@ -211,14 +230,107 @@ impl ProjectStore {
         f(guard.as_ref())
     }
 
-    /// Drop the per-project caches (call-hierarchy graph and memoized
-    /// project-scope diagnostics) so the next request recomputes them from the
-    /// current project + buffers. Cheap (just clears the cells); called on any
-    /// document edit/open/close/save and on every project reload — exactly the
-    /// points at which either cache could go stale.
+    /// Drop the cached call-hierarchy graph so the next call-hierarchy request
+    /// rebuilds it from the live buffers. Cheap (clears one cell); called on any
+    /// document edit/open/close/save and on every project reload — the graph reads
+    /// open buffers, so it must reflect the latest keystroke.
+    ///
+    /// The cross-script analysis cache (`Self::analysis`) is deliberately *not*
+    /// dropped here: it reads disk, not buffers, so a keystroke on an unsaved
+    /// buffer cannot change it, and its own content-hash key rebuilds it when a
+    /// file's on-disk bytes actually change. It is cleared only at the project-
+    /// model / file-set boundaries via [`Self::invalidate_analysis`].
     pub fn invalidate_call_graph(&self) {
         *self.call_graph.write().unwrap() = None;
-        *self.project_diags.write().unwrap() = None;
+    }
+
+    /// Drop the cross-script analysis cache so the next diagnostics/type request
+    /// rebuilds the parse, the channel-taint solve, and the project-scope
+    /// diagnostics from the current project + on-disk scripts. Called only where
+    /// the project model or the script *set* changes without the surviving files'
+    /// content hash moving (project (re)load, `.m1cfg`/`.m1dbc` change, a script
+    /// created/deleted) — a plain edit to an existing script is picked up by the
+    /// content hash instead.
+    pub fn invalidate_analysis(&self) {
+        *self.analysis.write().unwrap() = None;
+    }
+
+    /// Rebuild `Self::analysis` when the on-disk project scripts have changed
+    /// since it was last computed (or it is empty). A no-op — returning the warm
+    /// cache — when the combined content hash matches, which is the common
+    /// per-keystroke case (an unsaved buffer does not touch disk). No project
+    /// loaded clears the cache and returns.
+    ///
+    /// The disk read + hash is cheap relative to the parse + taint solve it
+    /// guards, and the expensive work runs with no lock held.
+    fn ensure_analysis(&self) {
+        use std::hash::{Hash, Hasher};
+        let Some(script_files) = self.with_project(|p| p.map(|lp| lp.script_files.clone())) else {
+            *self.analysis.write().unwrap() = None;
+            return;
+        };
+        // Read + hash every script once, outside any lock. Tolerant decode
+        // (UTF-8 → Windows-1252) so a `°`-bearing MoTeC script is included; an
+        // unreadable file is skipped (it simply contributes nothing to the hash).
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut scripts: Vec<(String, String)> = Vec::with_capacity(script_files.len());
+        for path in &script_files {
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Some(src) = crate::disk_read::read_disk(path) else {
+                continue;
+            };
+            path.hash(&mut hasher);
+            src.hash(&mut hasher);
+            scripts.push((name.to_string(), src));
+        }
+        let content_hash = hasher.finish();
+
+        // Cache hit: the corpus is byte-for-byte what we last analyzed.
+        if self
+            .analysis
+            .read()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|a| a.content_hash == content_hash)
+        {
+            return;
+        }
+
+        // Miss: reparse once and re-solve the cross-script taint graph (both
+        // expensive, both run here with no lock held).
+        let parsed = m1_typecheck::parsed::parse_all(&scripts);
+        let taints = self
+            .with_project(|p| p.map(|lp| m1_typecheck::cross_script::solve(&lp.project, &parsed)))
+            .unwrap_or_default();
+        *self.analysis.write().unwrap() = Some(ProjectAnalysis {
+            content_hash,
+            parsed,
+            taints,
+            diags: std::collections::HashMap::new(),
+        });
+    }
+
+    /// Run `f` against the loaded project and its solved cross-script channel
+    /// taints, so a per-script editor check can seed the invalid-value analysis
+    /// with the project-wide solve (cross-file T080/T081 reach this file's sinks
+    /// with their provenance — parity with the CLI's `check_script_with_channels`,
+    /// #78 P3). The taints are built and cached lazily by `Self::ensure_analysis`;
+    /// `f` receives `None` only when no project is loaded.
+    pub fn with_cross_script<R>(
+        &self,
+        f: impl FnOnce(Option<(&LoadedProject, &m1_typecheck::cross_script::ChannelTaints)>) -> R,
+    ) -> R {
+        self.ensure_analysis();
+        let project = self.inner.read().unwrap();
+        let Some(lp) = project.as_ref() else {
+            return f(None);
+        };
+        let analysis = self.analysis.read().unwrap();
+        let empty = m1_typecheck::cross_script::ChannelTaints::default();
+        let taints = analysis.as_ref().map(|a| &a.taints).unwrap_or(&empty);
+        f(Some((lp, taints)))
     }
 
     /// Run `f` against the loaded project and its call-hierarchy graph, building
@@ -287,50 +399,61 @@ impl ProjectStore {
         &self,
         rate_inversion: bool,
     ) -> Vec<m1_typecheck::diagnostics::TypeDiagnostic> {
-        // Serve the memoized set when it was computed under the same flag.
-        if let Some((flag, diags)) = self.project_diags.read().unwrap().as_ref()
-            && *flag == rate_inversion
+        // Refresh the shared parse/taint cache if the corpus changed on disk; a
+        // no-op (warm cache) on the common per-keystroke path.
+        self.ensure_analysis();
+
+        // Serve the memoized set when it was already computed under this flag.
+        if let Some(diags) = self
+            .analysis
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(|a| a.diags.get(&rate_inversion).cloned())
         {
-            return diags.clone();
+            return diags;
         }
-        let computed = self.with_project(|p| match p {
-            Some(lp) => {
-                let mut v = lp.project.missing_cfg_parameters();
-                v.extend(lp.project.audit());
-                v.extend(lp.project.audit_tags());
-                v.extend(lp.project.audit_display_units());
-                let scripts = scripts_from_disk(&lp.script_files);
-                // Parse every script once (m1-typecheck v0.35.0 parse-once API)
-                // and share the CSTs across both project-wide passes instead of
-                // letting each pass reparse from source.
-                let parsed = m1_typecheck::parsed::parse_all(&scripts);
-                // T088 and T097 (recursive-call, m1-typecheck#187) are
-                // default-on like the CLI; T089 stays behind its opt-in.
-                v.extend(m1_typecheck::schedule::check(
-                    &lp.project,
-                    &parsed,
-                    true,
-                    rate_inversion,
-                    true,
-                ));
-                v.extend(m1_typecheck::schedule::check_usage(
-                    &lp.project,
-                    &parsed,
-                    true,
-                    true,
-                ));
-                // T107 dbc-init-missing (M1 Build Error 1375): a DBC used but
-                // never Init'd — default-on, whole-project.
-                v.extend(m1_typecheck::dbc_init::check(&lp.project, &parsed));
-                Some(v)
-            }
-            None => None,
+
+        // Miss for this flag: run the project-wide passes over the *cached* parse
+        // (no re-read, no re-parse) and memoize the result.
+        let computed = self.with_project(|p| {
+            let lp = p?;
+            let analysis = self.analysis.read().unwrap();
+            let parsed: &[m1_typecheck::parsed::ParsedScript] = analysis
+                .as_ref()
+                .map(|a| a.parsed.as_slice())
+                .unwrap_or(&[]);
+            let mut v = lp.project.missing_cfg_parameters();
+            v.extend(lp.project.audit());
+            v.extend(lp.project.audit_tags());
+            v.extend(lp.project.audit_display_units());
+            // T088 and T097 (recursive-call, m1-typecheck#187) are default-on like
+            // the CLI; T089 stays behind its opt-in.
+            v.extend(m1_typecheck::schedule::check(
+                &lp.project,
+                parsed,
+                true,
+                rate_inversion,
+                true,
+            ));
+            v.extend(m1_typecheck::schedule::check_usage(
+                &lp.project,
+                parsed,
+                true,
+                true,
+            ));
+            // T107 dbc-init-missing (M1 Build Error 1375): a DBC used but never
+            // Init'd — default-on, whole-project.
+            v.extend(m1_typecheck::dbc_init::check(&lp.project, parsed));
+            Some(v)
         });
         // Only cache when a project is loaded; with none loaded the empty result
         // is cheap and a project may load before the next poll.
         match computed {
             Some(v) => {
-                *self.project_diags.write().unwrap() = Some((rate_inversion, v.clone()));
+                if let Some(a) = self.analysis.write().unwrap().as_mut() {
+                    a.diags.insert(rate_inversion, v.clone());
+                }
                 v
             }
             None => Vec::new(),
@@ -362,8 +485,16 @@ impl ProjectStore {
             augment(project, &root, &m1cfg_path, &dbc_paths)
         };
         match build() {
-            Ok(project) => {
+            Ok(mut project) => {
                 let script_files = walk_scripts(&root);
+                // Infer user-function/method return types from the whole project's
+                // scripts once at load — parity with the CLI, which runs
+                // `infer_return_types` before checking callers so their call sites
+                // resolve to a concrete type instead of staying Unknown (#110).
+                // Done at load (not per keystroke) since it reads disk; refreshed
+                // by a reload when the project model changes.
+                let scripts = scripts_from_disk(&script_files);
+                project.infer_return_types(&m1_typecheck::parsed::parse_all(&scripts));
                 *self.inner.write().unwrap() = Some(LoadedProject {
                     project,
                     root,
@@ -373,11 +504,13 @@ impl ProjectStore {
                     script_files,
                 });
                 self.invalidate_call_graph();
+                self.invalidate_analysis();
                 Ok(true)
             }
             Err(e) => {
                 *self.inner.write().unwrap() = None;
                 self.invalidate_call_graph();
+                self.invalidate_analysis();
                 Err(e)
             }
         }
@@ -406,10 +539,13 @@ impl ProjectStore {
                 lp.dbc_paths.clone(),
             )
         };
-        let project = Project::from_xml(m1prj_text)
+        let mut project = Project::from_xml(m1prj_text)
             .map_err(|e| e.to_string())
             .and_then(|p| augment(p, &root, &m1cfg_path, &dbc_paths))?;
         let script_files = walk_scripts(&root);
+        // Re-infer return types against the refreshed model (as at load, #110).
+        let scripts = scripts_from_disk(&script_files);
+        project.infer_return_types(&m1_typecheck::parsed::parse_all(&scripts));
         *self.inner.write().unwrap() = Some(LoadedProject {
             project,
             root,
@@ -419,6 +555,7 @@ impl ProjectStore {
             script_files,
         });
         self.invalidate_call_graph();
+        self.invalidate_analysis();
         Ok(true)
     }
 
@@ -701,9 +838,12 @@ mod tests {
         });
     }
 
-    // #259: project-scope diagnostics are memoized (they otherwise re-read every
-    // script from disk per pull-diagnostic poll) and the cache is dropped by
-    // `invalidate_call_graph`, the shared edit/open/close/save/reload hook.
+    // #259 + finding-2: project-scope diagnostics are memoized over a shared,
+    // content-hashed parse cache so a pull-diagnostic poll on an unchanged corpus
+    // is a cache hit. Crucially, a buffer edit (which fires `invalidate_call_graph`
+    // but does NOT change disk) must NOT drop the cache — only a project reload /
+    // script-set change (`invalidate_analysis`) or an actual on-disk content change
+    // rebuilds it.
     #[test]
     fn project_diagnostics_are_memoized_and_invalidated() {
         let tmp = tempfile::tempdir().unwrap();
@@ -712,33 +852,51 @@ mod tests {
         let store = ProjectStore::new();
         assert!(store.discover_and_load(tmp.path()).unwrap());
 
-        // Load (via discover_and_load -> invalidate_call_graph) leaves the cache empty.
+        // Load (-> invalidate_analysis) leaves the cache empty.
         assert!(
-            store.project_diags.read().unwrap().is_none(),
+            store.analysis.read().unwrap().is_none(),
             "cache starts empty after load"
         );
 
-        // First call computes and caches under the rate_inversion flag it was given.
+        // First call builds the analysis and memoizes the diags for this flag.
         let first_len = store.project_diagnostics_with(false).len();
         {
-            let cached = store.project_diags.read().unwrap();
-            let (flag, diags) = cached.as_ref().expect("first call populates the cache");
-            assert!(!*flag, "cached under the rate_inversion=false flag");
+            let cached = store.analysis.read().unwrap();
+            let a = cached.as_ref().expect("first call populates the cache");
             assert_eq!(
-                diags.len(),
-                first_len,
+                a.diags.get(&false).map(Vec::len),
+                Some(first_len),
                 "cached set matches the returned set"
             );
         }
 
-        // A second call with the same flag is served from the cache (same result).
+        // A second call with the same flag is served from the cache.
         assert_eq!(store.project_diagnostics_with(false).len(), first_len);
 
-        // The shared invalidation hook drops the cache.
+        // A buffer edit fires this hook; the disk-sourced analysis must survive it.
         store.invalidate_call_graph();
         assert!(
-            store.project_diags.read().unwrap().is_none(),
-            "invalidate_call_graph drops the project-diagnostics cache"
+            store.analysis.read().unwrap().is_some(),
+            "invalidate_call_graph must NOT drop the disk-sourced analysis cache"
+        );
+        assert_eq!(store.project_diagnostics_with(false).len(), first_len);
+
+        // A project-model / script-set change drops it explicitly.
+        store.invalidate_analysis();
+        assert!(
+            store.analysis.read().unwrap().is_none(),
+            "invalidate_analysis drops the analysis cache"
+        );
+
+        // An actual on-disk content change rebuilds it on the next poll (the
+        // content hash moved), even without an explicit invalidation.
+        let _ = store.project_diagnostics_with(false); // repopulate
+        std::fs::write(tmp.path().join("A.m1scr"), "y = 2;\n// changed\n").unwrap();
+        let _ = store.project_diagnostics_with(false);
+        let cached = store.analysis.read().unwrap();
+        assert!(
+            cached.is_some(),
+            "a content change rebuilds the analysis cache"
         );
     }
 
