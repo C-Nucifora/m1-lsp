@@ -852,6 +852,235 @@ async fn drain(stream: &mut DuplexStream) {
     }
 }
 
+// E4: a self-contained mini project (project + m1cfg + one script) written to a
+// fresh tempdir, plus a scenario that feeds the input. Mirrors the in-tree
+// `tests/fixtures/mini` so the LSP eval path runs the same deterministic project
+// (Gain=2.5, scenario Speed=20 -> Output=50). Returns (tmpdir, root_uri,
+// script_uri, script_src).
+fn write_eval_fixture() -> (
+    tempfile::TempDir,
+    tower_lsp::lsp_types::Url,
+    tower_lsp::lsp_types::Url,
+    String,
+) {
+    use tower_lsp::lsp_types::Url;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(
+        root.join("Project.m1prj"),
+        r#"<?xml version="1.0"?>
+<MoTeCM1BuildSession>
+ <Project Name="Mini" TargetHardware="ecu120">
+  <ComponentStream><List>
+   <Component Classname="BuiltIn.GroupCompound" Name="Root.Demo"/>
+   <Component Classname="BuiltIn.Channel" Name="Root.Demo.Speed"><Props Type="f32"><Locale><Default Unit="rpm"/></Locale></Props></Component>
+   <Component Classname="BuiltIn.Channel" Name="Root.Demo.Output"><Props Type="f32"/></Component>
+   <Component Classname="BuiltIn.Parameter" Name="Root.Demo.Gain"><Props Type="f32"/></Component>
+   <Component Classname="BuiltIn.FuncUser" Filename="Demo.Update.m1scr" Name="Root.Demo.Update"/>
+  </List></ComponentStream>
+ </Project>
+</MoTeCM1BuildSession>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("parameters.m1cfg"),
+        r#"<?xml version="1.0"?>
+<Configuration Locale="English_Australia.1252" DefaultLocale="C">
+ <Group Name="">
+  <Parameter Name="Demo.Gain">
+   <Cell Type="f32"><![CDATA[2.5]]></Cell>
+  </Parameter>
+ </Group>
+</Configuration>"#,
+    )
+    .unwrap();
+    let scripts = root.join("Scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    let src = "// Synthetic eval fixture script.\nlocal scaled = Speed * Gain;\nOutput = scaled;\n";
+    let script = scripts.join("Demo.Update.m1scr");
+    std::fs::write(&script, src).unwrap();
+    // A scenario that drives Speed so Output = 20 * 2.5 = 50.
+    std::fs::write(
+        root.join("idle.toml"),
+        "mode = \"function\"\ntarget = \"Demo.Update\"\n\
+         duration_s = 0.03\nbase_rate_hz = 100.0\n\
+         [[inputs]]\nchannel = \"Root.Demo.Speed\"\nconst = 20.0\n",
+    )
+    .unwrap();
+    let root_uri = Url::from_file_path(root).unwrap();
+    let script_uri = Url::from_file_path(&script).unwrap();
+    (tmp, root_uri, script_uri, src.to_string())
+}
+
+// E4: with eval enabled and a scenario configured, hovering the `Output` channel
+// shows the evaluated value alongside the existing type/symbol info. Needs the
+// multi-threaded runtime: the eval-enabled hover path runs its trace build under
+// `block_in_place`, matching the production `#[tokio::main(flavor)]` server.
+#[tokio::test(flavor = "multi_thread")]
+async fn hover_with_scenario_shows_evaluated_value() {
+    let (_tmp, root_uri, script_uri, src) = write_eval_fixture();
+
+    let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+
+    // Enable eval + point at the scenario via initializationOptions.
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "processId":null,"rootUri":root_uri,"capabilities":{},
+            "initializationOptions":{"eval":{"enabled":true,"scenario":"idle.toml"}}}}),
+    )
+    .await;
+    let _ = read_response(&mut client, 1).await;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":script_uri,"languageId":"m1","version":1,"text":src}}}),
+    )
+    .await;
+    drain(&mut client).await;
+
+    // `Output` is the first token of the third line (0-indexed line 2, char 0).
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{
+            "textDocument":{"uri":script_uri},
+            "position":{"line":2,"character":0}}}),
+    )
+    .await;
+    let resp = read_response(&mut client, 2).await;
+    let md = resp["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("hover should return markup; got {resp}"));
+    // The existing type/symbol info is still present.
+    assert!(md.contains("channel"), "type/symbol info kept: {md}");
+    // The evaluated value is appended (Output = 20 * 2.5 = 50).
+    assert!(md.contains("value: `50`"), "evaluated value shown: {md}");
+    // A configured scenario carries no offline-default honesty suffix.
+    assert!(!md.contains("offline default"), "no offline label: {md}");
+}
+
+// E4 regression guard: with eval disabled (the default), the hover response is the
+// pre-eval baseline — no `value:` line is ever added.
+#[tokio::test(flavor = "multi_thread")]
+async fn hover_with_eval_off_has_no_value_line() {
+    let (_tmp, root_uri, script_uri, src) = write_eval_fixture();
+
+    let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+
+    // No initializationOptions → eval stays disabled.
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "processId":null,"rootUri":root_uri,"capabilities":{}}}),
+    )
+    .await;
+    let _ = read_response(&mut client, 1).await;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":script_uri,"languageId":"m1","version":1,"text":src}}}),
+    )
+    .await;
+    drain(&mut client).await;
+
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{
+            "textDocument":{"uri":script_uri},
+            "position":{"line":2,"character":0}}}),
+    )
+    .await;
+    let resp = read_response(&mut client, 2).await;
+    let md = resp["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("hover should return markup; got {resp}"));
+    assert!(md.contains("channel"), "type/symbol info present: {md}");
+    assert!(!md.contains("value:"), "no value line when eval off: {md}");
+}
+
+// E5: hovering a sub-expression occurrence the run never recorded an expr value
+// for (here the `scaled` local — `Trace::exprs` only carries call-site values, so
+// this is a sparse miss) adds no `value:` line and leaves the rest of the hover
+// intact. The buffer is unmodified-since-load, so the expr offsets are valid and
+// the lookup actually runs — it simply finds nothing, the honest outcome. Drives
+// the real backend so the buffer == disk gate is exercised end-to-end.
+#[tokio::test(flavor = "multi_thread")]
+async fn expr_hover_sparse_miss_leaves_hover_unchanged() {
+    let (_tmp, root_uri, script_uri, src) = write_eval_fixture();
+
+    let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+
+    // Eval enabled + scenario configured (the expr lookup only runs when eval is on).
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "processId":null,"rootUri":root_uri,"capabilities":{},
+            "initializationOptions":{"eval":{"enabled":true,"scenario":"idle.toml"}}}}),
+    )
+    .await;
+    let _ = read_response(&mut client, 1).await;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    // Open the buffer with text identical to disk (unmodified-since-load): the E5
+    // offset gate (`buffer_matches_disk`) is satisfied, so the expr lookup runs.
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":script_uri,"languageId":"m1","version":1,"text":src}}}),
+    )
+    .await;
+    drain(&mut client).await;
+
+    // Hover the `scaled` local on line 1 (`local scaled = Speed * Gain;`). It is a
+    // non-call sub-expression, so the run recorded no expr value for it.
+    let scaled_col = src.lines().nth(1).unwrap().find("scaled").unwrap() as u64;
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{
+            "textDocument":{"uri":script_uri},
+            "position":{"line":1,"character":scaled_col}}}),
+    )
+    .await;
+    let resp = read_response(&mut client, 2).await;
+    let md = resp["result"]["contents"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("hover should return markup; got {resp}"));
+    // The local's own symbol info is present; a sparse expr miss adds no value line.
+    assert!(md.contains("`local`"), "local symbol info present: {md}");
+    assert!(
+        !md.contains("value:"),
+        "a sparse expr miss adds no value line: {md}"
+    );
+}
+
 // Direct-call tests of the pure analysis path (no transport needed).
 #[test]
 fn analyze_reports_syntax_error() {
