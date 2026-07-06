@@ -1171,6 +1171,7 @@ mod tests {
             can: Some(CanMeta {
                 can_id: None,
                 dlc: None,
+                transmit: None,
                 start_bit: Some(10),
                 length: Some(10),
                 multiplier: Some(0.1),

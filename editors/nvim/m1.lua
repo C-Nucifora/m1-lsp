@@ -59,10 +59,12 @@ vim.api.nvim_create_autocmd("LspAttach", {
     vim.keymap.set("n", "K", vim.lsp.buf.hover, opts)
     vim.keymap.set("n", "gd", vim.lsp.buf.definition, opts)
     vim.keymap.set("n", "gO", vim.lsp.buf.document_symbol, opts)
-    -- Find all in-file references to the local/channel under the cursor
-    -- (Nvim 0.11+ also maps `grr`).
+    -- Find references to the symbol under the cursor: project-wide for a
+    -- channel/parameter/function, in-file for a `local` (Nvim 0.11+ also maps `grr`).
     vim.keymap.set("n", "gr", vim.lsp.buf.references, opts)
-    -- Rename a local variable and all its references (Nvim 0.11+ also maps `grn`).
+    -- Rename the symbol under the cursor: project-wide for a project symbol
+    -- (rewrites `Project.m1prj` and every referencing script), in-file for a
+    -- `local` (Nvim 0.11+ also maps `grn`).
     vim.keymap.set("n", "<leader>rn", vim.lsp.buf.rename, opts)
     -- Code-action quick-fixes, e.g. `==` -> `eq` (Nvim 0.11+ also maps `gra`).
     vim.keymap.set({ "n", "x" }, "<leader>ca", vim.lsp.buf.code_action, opts)

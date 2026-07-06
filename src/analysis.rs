@@ -68,6 +68,15 @@ pub trait TypeProvider: Send + Sync {
     fn types(&self, uri: &Url, src: &str, li: &LineIndex, enc: PositionEncoding) -> Vec<LspDiag>;
     /// True iff a project is loaded; gates the L006/T002 de-dup.
     fn project_loaded(&self) -> bool;
+
+    /// Apply the resolved diagnostics filter so **opt-in** type rules (e.g. T064)
+    /// activate when the unified config's `[diagnostics] select` names them. Without
+    /// this a `select = ["T064"]` yields a blank editor: the opt-in rule never runs
+    /// (the default registry excludes it) *and* the post-filter drops every other
+    /// code — so the one code the user asked for is the one thing missing. Mirrors
+    /// [`LintProvider::set_lint_config`]; the backend calls it on every config
+    /// (re)resolve. Default: no-op (providers without opt-in rules).
+    fn set_type_config(&self, _diagnostics: &crate::config::DiagFilter) {}
 }
 
 /// A no-op type provider. Default until m1-typecheck is injected / when disabled.
@@ -94,7 +103,29 @@ pub fn analyze(
     types: &dyn TypeProvider,
     filter: &DiagFilter,
 ) -> Vec<LspDiag> {
+    // Closed-file / test path: no warm tree available, so parse here.
     let cst = m1_core::parse(src);
+    analyze_with_cst(&cst, uri, src, li, enc, lint, types, filter)
+}
+
+/// [`analyze`] but reusing an already-parsed CST for the syntax + unsupported-
+/// c-token pass, instead of re-parsing `src` from scratch (#270). The open-buffer
+/// diagnostics path holds the document's incrementally-maintained tree, so on
+/// every keystroke it passes that warm tree here rather than paying a full
+/// reparse for this pass. (The lint and typecheck backends still parse
+/// internally — they live in separate crates and take `&str` — so this removes
+/// one of the several per-keystroke parses, not all of them.)
+#[allow(clippy::too_many_arguments)]
+pub fn analyze_with_cst(
+    cst: &m1_core::Cst,
+    uri: &Url,
+    src: &str,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    lint: &dyn LintProvider,
+    types: &dyn TypeProvider,
+    filter: &DiagFilter,
+) -> Vec<LspDiag> {
     let mut out: Vec<LspDiag> = cst
         .syntax_diagnostics()
         .iter()

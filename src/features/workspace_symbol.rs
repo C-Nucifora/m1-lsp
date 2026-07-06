@@ -16,7 +16,8 @@ use tower_lsp::lsp_types::{Location, SymbolInformation, SymbolKind as LspSymbolK
 /// (`security:Tune torque`):
 /// - `tag:<name>` — symbols carrying the tag (own or inherited)
 /// - `security:<level>` — by `Props Security` (case-insensitive)
-/// - `rate:<hz>` — functions/methods scheduled at that rate
+/// - `rate:<hz>` — functions/methods scheduled at that numeric rate, or the named
+///   rate `rate:Startup` (case-insensitive) for startup-scheduled functions
 /// - `type:<enum|float|integer|unsigned|boolean|string>` — by value type
 #[allow(deprecated)]
 pub fn workspace_symbols(loaded: &LoadedProject, query: &str) -> Vec<SymbolInformation> {
@@ -25,14 +26,14 @@ pub fn workspace_symbols(loaded: &LoadedProject, query: &str) -> Vec<SymbolInfor
 
     let mut tag: Option<String> = None;
     let mut security: Option<String> = None;
-    let mut rate: Option<f64> = None;
+    let mut rate: Option<RateFacet> = None;
     let mut vtype: Option<String> = None;
     let mut free = String::new();
     for tok in query.split_whitespace() {
         match tok.split_once(':') {
             Some(("tag", v)) => tag = Some(v.to_string()),
             Some(("security", v)) => security = Some(v.to_lowercase()),
-            Some(("rate", v)) => rate = v.parse::<f64>().ok(),
+            Some(("rate", v)) => rate = RateFacet::parse(v),
             Some(("type", v)) => vtype = Some(v.to_lowercase()),
             _ => {
                 if !free.is_empty() {
@@ -67,7 +68,7 @@ pub fn workspace_symbols(loaded: &LoadedProject, query: &str) -> Vec<SymbolInfor
                         .as_deref()
                         .is_some_and(|have| have.eq_ignore_ascii_case(sec))
                 })
-                && rate.is_none_or(|r| s.call_rate_hz.is_some_and(|have| (have - r).abs() < 1e-9))
+                && rate.as_ref().is_none_or(|r| r.matches(s))
                 && type_matches(s)
         })
         .collect();
@@ -85,6 +86,41 @@ pub fn workspace_symbols(loaded: &LoadedProject, query: &str) -> Vec<SymbolInfor
             })
         })
         .collect()
+}
+
+/// The `rate:` facet value: a numeric execution rate in Hz, or the named
+/// `Startup` schedule slice. A numeric rate matches functions triggered by a
+/// resolvable clock (`On <N>Hz`); `Startup` matches startup-scheduled functions,
+/// which the symbol model records as `scheduled` with no numeric `call_rate_hz`
+/// (an `On Startup` trigger carries no Hz). telescope-m1's call_rates picker
+/// dead-ended on its `Startup` slice because the facet parsed floats only (#).
+enum RateFacet {
+    Hz(f64),
+    Startup,
+}
+
+impl RateFacet {
+    /// Parse a `rate:` value: `Startup` (case-insensitive) or a float. `None` for
+    /// anything else, so an unrecognised value filters nothing out silently rather
+    /// than matching everything.
+    fn parse(v: &str) -> Option<RateFacet> {
+        if v.eq_ignore_ascii_case("startup") {
+            return Some(RateFacet::Startup);
+        }
+        v.parse::<f64>().ok().map(RateFacet::Hz)
+    }
+
+    fn matches(&self, s: &Symbol) -> bool {
+        match self {
+            RateFacet::Hz(r) => s.call_rate_hz.is_some_and(|have| (have - r).abs() < 1e-9),
+            // A startup function is bound to a schedule event (`scheduled`) but has
+            // no statically-resolvable clock rate (`call_rate_hz == None`). This
+            // also captures the rare `$(…)` parameter-reference trigger, which the
+            // model likewise can't resolve to a rate — both belong to the "no fixed
+            // Hz" slice the picker groups under Startup.
+            RateFacet::Startup => s.scheduled && s.call_rate_hz.is_none(),
+        }
+    }
 }
 
 /// The enclosing group path (everything before the last `.`), if any.
@@ -118,10 +154,12 @@ mod tests {
   <Component Classname="BuiltIn.GroupCompound" Name="Root"/>
   <Component Classname="BuiltIn.GroupCompound" Name="Root.Engine"/>
   <Component Classname="BuiltIn.EventKernel" Name="Root.Events.On 100Hz"/>
+  <Component Classname="BuiltIn.EventKernel" Name="Root.Events.On Startup"/>
   <Component Classname="BuiltIn.Channel" Name="Root.Engine.Speed"><Props Type="f32" SelectedTags="Engine Normal" Security="Tune"/></Component>
   <Component Classname="BuiltIn.Channel" Name="Root.Engine.Temperature"><Props Type="f32" SelectedTags="Vehicle"/></Component>
   <Component Classname="BuiltIn.Channel" Name="Root.Engine.Count"><Props Type="s32"/></Component>
   <Component Classname="BuiltIn.FuncUser" Name="Root.Engine.Update" Filename="Engine Update.m1scr"><Props SelectedTrigger="Parent.Parent.Events.On 100Hz"/></Component>
+  <Component Classname="BuiltIn.FuncUser" Name="Root.Engine.Init" Filename="Engine Init.m1scr"><Props SelectedTrigger="Parent.Parent.Events.On Startup"/></Component>
 </Project>"#;
 
     fn loaded() -> ProjectStore {
@@ -190,6 +228,36 @@ mod tests {
             let combo = names("type:float speed");
             assert!(combo.contains(&"Root.Engine.Speed".into()), "got {combo:?}");
             assert!(!combo.contains(&"Root.Engine.Temperature".into()));
+        });
+    }
+
+    // Finding 5: the `rate:` facet accepts the named `Startup` slice (not just
+    // floats), so telescope-m1's call_rates picker no longer dead-ends on it.
+    #[test]
+    fn rate_startup_facet_filters_startup_functions() {
+        let store = loaded();
+        store.with_project(|p| {
+            let p = p.unwrap();
+            let names = |q: &str| -> Vec<String> {
+                workspace_symbols(p, q)
+                    .iter()
+                    .map(|s| s.name.clone())
+                    .collect()
+            };
+            // Case-insensitive named rate returns the startup-triggered function…
+            let start = names("rate:Startup");
+            assert!(start.contains(&"Root.Engine.Init".into()), "got {start:?}");
+            // …and excludes the 100Hz one.
+            assert!(
+                !start.contains(&"Root.Engine.Update".into()),
+                "a clocked fn is not startup: {start:?}"
+            );
+            assert_eq!(names("rate:startup"), start, "facet is case-insensitive");
+
+            // The numeric facet still works and excludes the startup function.
+            let hz = names("rate:100");
+            assert!(hz.contains(&"Root.Engine.Update".into()), "got {hz:?}");
+            assert!(!hz.contains(&"Root.Engine.Init".into()), "got {hz:?}");
         });
     }
 
