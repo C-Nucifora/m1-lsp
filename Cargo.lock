@@ -596,30 +596,21 @@ dependencies = [
 
 [[package]]
 name = "m1-core"
-version = "0.14.1"
-source = "git+https://github.com/C-Nucifora/m1-core.git?tag=v0.14.1#7c265135542617ef2bf45515181fe41f3e6a0f76"
-dependencies = [
- "tree-sitter",
- "tree-sitter-m1 0.7.1",
-]
-
-[[package]]
-name = "m1-core"
 version = "0.15.0"
 source = "git+https://github.com/C-Nucifora/m1-core.git?tag=v0.15.0#1fe6f9ad4d6a0479c5cfeb770270fab0f89e8f89"
 dependencies = [
  "tree-sitter",
- "tree-sitter-m1 0.8.0",
+ "tree-sitter-m1",
 ]
 
 [[package]]
 name = "m1-eval"
-version = "0.2.0"
-source = "git+https://github.com/C-Nucifora/m1-eval.git?tag=v0.2.0#715425d9e9d15c2c4e74a9d700bd6b3dac442a61"
+version = "0.2.1"
+source = "git+https://github.com/C-Nucifora/m1-eval.git?tag=v0.2.1#634fbb8596b3a17f50386378416ebef9f976d66f"
 dependencies = [
  "clap",
- "m1-core 0.14.1",
- "m1-typecheck 0.42.1",
+ "m1-core",
+ "m1-typecheck",
  "roxmltree 0.20.0",
  "serde",
  "serde_json",
@@ -633,8 +624,8 @@ source = "git+https://github.com/C-Nucifora/m1-fmt.git?tag=v0.17.0#fb24b2cf7bd46
 dependencies = [
  "clap",
  "libc",
- "m1-core 0.15.0",
- "m1-workspace 0.13.0",
+ "m1-core",
+ "m1-workspace",
  "rayon",
  "toml 1.1.2+spec-1.1.0",
 ]
@@ -646,8 +637,8 @@ source = "git+https://github.com/C-Nucifora/m1-lint.git?tag=v0.24.0#6088ade3e481
 dependencies = [
  "clap",
  "glob",
- "m1-core 0.15.0",
- "m1-workspace 0.13.0",
+ "m1-core",
+ "m1-workspace",
  "rayon",
  "serde_json",
  "toml 1.1.2+spec-1.1.0",
@@ -658,12 +649,12 @@ name = "m1-lsp"
 version = "0.46.0"
 dependencies = [
  "dashmap 6.2.1",
- "m1-core 0.15.0",
+ "m1-core",
  "m1-eval",
  "m1-fmt",
  "m1-lint",
- "m1-typecheck 0.45.1",
- "m1-workspace 0.13.0",
+ "m1-typecheck",
+ "m1-workspace",
  "serde",
  "serde_json",
  "tempfile",
@@ -674,39 +665,15 @@ dependencies = [
 
 [[package]]
 name = "m1-typecheck"
-version = "0.42.1"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.42.1#7ba1af94a0a74aeaf1309561ecebcb66cc3c4f28"
-dependencies = [
- "clap",
- "m1-core 0.14.1",
- "m1-workspace 0.12.0",
- "roxmltree 0.21.1",
- "serde",
- "serde_json",
- "toml 1.1.2+spec-1.1.0",
-]
-
-[[package]]
-name = "m1-typecheck"
 version = "0.45.1"
 source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.45.1#a8af044a844ec762213ac0944f2e4d602188f761"
 dependencies = [
  "clap",
- "m1-core 0.15.0",
- "m1-workspace 0.13.0",
+ "m1-core",
+ "m1-workspace",
  "roxmltree 0.21.1",
  "serde",
  "serde_json",
- "toml 1.1.2+spec-1.1.0",
-]
-
-[[package]]
-name = "m1-workspace"
-version = "0.12.0"
-source = "git+https://github.com/nedlane/m1-workspace.git?tag=v0.12.0#3612f48925dc57960deb9325ec82494e1d16cfc1"
-dependencies = [
- "serde",
- "serde_ignored",
  "toml 1.1.2+spec-1.1.0",
 ]
 
@@ -1313,15 +1280,6 @@ name = "tree-sitter-language"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
-
-[[package]]
-name = "tree-sitter-m1"
-version = "0.7.1"
-source = "git+https://github.com/C-Nucifora/tree-sitter-m1.git?tag=v0.7.1#7d31d2415934d0546c86765b1c38a033e52653ae"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
 
 [[package]]
 name = "tree-sitter-m1"
