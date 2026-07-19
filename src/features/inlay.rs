@@ -184,8 +184,8 @@ fn collect_value_hints(
         };
         let tooltip = offline.then(|| {
             tower_lsp::lsp_types::InlayHintTooltip::String(
-                "offline default — no scenario or log configured; this is the \
-                 evaluator's default world, not a measured value"
+                "experimental offline default — no scenario or log configured; \
+                 this is the evaluator's default world, not a measured value"
                     .to_string(),
             )
         });

@@ -367,6 +367,20 @@ impl Backend {
         }
     }
 
+    /// Surface eval-source fallback issues as a user-visible window WARNING —
+    /// e.g. "configured scenario failed to parse; using the offline default".
+    /// Called with the fresh issues of exactly the request that rebuilt the
+    /// cached trace ([`crate::project_store::ProjectStore::with_eval`]), so the
+    /// user is warned once per rebuild, not once per hover — and never silently
+    /// downgraded from a configured scenario/log to offline defaults.
+    async fn notify_eval_issues(&self, issues: Vec<String>) {
+        for line in issues {
+            self.client
+                .show_message(MessageType::WARNING, format!("m1-lsp eval: {line}"))
+                .await;
+        }
+    }
+
     async fn send_progress(&self, token: &NumberOrString, value: WorkDoneProgress) {
         self.client
             .send_notification::<tower_lsp::lsp_types::notification::Progress>(ProgressParams {
@@ -1152,38 +1166,48 @@ impl LanguageServer for Backend {
         // non-trivial, so run it off the async worker via `block_in_place` (#135),
         // mirroring the call-graph/diagnostic read paths. Subsequent hovers hit the
         // cache and do no work.
-        Ok(tokio::task::block_in_place(|| {
+        let mut fallback_issues: Vec<String> = Vec::new();
+        let result = tokio::task::block_in_place(|| {
             self.store.with_eval(
                 &eval_cfg,
                 |lp| crate::eval::evaluate(lp, &eval_cfg),
-                |opt| match opt {
-                    Some((lp, trace, provenance)) => hover::hover_with_eval(
-                        cst.root(),
-                        byte,
-                        Some(&lp.project),
-                        doc.file_name.as_deref(),
-                        &doc.line_index,
-                        doc.enc,
-                        Some(hover::EvalContext {
-                            trace: trace.as_ref(),
-                            provenance,
-                            tick: eval_cfg.tick,
-                            expr_offsets_valid,
-                        }),
-                    ),
-                    // No project loaded: no symbols to resolve, no trace — fall back
-                    // to the plain (project-less) hover for keyword/local docs.
-                    None => hover::hover(
-                        cst.root(),
-                        byte,
-                        None,
-                        doc.file_name.as_deref(),
-                        &doc.line_index,
-                        doc.enc,
-                    ),
+                |opt, issues| {
+                    fallback_issues.extend(issues.iter().cloned());
+                    match opt {
+                        Some((lp, trace, provenance)) => hover::hover_with_eval(
+                            cst.root(),
+                            byte,
+                            Some(&lp.project),
+                            doc.file_name.as_deref(),
+                            &doc.line_index,
+                            doc.enc,
+                            Some(hover::EvalContext {
+                                trace: trace.as_ref(),
+                                provenance,
+                                tick: eval_cfg.tick,
+                                expr_offsets_valid,
+                            }),
+                        ),
+                        // No project loaded: no symbols to resolve, no trace — fall
+                        // back to the plain (project-less) hover for keyword/local
+                        // docs.
+                        None => hover::hover(
+                            cst.root(),
+                            byte,
+                            None,
+                            doc.file_name.as_deref(),
+                            &doc.line_index,
+                            doc.enc,
+                        ),
+                    }
                 },
             )
-        }))
+        });
+        // A configured scenario/log that failed loud (and fell back to the
+        // offline default) must be USER-VISIBLE, not a silent downgrade: surface
+        // each rebuild's issues once as a window warning (2026-07-19 review B3).
+        self.notify_eval_issues(fallback_issues).await;
+        Ok(result)
     }
 
     async fn goto_definition(
@@ -1387,37 +1411,44 @@ impl LanguageServer for Backend {
         // project/config; never per request) and add `= value` hints. The build (a
         // whole-project offline run on a cache miss) can be non-trivial, so run it
         // off the async worker via `block_in_place`, mirroring the hover read path.
+        let mut fallback_issues: Vec<String> = Vec::new();
         let hints = tokio::task::block_in_place(|| {
             self.store.with_eval(
                 &eval_cfg,
                 |lp| crate::eval::evaluate(lp, &eval_cfg),
-                |opt| match opt {
-                    Some((lp, trace, provenance)) => inlay::inlay_hints_with_eval(
-                        cst.root(),
-                        params.range,
-                        &doc.line_index,
-                        doc.enc,
-                        Some(&lp.project),
-                        doc.file_name.as_deref(),
-                        Some(inlay::EvalInlayContext {
-                            trace: trace.as_ref(),
-                            provenance,
-                            tick: eval_cfg.tick,
-                        }),
-                    ),
-                    // No project loaded: no symbols to resolve, no trace — fall
-                    // back to the plain (project-less) hints.
-                    None => inlay::inlay_hints(
-                        cst.root(),
-                        params.range,
-                        &doc.line_index,
-                        doc.enc,
-                        None,
-                        doc.file_name.as_deref(),
-                    ),
+                |opt, issues| {
+                    fallback_issues.extend(issues.iter().cloned());
+                    match opt {
+                        Some((lp, trace, provenance)) => inlay::inlay_hints_with_eval(
+                            cst.root(),
+                            params.range,
+                            &doc.line_index,
+                            doc.enc,
+                            Some(&lp.project),
+                            doc.file_name.as_deref(),
+                            Some(inlay::EvalInlayContext {
+                                trace: trace.as_ref(),
+                                provenance,
+                                tick: eval_cfg.tick,
+                            }),
+                        ),
+                        // No project loaded: no symbols to resolve, no trace — fall
+                        // back to the plain (project-less) hints.
+                        None => inlay::inlay_hints(
+                            cst.root(),
+                            params.range,
+                            &doc.line_index,
+                            doc.enc,
+                            None,
+                            doc.file_name.as_deref(),
+                        ),
+                    }
                 },
             )
         });
+        // Surface a configured source's fail-loud fallback once per rebuild —
+        // never silently (2026-07-19 review B3).
+        self.notify_eval_issues(fallback_issues).await;
         Ok(Some(hints))
     }
 

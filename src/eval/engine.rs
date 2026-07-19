@@ -78,17 +78,14 @@ pub struct EvalOutcome {
     pub issues: Vec<String>,
 }
 
-/// The base tick rate for the synthesised offline-default run, in Hz. The offline
-/// default has no user-chosen grid, so a fixed sane rate is used; the
-/// whole-project scheduler still runs each function at its own call rate over this
-/// base tick. 100 Hz mirrors the evaluator's own no-schedule default.
-const OFFLINE_BASE_RATE_HZ: f64 = 100.0;
-
-/// A short, bounded duration for the offline-default run, in seconds. Long enough
-/// for stateful operators to settle to a converged value (the last-tick policy
-/// reads that), short enough to keep a whole-project run cheap on the editor's
-/// hot-ish path. Three ticks at [`OFFLINE_BASE_RATE_HZ`].
-const OFFLINE_DURATION_S: f64 = 0.03;
+/// The offline-default run's duration bounds, in seconds. The duration is
+/// cycle-aware — [`offline_duration_s`] gives the slowest scheduled rate two
+/// full periods so every function runs at least twice and stateful operators
+/// settle (the last-tick policy reads the converged value) — clamped between
+/// these bounds so a rate-less project still gets a short run and a very slow
+/// clock (e.g. 1 Hz) cannot make the editor's one-time trace build unbounded.
+const OFFLINE_MIN_DURATION_S: f64 = 0.03;
+const OFFLINE_MAX_DURATION_S: f64 = 2.0;
 
 /// Build an engine for `lp` and run it once, resolving the value source in the
 /// precedence order documented on this module. Never fails: a configured
@@ -223,7 +220,7 @@ fn load_engine(lp: &LoadedProject) -> Result<Engine, String> {
 fn offline_fallback(lp: &LoadedProject, mut issues: Vec<String>) -> EvalOutcome {
     let trace = match load_engine(lp).and_then(|engine| {
         engine
-            .run(&offline_scenario())
+            .run(&offline_scenario(lp))
             .map_err(|e| format!("offline-default run failed: {e}"))
     }) {
         Ok(trace) => trace,
@@ -241,15 +238,46 @@ fn offline_fallback(lp: &LoadedProject, mut issues: Vec<String>) -> EvalOutcome 
 
 /// The synthesised offline-default scenario: run every scheduled function at its
 /// own rate (`WholeProject`), with no externally-supplied inputs, over a short
-/// bounded grid. Channels with no schedule simply do not appear — honest, since
-/// the offline default computes only what the project itself drives.
-fn offline_scenario() -> Scenario {
+/// cycle-aware grid. Channels with no schedule simply do not appear — honest,
+/// since the offline default computes only what the project itself drives.
+///
+/// The base is the auto sentinel (`0.0`): the evaluator derives the exact
+/// common grid (the lcm of the project's scheduled rates) itself, so a 200 or
+/// 500 Hz project is scheduled exactly — the old hardcoded 100 Hz base is
+/// rejected outright by m1-eval ≥ 0.3.0 for such projects. The duration gives
+/// the slowest rate two full cycles (bounded). `allow_default_inputs` is the
+/// evaluator's explicit opt-in for this offline world — the whole point of the
+/// fallback — and every substituted input is reported on the trace and
+/// surfaced in the rendered provenance.
+fn offline_scenario(lp: &LoadedProject) -> Scenario {
+    let slowest = lp
+        .project
+        .symbols()
+        .iter()
+        .filter_map(|sym| sym.call_rate_hz)
+        .fold(None::<f64>, |acc, r| Some(acc.map_or(r, |m| m.min(r))));
     Scenario {
         mode: RunMode::WholeProject,
         inputs: Vec::new(),
-        duration_s: OFFLINE_DURATION_S,
-        base_rate_hz: OFFLINE_BASE_RATE_HZ,
+        duration_s: offline_duration_s(slowest),
+        // Auto (0.0): the evaluator derives the exact lcm grid of the declared
+        // rates. A project with NO periodic rate has nothing to derive from
+        // (the evaluator fails loud on auto-with-empty-schedule), so a nominal
+        // 100 Hz grid keeps the run valid — there is nothing rate-gated to
+        // misrepresent, and startup functions still run once.
+        base_rate_hz: if slowest.is_some() { 0.0 } else { 100.0 },
         overrides: Vec::new(),
+        allow_default_inputs: true,
+    }
+}
+
+/// Two full periods of the slowest scheduled rate, clamped to
+/// `[OFFLINE_MIN_DURATION_S, OFFLINE_MAX_DURATION_S]`. `None` (a project with
+/// no periodically-scheduled function) gets the minimum bound.
+fn offline_duration_s(slowest_rate_hz: Option<f64>) -> f64 {
+    match slowest_rate_hz {
+        Some(r) if r > 0.0 => (2.0 / r).clamp(OFFLINE_MIN_DURATION_S, OFFLINE_MAX_DURATION_S),
+        _ => OFFLINE_MIN_DURATION_S,
     }
 }
 
@@ -277,6 +305,27 @@ mod tests {
             "mini fixture must load"
         );
         store.with_project(|p| f(p.expect("mini project loaded")))
+    }
+
+    /// Cycle-aware offline duration: two full periods of the slowest scheduled
+    /// rate, clamped so a rate-less project still runs briefly and a very slow
+    /// clock cannot make the one-time editor build unbounded.
+    #[test]
+    fn offline_duration_is_cycle_aware_and_bounded() {
+        assert_eq!(offline_duration_s(None), 0.03, "no periodic rate: minimum");
+        assert_eq!(
+            offline_duration_s(Some(100.0)),
+            0.03,
+            "fast rate: clamped up to min"
+        );
+        assert_eq!(offline_duration_s(Some(10.0)), 0.2, "10 Hz: two periods");
+        assert_eq!(offline_duration_s(Some(2.0)), 1.0, "2 Hz: two periods");
+        assert_eq!(offline_duration_s(Some(0.5)), 2.0, "0.5 Hz: capped");
+        assert_eq!(
+            offline_duration_s(Some(0.0)),
+            0.03,
+            "degenerate rate: minimum"
+        );
     }
 
     /// A scenario file → a trace whose `Output` column carries the computed value,

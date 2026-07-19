@@ -1857,7 +1857,7 @@ mod tests {
         );
         assert!(md.contains("value: `50`"), "value shown: {md}");
         assert!(
-            md.contains("(offline default — no scenario)"),
+            md.contains("(experimental offline default — no scenario)"),
             "offline default labelled: {md}"
         );
     }
