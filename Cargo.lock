@@ -605,12 +605,12 @@ dependencies = [
 
 [[package]]
 name = "m1-eval"
-version = "0.3.0"
-source = "git+https://github.com/C-Nucifora/m1-eval.git?tag=v0.3.0#55446fa88dff0b39c1dc8ca9e291e65815e84a2f"
+version = "0.3.1"
+source = "git+https://github.com/C-Nucifora/m1-eval.git?tag=v0.3.1#b37d0ce38041bd0b2aa2df3deabc5429e62b2cc1"
 dependencies = [
  "clap",
  "m1-core",
- "m1-typecheck 0.45.1",
+ "m1-typecheck",
  "roxmltree 0.20.0",
  "serde",
  "serde_json",
@@ -646,14 +646,14 @@ dependencies = [
 
 [[package]]
 name = "m1-lsp"
-version = "0.48.0"
+version = "0.48.1"
 dependencies = [
  "dashmap 6.2.1",
  "m1-core",
  "m1-eval",
  "m1-fmt",
  "m1-lint",
- "m1-typecheck 0.46.0",
+ "m1-typecheck",
  "m1-workspace",
  "serde",
  "serde_json",
@@ -661,20 +661,6 @@ dependencies = [
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tower-lsp",
-]
-
-[[package]]
-name = "m1-typecheck"
-version = "0.45.1"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.45.1#a8af044a844ec762213ac0944f2e4d602188f761"
-dependencies = [
- "clap",
- "m1-core",
- "m1-workspace",
- "roxmltree 0.21.1",
- "serde",
- "serde_json",
- "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]
