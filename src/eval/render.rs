@@ -14,7 +14,7 @@
 //!
 //! - A [`Provenance::OfflineDefault`] value is the evaluator's default world (no
 //!   scenario, no log) — most channels then read calibration defaults / zero-seeded
-//!   inputs / Tier-3 stubs, so the fragment appends `(offline default — no
+//!   inputs / Tier-3 stubs, so the fragment appends `(experimental offline default — no
 //!   scenario)`. An offline number is never presented as if it were measured.
 //! - A channel flagged [`m1_eval::Trace::is_external`] is externally driven
 //!   (scenario-fed or a documented Tier-3 stub) rather than computed; the fragment
@@ -74,7 +74,7 @@ fn fmt_f64(x: f64) -> String {
 /// value: `50` (@ t=0.02s)
 /// ```
 ///
-/// followed by any honesty suffix (see the module docs): `(offline default — no
+/// followed by any honesty suffix (see the module docs): `(experimental offline default — no
 /// scenario)` for [`Provenance::OfflineDefault`], and `(externally driven)` when
 /// the channel is [`Trace::is_external`]. An empty column (a channel key present
 /// but with no recorded ticks) also yields `None`.
@@ -103,7 +103,7 @@ pub fn eval_hover_fragment(
 /// expressions its sink evaluated, so a hovered sub-expression the run never visited
 /// simply yields `None` — no value line, honest rather than an error. The rendered
 /// fragment is identical to [`eval_hover_fragment`]'s (`value: \`50\` (@ t=…)` plus
-/// the `(offline default — no scenario)` suffix for [`Provenance::OfflineDefault`]),
+/// the `(experimental offline default — no scenario)` suffix for [`Provenance::OfflineDefault`]),
 /// minus the channel-only `(externally driven)` suffix, which does not apply to an
 /// expression value.
 ///
@@ -153,7 +153,18 @@ fn column_fragment(
         frag.push_str(&format!(" (@ t={}s)", fmt_f64(*t)));
     }
     if *provenance == Provenance::OfflineDefault {
-        frag.push_str(" (offline default — no scenario)");
+        // Conspicuous, honest labelling: this number is experimental — it came
+        // from the synthesised offline world, not a configured run — and any
+        // default-substituted inputs are counted so the reader knows how much
+        // of it was guessed (the full per-channel report is on the trace).
+        frag.push_str(" (experimental offline default — no scenario)");
+        if !trace.defaulted.is_empty() {
+            frag.push_str(&format!(
+                " ({} input{} defaulted)",
+                trace.defaulted.len(),
+                if trace.defaulted.len() == 1 { "" } else { "s" }
+            ));
+        }
     }
     Some(frag)
 }
@@ -252,7 +263,7 @@ mod tests {
         .expect("fragment present");
         assert!(frag.contains("value: `50`"), "got: {frag}");
         assert!(
-            frag.contains("(offline default — no scenario)"),
+            frag.contains("(experimental offline default — no scenario)"),
             "offline default must be labelled: {frag}"
         );
     }
@@ -286,7 +297,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            frag.contains("(offline default — no scenario)"),
+            frag.contains("(experimental offline default — no scenario)"),
             "got: {frag}"
         );
         assert!(frag.contains("(externally driven)"), "got: {frag}");
@@ -402,7 +413,7 @@ mod tests {
         .expect("fragment present");
         assert!(frag.contains("value: `2.5`"), "got: {frag}");
         assert!(
-            frag.contains("(offline default — no scenario)"),
+            frag.contains("(experimental offline default — no scenario)"),
             "offline-default expr value must be labelled: {frag}"
         );
     }

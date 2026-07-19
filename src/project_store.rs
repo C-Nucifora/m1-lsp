@@ -346,17 +346,23 @@ impl ProjectStore {
         &self,
         cfg: &EvalConfig,
         build: impl FnOnce(&LoadedProject) -> EvalOutcome,
-        f: impl FnOnce(Option<(&LoadedProject, &Arc<Trace>, &Provenance)>) -> R,
+        f: impl FnOnce(Option<(&LoadedProject, &Arc<Trace>, &Provenance)>, &[String]) -> R,
     ) -> R {
         let project = self.inner.read().unwrap();
         let Some(lp) = project.as_ref() else {
-            return f(None);
+            return f(None, &[]);
         };
         let key = EvalKey::new(self.generation.load(Ordering::Acquire), cfg);
         let mut cache = self.eval_cache.write().unwrap();
         // Rebuild on a miss or a stale key (config or reload generation changed).
+        // The build's fail-loud issues (e.g. a configured scenario that failed
+        // and fell back to the offline default) are handed to `f` on exactly the
+        // request that rebuilt — never dropped (a configured-source fallback
+        // used to be completely silent), never repeated on cache hits.
+        let mut fresh_issues: Vec<String> = Vec::new();
         if cache.as_ref().map(|c| c.key) != Some(key) {
             let outcome = build(lp);
+            fresh_issues = outcome.issues;
             *cache = Some(CachedEval {
                 trace: Arc::new(outcome.trace),
                 provenance: outcome.provenance,
@@ -364,7 +370,7 @@ impl ProjectStore {
             });
         }
         let cached = cache.as_ref().expect("just built or hit");
-        f(Some((lp, &cached.trace, &cached.provenance)))
+        f(Some((lp, &cached.trace, &cached.provenance)), &fresh_issues)
     }
 
     /// Drop the cross-script analysis cache so the next diagnostics/type request
@@ -1070,14 +1076,14 @@ mod tests {
         };
 
         // First request: a cache miss, so it builds once.
-        let prov1 = store.with_eval(&cfg, build, |e| {
+        let prov1 = store.with_eval(&cfg, build, |e, _issues| {
             e.map(|(_, _, prov)| prov.clone()).expect("project loaded")
         });
         assert_eq!(builds.load(Ordering::SeqCst), 1, "first request builds");
         assert_eq!(prov1, Provenance::OfflineDefault);
 
         // Second request with the same config + generation: a cache hit, no rebuild.
-        let prov2 = store.with_eval(&cfg, build, |e| {
+        let prov2 = store.with_eval(&cfg, build, |e, _issues| {
             e.map(|(_, _, prov)| prov.clone()).expect("project loaded")
         });
         assert_eq!(
@@ -1086,6 +1092,41 @@ mod tests {
             "second request reuses the cache — no second build"
         );
         assert_eq!(prov2, prov1, "same cached trace, same provenance");
+    }
+
+    // Fail-loud issues from a rebuild (e.g. "configured scenario failed; fell
+    // back to the offline default") must surface to the caller ON the build —
+    // previously `with_eval` dropped `outcome.issues` on the floor, so a
+    // configured-source fallback was completely silent (2026-07-19 review B3).
+    // A cache hit hands back no issues, so the backend notifies once per
+    // rebuild, not once per hover.
+    #[test]
+    fn with_eval_surfaces_build_issues_once() {
+        let store = ProjectStore::new();
+        assert!(store.discover_and_load(&mini_dir()).unwrap());
+        // A configured scenario path that does not exist: evaluate() fails loud
+        // on it and falls back to the offline default, carrying one issue line.
+        let cfg = EvalConfig {
+            enabled: true,
+            scenario: Some(PathBuf::from("no/such/scenario.toml")),
+            ..EvalConfig::default()
+        };
+        let build = |lp: &LoadedProject| crate::eval::engine::evaluate(lp, &cfg);
+
+        // First request: the build's fallback issue is handed to the callback.
+        let issues1 = store.with_eval(&cfg, build, |_e, issues| issues.to_vec());
+        assert_eq!(issues1.len(), 1, "fallback issue surfaced: {issues1:?}");
+        assert!(
+            issues1[0].contains("scenario"),
+            "issue names the failed source: {issues1:?}"
+        );
+
+        // Second request: cache hit — no fresh issues, so no re-notification.
+        let issues2 = store.with_eval(&cfg, build, |_e, issues| issues.to_vec());
+        assert!(
+            issues2.is_empty(),
+            "a cache hit must not repeat the notification: {issues2:?}"
+        );
     }
 
     // E3: a configuration change bumps the `EvalKey` (it hashes the resolved
@@ -1103,7 +1144,7 @@ mod tests {
                 builds.fetch_add(1, Ordering::SeqCst);
                 crate::eval::engine::evaluate(lp, &cfg_a)
             },
-            |e| assert!(e.is_some()),
+            |e, _issues| assert!(e.is_some()),
         );
         assert_eq!(builds.load(Ordering::SeqCst), 1);
 
@@ -1118,7 +1159,7 @@ mod tests {
                 builds.fetch_add(1, Ordering::SeqCst);
                 crate::eval::engine::evaluate(lp, &cfg_b)
             },
-            |e| assert!(e.is_some()),
+            |e, _issues| assert!(e.is_some()),
         );
         assert_eq!(
             builds.load(Ordering::SeqCst),
@@ -1133,7 +1174,7 @@ mod tests {
                 builds.fetch_add(1, Ordering::SeqCst);
                 crate::eval::engine::evaluate(lp, &cfg_a)
             },
-            |e| assert!(e.is_some()),
+            |e, _issues| assert!(e.is_some()),
         );
         assert_eq!(builds.load(Ordering::SeqCst), 3);
     }
@@ -1154,12 +1195,12 @@ mod tests {
             crate::eval::engine::evaluate(lp, &cfg)
         };
 
-        store.with_eval(&cfg, build, |e| assert!(e.is_some()));
+        store.with_eval(&cfg, build, |e, _issues| assert!(e.is_some()));
         assert_eq!(builds.load(Ordering::SeqCst), 1);
 
         // Reload the project (same config): the generation bumps, cache is stale.
         assert!(store.discover_and_load(tmp.path()).unwrap());
-        store.with_eval(&cfg, build, |e| assert!(e.is_some()));
+        store.with_eval(&cfg, build, |e, _issues| assert!(e.is_some()));
         assert_eq!(
             builds.load(Ordering::SeqCst),
             2,
@@ -1180,7 +1221,7 @@ mod tests {
             crate::eval::engine::evaluate(lp, &cfg)
         };
 
-        store.with_eval(&cfg, build, |e| assert!(e.is_some()));
+        store.with_eval(&cfg, build, |e, _issues| assert!(e.is_some()));
         assert_eq!(builds.load(Ordering::SeqCst), 1);
         assert!(
             store.eval_cache.read().unwrap().is_some(),
@@ -1193,7 +1234,7 @@ mod tests {
             store.eval_cache.read().unwrap().is_none(),
             "invalidate_call_graph drops the eval cache"
         );
-        store.with_eval(&cfg, build, |e| assert!(e.is_some()));
+        store.with_eval(&cfg, build, |e, _issues| assert!(e.is_some()));
         assert_eq!(
             builds.load(Ordering::SeqCst),
             2,
@@ -1214,7 +1255,7 @@ mod tests {
                 builds.fetch_add(1, Ordering::SeqCst);
                 crate::eval::engine::evaluate(lp, &cfg)
             },
-            |e| e.is_some(),
+            |e, _issues| e.is_some(),
         );
         assert!(!got, "no project → None");
         assert_eq!(builds.load(Ordering::SeqCst), 0, "no project → no build");
