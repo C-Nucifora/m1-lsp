@@ -2,9 +2,9 @@
 //!
 //! This module is the composition seam: [`hover_with_eval`] resolves the segment
 //! under the cursor and delegates the actual rendering to focused submodules —
-//! [`symbol`] (project symbols, types, units, table/DBC layout), [`enums`]
-//! (enum literals), [`intrinsics`] (library objects/functions/methods), and
-//! [`keywords`] (language/type/reference keyword docs). The evaluated-value
+//! `symbol` (project symbols, types, units, table/DBC layout), `enums`
+//! (enum literals), `intrinsics` (library objects/functions/methods), and
+//! `keywords` (language/type/reference keyword docs). The evaluated-value
 //! fragments come from [`crate::eval::render`].
 mod enums;
 mod intrinsics;
