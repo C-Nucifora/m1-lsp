@@ -646,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "m1-lsp"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "dashmap 6.2.1",
  "m1-core",
