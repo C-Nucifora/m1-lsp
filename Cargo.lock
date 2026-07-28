@@ -605,8 +605,8 @@ dependencies = [
 
 [[package]]
 name = "m1-eval"
-version = "0.3.1"
-source = "git+https://github.com/C-Nucifora/m1-eval.git?tag=v0.3.1#b37d0ce38041bd0b2aa2df3deabc5429e62b2cc1"
+version = "0.3.2"
+source = "git+https://github.com/C-Nucifora/m1-eval.git?tag=v0.3.2#cee941ebe656c5075c3e6330173be02b2cc51b5f"
 dependencies = [
  "clap",
  "m1-core",
@@ -646,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "m1-lsp"
-version = "0.48.1"
+version = "0.48.2"
 dependencies = [
  "dashmap 6.2.1",
  "m1-core",
@@ -665,8 +665,8 @@ dependencies = [
 
 [[package]]
 name = "m1-typecheck"
-version = "0.46.0"
-source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.46.0#469ce2a78fcb42f435cb7a0fad5c6617c1b44694"
+version = "0.47.0"
+source = "git+https://github.com/C-Nucifora/m1-typecheck.git?tag=v0.47.0#91f4407536853e86a005fbb2cb102032686a6411"
 dependencies = [
  "clap",
  "m1-core",
