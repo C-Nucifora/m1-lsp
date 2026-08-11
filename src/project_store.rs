@@ -440,7 +440,7 @@ impl ProjectStore {
     ///
     /// The probe streams every script's bytes through the hasher without
     /// materializing them — sources are read into memory only by an actual
-    /// rebuild ([`Self::ensure_analysis`]) — so a warm probe allocates nothing
+    /// rebuild (`ensure_analysis`) — so a warm probe allocates nothing
     /// that outlives it. No project loaded clears the cache and returns.
     pub fn revalidate_analysis(&self) {
         use std::hash::{Hash, Hasher};
