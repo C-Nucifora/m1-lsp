@@ -313,6 +313,17 @@ pub fn completions(
     li: &crate::line_index::LineIndex,
     enc: crate::line_index::PositionEncoding,
 ) -> Vec<CompletionItem> {
+    // Defense in depth (#350): the LSP position decode clamps offsets before
+    // handlers see them, but this entrypoint slices `text` directly
+    // (`assignment_lhs`, the member-chain scans), so an out-of-range or
+    // mid-codepoint byte from any other caller would panic — and a handler
+    // panic takes the server down. Snap to the nearest char boundary at or
+    // below the end of text; every downstream slice is then in bounds.
+    let mut byte = byte.min(text.len());
+    while byte > 0 && !text.is_char_boundary(byte) {
+        byte -= 1;
+    }
+
     // Inside a comment or string literal, code completion is noise — bail out
     // with an empty list rather than dumping objects/keywords/locals (#…).
     if in_comment_or_string(root, byte) {
@@ -493,6 +504,36 @@ mod tests {
     use super::*;
     use crate::project_store::ProjectStore;
     use std::io::Write;
+
+    // #350: an out-of-range or mid-codepoint byte must clamp, not panic —
+    // `assignment_lhs` sliced `text[..byte]` unguarded, so `byte > len` (or a
+    // byte inside the two-byte `°`) aborted the request. Fuzz-shaped sweep
+    // over every offset up to past-the-end, on malformed sources too.
+    #[test]
+    fn out_of_range_or_mid_codepoint_byte_is_clamped_not_a_panic() {
+        for src in [
+            "x.;\n",
+            "x. = 1;\n",
+            "a.b = c..d;\n",
+            "x = \u{00b0}.\u{00b0};\n",
+            "",
+            ".",
+        ] {
+            let cst = m1_core::parse(src);
+            let li = crate::line_index::LineIndex::new(src);
+            for byte in 0..=src.len() + 2 {
+                let _ = completions(
+                    cst.root(),
+                    None,
+                    None,
+                    src,
+                    byte,
+                    &li,
+                    crate::line_index::PositionEncoding::Utf16,
+                );
+            }
+        }
+    }
 
     const M1PRJ: &str = r#"<?xml version="1.0"?>
 <Project>
