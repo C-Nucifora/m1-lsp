@@ -162,16 +162,25 @@ impl Backend {
     ) -> Result<Option<Vec<CodeLens>>> {
         let uri = params.text_document.uri;
         // The logging/security badges (#171/#172) resolve the channels the
-        // script writes, which needs its text: prefer the open buffer, fall
-        // back to disk.
-        let text = self.docs.get(&uri).map(|d| d.text.clone()).or_else(|| {
+        // script writes, which needs its text: prefer the open buffer — whose
+        // incrementally-maintained CST (#270) is reused instead of re-parsing
+        // the whole file per request (#343) — and fall back to disk.
+        let doc = self.doc_context(&uri);
+        let disk_text = if doc.is_none() {
             uri.to_file_path()
                 .ok()
                 .and_then(|p| crate::disk_read::read_disk(&p))
-        });
+        } else {
+            None
+        };
+        let text = doc
+            .as_ref()
+            .map(|d| d.text.as_str())
+            .or(disk_text.as_deref());
+        let cst = doc.as_ref().map(|d| d.cst.as_ref());
         Ok(self
             .store
-            .with_project(|p| p.map(|lp| code_lens::code_lens(lp, &uri, text.as_deref()))))
+            .with_project(|p| p.map(|lp| code_lens::code_lens(lp, &uri, text, cst))))
     }
 
     pub(super) async fn prepare_call_hierarchy_impl(

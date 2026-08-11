@@ -27,8 +27,15 @@ use tower_lsp::lsp_types::{CodeLens, Command, Position, Range, Url};
 /// The line-0 informational badges for a script: execution rate (#86),
 /// logging (#171) and security (#172). `text` is the script's current buffer
 /// (open document or disk), used to resolve the channels it writes; an empty
-/// vec when the file is not a known script.
-pub fn code_lens(loaded: &LoadedProject, uri: &Url, text: Option<&str>) -> Vec<CodeLens> {
+/// vec when the file is not a known script. `cst` is the open buffer's
+/// incrementally-maintained tree when the caller has one (#270/#343) — pass
+/// `None` for a closed file and the text is parsed here.
+pub fn code_lens(
+    loaded: &LoadedProject,
+    uri: &Url,
+    text: Option<&str>,
+    cst: Option<&m1_core::Cst>,
+) -> Vec<CodeLens> {
     let Some(file_name) = uri
         .to_file_path()
         .ok()
@@ -47,7 +54,7 @@ pub fn code_lens(loaded: &LoadedProject, uri: &Url, text: Option<&str>) -> Vec<C
         lenses.push(rate_lens(loaded, sym, rate));
     }
     if let Some(text) = text {
-        let written = written_symbols(loaded, &file_name, text);
+        let written = written_symbols(loaded, &file_name, text, cst);
         if let Some(l) = logging_lens(loaded, &written) {
             lenses.push(l);
         }
@@ -101,9 +108,23 @@ fn lens_at_top(command: Command) -> CodeLens {
 }
 
 /// The distinct project channel/parameter symbols this script writes, resolved
-/// through the typechecker so group-relative spellings canonicalise.
-fn written_symbols<'a>(loaded: &'a LoadedProject, file_name: &str, text: &str) -> Vec<&'a Symbol> {
-    let cst = m1_core::parse(text);
+/// through the typechecker so group-relative spellings canonicalise. Reuses the
+/// caller's warm CST when given one; parses `text` only for closed files
+/// (#343 — this used to re-parse the open buffer on every codeLens request).
+fn written_symbols<'a>(
+    loaded: &'a LoadedProject,
+    file_name: &str,
+    text: &str,
+    cst: Option<&m1_core::Cst>,
+) -> Vec<&'a Symbol> {
+    let parsed;
+    let cst = match cst {
+        Some(c) => c,
+        None => {
+            parsed = m1_core::parse(text);
+            &parsed
+        }
+    };
     if !cst.syntax_diagnostics().is_empty() {
         return Vec::new();
     }
@@ -229,7 +250,7 @@ mod tests {
         let (t, store) = load(M1PRJ, "Engine.Update.m1scr", "x = 1;\n");
         let uri = Url::from_file_path(t.path().join("Scripts/Engine.Update.m1scr")).unwrap();
         store.with_project(|p| {
-            let lenses = code_lens(p.unwrap(), &uri, Some("x = 1;\n"));
+            let lenses = code_lens(p.unwrap(), &uri, Some("x = 1;\n"), None);
             assert_eq!(lenses.len(), 1);
             assert_eq!(lenses[0].command.as_ref().unwrap().title, "⚡ 500 Hz");
             assert_eq!(lenses[0].range.start.line, 0);
@@ -246,7 +267,7 @@ mod tests {
         let (t, store) = load(M1PRJ, "Engine.Update.m1scr", "x = 1;\n");
         let uri = Url::from_file_path(t.path().join("Scripts/Engine.Update.m1scr")).unwrap();
         store.with_project(|p| {
-            let lenses = code_lens(p.unwrap(), &uri, Some("x = 1;\n"));
+            let lenses = code_lens(p.unwrap(), &uri, Some("x = 1;\n"), None);
             let cmd = lenses[0].command.as_ref().unwrap();
             assert_eq!(cmd.command, "m1.revealLocation");
             let args = cmd.arguments.as_ref().expect("reveal args");
@@ -263,14 +284,18 @@ mod tests {
         // Boot has no SelectedTrigger → no statically-known rate → no lens.
         let (t, store) = load(M1PRJ, "Engine.Boot.m1scr", "x = 1;\n");
         let uri = Url::from_file_path(t.path().join("Scripts/Engine.Boot.m1scr")).unwrap();
-        store.with_project(|p| assert!(code_lens(p.unwrap(), &uri, Some("x = 1;\n")).is_empty()));
+        store.with_project(|p| {
+            assert!(code_lens(p.unwrap(), &uri, Some("x = 1;\n"), None).is_empty())
+        });
     }
 
     #[test]
     fn no_lens_for_non_script_uri() {
         let (t, store) = load(M1PRJ, "Engine.Update.m1scr", "x = 1;\n");
         let uri = Url::from_file_path(t.path().join("Project.m1prj")).unwrap();
-        store.with_project(|p| assert!(code_lens(p.unwrap(), &uri, Some("x = 1;\n")).is_empty()));
+        store.with_project(|p| {
+            assert!(code_lens(p.unwrap(), &uri, Some("x = 1;\n"), None).is_empty())
+        });
     }
 }
 
@@ -310,11 +335,28 @@ mod badge_tests {
     fn titles(store: &ProjectStore, dir: &std::path::Path, src: &str) -> Vec<String> {
         let uri = Url::from_file_path(dir.join("Scripts/Engine.Update.m1scr")).unwrap();
         store.with_project(|p| {
-            code_lens(p.unwrap(), &uri, Some(src))
+            code_lens(p.unwrap(), &uri, Some(src), None)
                 .iter()
                 .filter_map(|l| l.command.as_ref().map(|c| c.title.clone()))
                 .collect()
         })
+    }
+
+    // #343: the warm-CST path (open buffers hand their incrementally-maintained
+    // tree in) must produce exactly the lenses the parse-from-text path
+    // produces for closed files.
+    #[test]
+    fn warm_cst_path_matches_text_path() {
+        let src = "Speed = 1.0;\n";
+        let (t, store) = load(src);
+        let uri = Url::from_file_path(t.path().join("Scripts/Engine.Update.m1scr")).unwrap();
+        let cst = m1_core::parse(src);
+        store.with_project(|p| {
+            let via_text = code_lens(p.unwrap(), &uri, Some(src), None);
+            let via_cst = code_lens(p.unwrap(), &uri, Some(src), Some(&cst));
+            assert!(!via_text.is_empty(), "fixture yields lenses");
+            assert_eq!(via_text, via_cst, "warm-CST and parse paths must agree");
+        });
     }
 
     // #171: a script writing a logged channel gets the 📊 badge.
