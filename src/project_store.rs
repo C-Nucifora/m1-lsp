@@ -255,6 +255,12 @@ pub struct ProjectStore {
     /// set changes without the surviving files' content hash moving; plain buffer
     /// edits leave it alone.
     analysis: RwLock<Option<ProjectAnalysis>>,
+    /// Serializes [`Self::ensure_analysis`]'s rebuild (double-checked locking,
+    /// #340): concurrent first-requests after an invalidation run the
+    /// whole-corpus parse + taint solve once — the losers wait here, then read
+    /// the freshly built cache. A dedicated mutex (not the `analysis` RwLock)
+    /// so the long build holds no lock that any reader nests with.
+    analysis_rebuild: std::sync::Mutex<()>,
 }
 
 /// The cached cross-script analysis; see [`ProjectStore::analysis`].
@@ -384,23 +390,84 @@ impl ProjectStore {
         *self.analysis.write().unwrap() = None;
     }
 
-    /// Rebuild `Self::analysis` when the on-disk project scripts have changed
-    /// since it was last computed (or it is empty). A no-op — returning the warm
-    /// cache — when the combined content hash matches, which is the common
-    /// per-keystroke case (an unsaved buffer does not touch disk). No project
-    /// loaded clears the cache and returns.
+    /// Drop `Self::analysis` when the on-disk corpus no longer matches the hash
+    /// it was built from — the **once-per-request** freshness probe (#339).
+    /// Callers are the request boundaries (the pull handlers, the push publish,
+    /// [`Self::project_diagnostics_with`]); the per-script hot path
+    /// ([`Self::with_cross_script`]) never probes, so one `workspace/diagnostic`
+    /// poll over N scripts pays N probe reads once, not N × N.
     ///
-    /// The disk read + hash is cheap relative to the parse + taint solve it
-    /// guards, and the expensive work runs with no lock held.
-    fn ensure_analysis(&self) {
+    /// The probe streams every script's bytes through the hasher without
+    /// materializing them — sources are read into memory only by an actual
+    /// rebuild ([`Self::ensure_analysis`]) — so a warm probe allocates nothing
+    /// that outlives it. No project loaded clears the cache and returns.
+    pub fn revalidate_analysis(&self) {
         use std::hash::{Hash, Hasher};
         let Some(script_files) = self.with_project(|p| p.map(|lp| lp.script_files.clone())) else {
             *self.analysis.write().unwrap() = None;
             return;
         };
-        // Read + hash every script once, outside any lock. Tolerant decode
+        if self.analysis.read().unwrap().is_none() {
+            return; // nothing to invalidate; the next ensure_analysis builds
+        }
+        // Hash exactly the inputs ensure_analysis hashes (same skip conditions),
+        // so a matching corpus produces a matching hash. Tolerant decode
         // (UTF-8 → Windows-1252) so a `°`-bearing MoTeC script is included; an
-        // unreadable file is skipped (it simply contributes nothing to the hash).
+        // unreadable file is skipped (it simply contributes nothing).
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for path in &script_files {
+            if path.file_name().and_then(|s| s.to_str()).is_none() {
+                continue;
+            }
+            let Some(src) = crate::disk_read::read_disk(path) else {
+                continue;
+            };
+            path.hash(&mut hasher);
+            src.hash(&mut hasher);
+        }
+        let content_hash = hasher.finish();
+        let stale = self
+            .analysis
+            .read()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|a| a.content_hash != content_hash);
+        if stale {
+            let mut guard = self.analysis.write().unwrap();
+            // Re-check under the write lock: a concurrent rebuild may have just
+            // stored an analysis matching the disk state we hashed.
+            if guard
+                .as_ref()
+                .is_some_and(|a| a.content_hash != content_hash)
+            {
+                *guard = None;
+            }
+        }
+    }
+
+    /// Build `Self::analysis` if the cache is empty; a no-op when populated.
+    /// Freshness is the caller's job via [`Self::revalidate_analysis`] at
+    /// request boundaries — this deliberately does NOT probe the disk, so the
+    /// per-script paths inside one request reuse the cache with zero I/O
+    /// (#339).
+    ///
+    /// The rebuild is serialized on `analysis_rebuild` (double-checked, #340):
+    /// concurrent first-requests after an invalidation run the whole-corpus
+    /// parse + taint solve once — the losers wait, then read the freshly built
+    /// cache. The expensive work itself runs with no RwLock held, as before.
+    fn ensure_analysis(&self) {
+        use std::hash::{Hash, Hasher};
+        if self.analysis.read().unwrap().is_some() {
+            return;
+        }
+        let _rebuild = self.analysis_rebuild.lock().unwrap();
+        // Double-check: the winner may have built while we waited on the mutex.
+        if self.analysis.read().unwrap().is_some() {
+            return;
+        }
+        let Some(script_files) = self.with_project(|p| p.map(|lp| lp.script_files.clone())) else {
+            return; // no project: nothing to build
+        };
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         let mut scripts: Vec<(String, String)> = Vec::with_capacity(script_files.len());
         for path in &script_files {
@@ -416,19 +483,8 @@ impl ProjectStore {
         }
         let content_hash = hasher.finish();
 
-        // Cache hit: the corpus is byte-for-byte what we last analyzed.
-        if self
-            .analysis
-            .read()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|a| a.content_hash == content_hash)
-        {
-            return;
-        }
-
-        // Miss: reparse once and re-solve the cross-script taint graph (both
-        // expensive, both run here with no lock held).
+        // Reparse once and re-solve the cross-script taint graph (both
+        // expensive, both run here with no RwLock held).
         let parsed = m1_typecheck::parsed::parse_all(&scripts);
         let taints = self
             .with_project(|p| p.map(|lp| m1_typecheck::cross_script::solve(&lp.project, &parsed)))
@@ -528,8 +584,10 @@ impl ProjectStore {
         &self,
         rate_inversion: bool,
     ) -> Vec<m1_typecheck::diagnostics::TypeDiagnostic> {
-        // Refresh the shared parse/taint cache if the corpus changed on disk; a
-        // no-op (warm cache) on the common per-keystroke path.
+        // A request boundary (#339): drop the shared parse/taint cache if the
+        // corpus changed on disk, then build it if missing. The probe is a
+        // no-op read-through on the common unchanged-corpus path.
+        self.revalidate_analysis();
         self.ensure_analysis();
 
         // Serve the memoized set when it was already computed under this flag.
@@ -1037,6 +1095,63 @@ mod tests {
             cached.is_some(),
             "a content change rebuilds the analysis cache"
         );
+    }
+
+    // #339: the per-script hot path (`with_cross_script`) must serve the warm
+    // analysis cache without probing the disk — freshness is the request
+    // boundary's job via `revalidate_analysis`. An on-disk edit therefore
+    // becomes visible to the hot path only after a revalidation; before it,
+    // the warm cache is reused as-is (zero corpus I/O per script).
+    #[test]
+    fn with_cross_script_serves_warm_cache_until_revalidated() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_project(tmp.path());
+        std::fs::write(tmp.path().join("A.m1scr"), "x = 1;\n").unwrap();
+        let store = ProjectStore::new();
+        assert!(store.discover_and_load(tmp.path()).unwrap());
+
+        // Warm the cache and capture the hash it was built from.
+        let _ = store.project_diagnostics_with(false);
+        let warm_hash = store
+            .analysis
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .content_hash;
+
+        // Change the corpus on disk. The hot path must NOT notice (no probe).
+        std::fs::write(tmp.path().join("A.m1scr"), "y = 2;\n").unwrap();
+        store.with_cross_script(|cs| assert!(cs.is_some()));
+        assert_eq!(
+            store
+                .analysis
+                .read()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .content_hash,
+            warm_hash,
+            "with_cross_script must reuse the warm cache without re-probing disk"
+        );
+
+        // A request-boundary revalidation drops the stale cache…
+        store.revalidate_analysis();
+        assert!(
+            store.analysis.read().unwrap().is_none(),
+            "revalidation drops the stale analysis"
+        );
+
+        // …and the next hot-path call rebuilds against the new corpus.
+        store.with_cross_script(|cs| assert!(cs.is_some()));
+        let new_hash = store
+            .analysis
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .content_hash;
+        assert_ne!(new_hash, warm_hash, "rebuild reflects the changed corpus");
     }
 
     // A parameter-bearing .m1prj plus a matching .m1cfg, used to verify that the

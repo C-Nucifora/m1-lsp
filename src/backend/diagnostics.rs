@@ -170,6 +170,9 @@ impl Backend {
         let Some(version) = self.docs.get(&uri).map(|d| d.version) else {
             return;
         };
+        // Request boundary for the push path (#339): a `didSave` changes disk,
+        // so probe the cross-script analysis cache before the analyze reuses it.
+        self.store.revalidate_analysis();
         let diags = self.diagnostics_for(&uri).unwrap_or_default();
         self.client
             .publish_diagnostics(uri, diags, Some(version))
@@ -272,7 +275,13 @@ impl Backend {
         // `diagnostics_for` falls back to a blocking disk read (and full
         // analyze()) for closed files, so run it on a blocking-aware worker via
         // `block_in_place` to keep the async runtime healthy (#135, #258).
-        let items = tokio::task::block_in_place(|| self.diagnostics_for(uri).unwrap_or_default());
+        // Request boundary: probe the cross-script analysis cache for on-disk
+        // staleness once, so the analyze below reuses it without re-probing
+        // (#339).
+        let items = tokio::task::block_in_place(|| {
+            self.store.revalidate_analysis();
+            self.diagnostics_for(uri).unwrap_or_default()
+        });
         // LSP 3.17 result_id/Unchanged (#259): if the recomputed set matches the
         // one the client already holds (its `previous_result_id`), answer
         // `Unchanged` instead of re-serializing every item.
@@ -343,6 +352,11 @@ impl Backend {
         // doesn't starve the async runtime (#135, #258).
         let handle = tokio::runtime::Handle::current();
         let items = tokio::task::block_in_place(|| {
+            // One freshness probe for the whole scan (#339): every per-script
+            // analyze below then reuses the cross-script analysis cache with
+            // zero additional corpus I/O — previously each script re-read and
+            // re-hashed the entire corpus, making the poll O(N²) in reads.
+            self.store.revalidate_analysis();
             let mut items = Vec::with_capacity(paths.len());
             for (done, path) in paths.into_iter().enumerate() {
                 if done % 25 == 0 && done > 0 {
