@@ -218,7 +218,14 @@ struct CachedEval {
 
 #[derive(Default)]
 pub struct ProjectStore {
-    inner: RwLock<Option<LoadedProject>>,
+    /// The loaded project, handed out as an `Arc` snapshot (#341): accessors
+    /// clone the handle under a briefly-held read guard and work on the clone,
+    /// so no request holds this lock while it computes. That matters because a
+    /// project reload takes the write lock, and writer-preferring rwlocks
+    /// (macOS pthread, glibc default) block **new readers** behind a queued
+    /// writer — a guard held across a whole-corpus build would stall every
+    /// other handler for the build's duration.
+    inner: RwLock<Option<Arc<LoadedProject>>>,
     /// Monotonic project **reload generation**, bumped on every successful
     /// (re)load. It stands in for a content hash of the loaded project model
     /// (which has none) inside [`EvalKey`]: a reload changes the generation, so
@@ -285,12 +292,39 @@ impl ProjectStore {
         self.inner.read().unwrap().is_some()
     }
 
+    /// Clone the current project handle under a briefly-held read guard (#341).
+    /// Every accessor goes through this, so nothing holds the `inner` lock
+    /// while it computes; a queued reload writer only ever waits for a pointer
+    /// clone.
+    fn snapshot(&self) -> Option<Arc<LoadedProject>> {
+        self.inner.read().unwrap().clone()
+    }
+
     /// Re-walk the project root for `*.m1scr` files, refreshing the cached set
     /// without re-parsing the project. Cheap; called when a script file is
     /// created or deleted (an edit to an existing script doesn't change the set).
     pub fn refresh_scripts(&self) {
-        if let Some(lp) = self.inner.write().unwrap().as_mut() {
-            lp.script_files = walk_scripts(&lp.root);
+        let stale_prj = {
+            let mut guard = self.inner.write().unwrap();
+            match guard.as_mut() {
+                // The common case: no request holds a snapshot right now, so
+                // the handle is unique and the set updates in place.
+                Some(arc) => match Arc::get_mut(arc) {
+                    Some(lp) => {
+                        lp.script_files = walk_scripts(&lp.root);
+                        None
+                    }
+                    // A request (or an in-flight graph/eval build) still holds
+                    // a snapshot. `Project` isn't `Clone`, so fall back to a
+                    // full reload from disk below — rare (a script was created
+                    // or deleted in the same instant) and always correct.
+                    None => Some(arc.m1prj_path.clone()),
+                },
+                None => None,
+            }
+        };
+        if let Some(prj) = stale_prj {
+            let _ = self.load_from(&prj);
         }
         // The script set changed (file created/deleted) — drop the stale graph
         // and the cross-script analysis (its parse/taints cover the old set).
@@ -298,10 +332,13 @@ impl ProjectStore {
         self.invalidate_analysis();
     }
 
-    /// Read access to the loaded project for the feature handlers.
+    /// Read access to the loaded project for the feature handlers. `f` runs on
+    /// an `Arc` snapshot with no store lock held (#341), so a slow `f` (a
+    /// project-wide rename, a reference walk) cannot convoy other handlers
+    /// behind a queued reload writer.
     pub fn with_project<R>(&self, f: impl FnOnce(Option<&LoadedProject>) -> R) -> R {
-        let guard = self.inner.read().unwrap();
-        f(guard.as_ref())
+        let lp = self.snapshot();
+        f(lp.as_deref())
     }
 
     /// Drop the cached call-hierarchy graph so the next call-hierarchy request
@@ -354,10 +391,14 @@ impl ProjectStore {
         build: impl FnOnce(&LoadedProject) -> EvalOutcome,
         f: impl FnOnce(Option<(&LoadedProject, &Arc<Trace>, &Provenance)>, &[String]) -> R,
     ) -> R {
-        let project = self.inner.read().unwrap();
-        let Some(lp) = project.as_ref() else {
+        // Build from an Arc snapshot, holding only the cache lock (#341): a
+        // reload racing the build swaps the project freely, then its
+        // invalidation blocks on the cache lock until the build stores — so a
+        // stale trace never outlives the invalidation that supersedes it.
+        let Some(lp) = self.snapshot() else {
             return f(None, &[]);
         };
+        let lp = lp.as_ref();
         let key = EvalKey::new(self.generation.load(Ordering::Acquire), cfg);
         let mut cache = self.eval_cache.write().unwrap();
         // Rebuild on a miss or a stale key (config or reload generation changed).
@@ -468,6 +509,11 @@ impl ProjectStore {
         let Some(script_files) = self.with_project(|p| p.map(|lp| lp.script_files.clone())) else {
             return; // no project: nothing to build
         };
+        // The taints below are solved against the project model as of NOW;
+        // remember which model that is so the store can be skipped if a reload
+        // supersedes it mid-build (#341 — previously the build implicitly
+        // blocked the reload by holding the project read lock).
+        let generation = self.generation.load(Ordering::Acquire);
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         let mut scripts: Vec<(String, String)> = Vec::with_capacity(script_files.len());
         for path in &script_files {
@@ -489,6 +535,13 @@ impl ProjectStore {
         let taints = self
             .with_project(|p| p.map(|lp| m1_typecheck::cross_script::solve(&lp.project, &parsed)))
             .unwrap_or_default();
+        // A reload changed the model mid-build: this analysis was solved
+        // against the superseded project, so drop it — the next request
+        // rebuilds against the fresh one (its invalidate_analysis already
+        // cleared the cell, and storing here would resurrect stale taints).
+        if self.generation.load(Ordering::Acquire) != generation {
+            return;
+        }
         *self.analysis.write().unwrap() = Some(ProjectAnalysis {
             content_hash,
             parsed,
@@ -508,14 +561,13 @@ impl ProjectStore {
         f: impl FnOnce(Option<(&LoadedProject, &m1_typecheck::cross_script::ChannelTaints)>) -> R,
     ) -> R {
         self.ensure_analysis();
-        let project = self.inner.read().unwrap();
-        let Some(lp) = project.as_ref() else {
+        let Some(lp) = self.snapshot() else {
             return f(None);
         };
         let analysis = self.analysis.read().unwrap();
         let empty = m1_typecheck::cross_script::ChannelTaints::default();
         let taints = analysis.as_ref().map(|a| &a.taints).unwrap_or(&empty);
-        f(Some((lp, taints)))
+        f(Some((&lp, taints)))
     }
 
     /// Run `f` against the loaded project and its call-hierarchy graph, building
@@ -529,15 +581,19 @@ impl ProjectStore {
         build: impl FnOnce(&LoadedProject) -> CallGraph,
         f: impl FnOnce(Option<(&LoadedProject, &CallGraph)>) -> R,
     ) -> R {
-        let project = self.inner.read().unwrap();
-        let Some(lp) = project.as_ref() else {
+        // Build from an Arc snapshot, holding only the cache lock (#341): the
+        // whole-corpus read+parse no longer blocks a reload writer (nor, via
+        // writer preference, every other handler queued behind it). An
+        // invalidation racing the build blocks on the cache lock until the
+        // build stores, then clears — a stale graph never survives it.
+        let Some(lp) = self.snapshot() else {
             return f(None);
         };
         let mut graph = self.call_graph.write().unwrap();
         if graph.is_none() {
-            *graph = Some(build(lp));
+            *graph = Some(build(&lp));
         }
-        f(Some((lp, graph.as_ref().unwrap())))
+        f(Some((&lp, graph.as_ref().unwrap())))
     }
 
     /// Project-scope diagnostics for the loaded project: the `.m1cfg`-coverage
@@ -682,14 +738,14 @@ impl ProjectStore {
                 // by a reload when the project model changes.
                 let scripts = scripts_from_disk(&script_files);
                 project.infer_return_types(&m1_typecheck::parsed::parse_all(&scripts));
-                *self.inner.write().unwrap() = Some(LoadedProject {
+                *self.inner.write().unwrap() = Some(Arc::new(LoadedProject {
                     project,
                     root,
                     m1prj_path: m1prj_path.to_path_buf(),
                     m1cfg_path,
                     dbc_paths,
                     script_files,
-                });
+                }));
                 self.bump_generation();
                 self.invalidate_call_graph();
                 self.invalidate_analysis();
@@ -734,14 +790,14 @@ impl ProjectStore {
         // Re-infer return types against the refreshed model (as at load, #110).
         let scripts = scripts_from_disk(&script_files);
         project.infer_return_types(&m1_typecheck::parsed::parse_all(&scripts));
-        *self.inner.write().unwrap() = Some(LoadedProject {
+        *self.inner.write().unwrap() = Some(Arc::new(LoadedProject {
             project,
             root,
             m1prj_path,
             m1cfg_path,
             dbc_paths,
             script_files,
-        });
+        }));
         self.bump_generation();
         self.invalidate_call_graph();
         self.invalidate_analysis();
@@ -1094,6 +1150,41 @@ mod tests {
         assert!(
             cached.is_some(),
             "a content change rebuilds the analysis cache"
+        );
+    }
+
+    // #341: refresh_scripts updates the script set even while a request still
+    // holds a project snapshot (the Arc isn't unique, so the in-place path is
+    // unavailable and it falls back to a full reload). The held snapshot keeps
+    // its point-in-time view — that's the contract that lets requests run
+    // without holding the store lock.
+    #[test]
+    fn refresh_scripts_updates_even_while_a_snapshot_is_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_project(tmp.path());
+        let scripts = tmp.path().join("Scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("A.m1scr"), "x = 1;\n").unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+
+        // Simulate an in-flight request pinning the current project snapshot.
+        let held = store.snapshot().expect("project loaded");
+        assert_eq!(held.script_files.len(), 1);
+
+        std::fs::write(scripts.join("B.m1scr"), "y = 2;\n").unwrap();
+        store.refresh_scripts();
+        store.with_project(|p| {
+            assert_eq!(
+                p.unwrap().script_files.len(),
+                2,
+                "refresh must see the new script despite the held snapshot"
+            );
+        });
+        assert_eq!(
+            held.script_files.len(),
+            1,
+            "the held snapshot keeps its point-in-time view"
         );
     }
 
