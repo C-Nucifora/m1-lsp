@@ -326,6 +326,18 @@ impl Backend {
         });
         if scripts_changed {
             self.store.refresh_scripts();
+            // Deleted/renamed scripts leave orphaned pull-cache entries behind
+            // (#344): did_close only evicts open-doc entries, and the workspace
+            // scan re-adds one per *current* project file — so entries for
+            // files that no longer exist would otherwise accumulate forever.
+            // Correctness never depended on them (reconcile compares freshly
+            // computed items), this is purely a leak sweep.
+            let gone = |uri: &Url| {
+                !self.docs.contains_key(uri)
+                    && uri.to_file_path().map(|p| !p.exists()).unwrap_or(false)
+            };
+            self.diag_prev.retain(|u, _| !gone(u));
+            self.semtok_prev.retain(|u, _| !gone(u));
         }
         if !touches_project && config_change.is_none() && !scripts_changed {
             return;
@@ -431,6 +443,63 @@ impl Backend {
                     .await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod watched_files_sweep_tests {
+    use crate::backend::Backend;
+    use tower_lsp::{LanguageServer, LspService, lsp_types::*};
+
+    // #344: a script deleted from disk must not leave its pull-cache entries
+    // (diag_prev/semtok_prev) behind forever — the workspace scan re-adds one
+    // per current project file, and did_close only evicts open-doc entries, so
+    // without the watched-files sweep the maps grow monotonically across
+    // deletes/renames. Open documents and still-existing files are kept.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scripts_changed_sweeps_caches_of_deleted_files() {
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let kept_path = tmp.path().join("Kept.m1scr");
+        std::fs::write(&kept_path, "x = 1;\n").unwrap();
+        let kept = Url::from_file_path(&kept_path).unwrap();
+        let deleted = Url::from_file_path(tmp.path().join("Deleted.m1scr")).unwrap();
+
+        // Seed caches as a workspace scan would: one entry per project file.
+        backend
+            .diag_prev
+            .insert(kept.clone(), ("1".to_owned(), vec![]));
+        backend
+            .diag_prev
+            .insert(deleted.clone(), ("2".to_owned(), vec![]));
+        backend
+            .semtok_prev
+            .insert(deleted.clone(), ("3".to_owned(), vec![]));
+
+        // The watcher reports the script deletion.
+        backend
+            .did_change_watched_files(DidChangeWatchedFilesParams {
+                changes: vec![FileEvent {
+                    uri: deleted.clone(),
+                    typ: FileChangeType::DELETED,
+                }],
+            })
+            .await;
+
+        assert!(
+            !backend.diag_prev.contains_key(&deleted),
+            "deleted file's diag_prev entry must be swept"
+        );
+        assert!(
+            !backend.semtok_prev.contains_key(&deleted),
+            "deleted file's semtok_prev entry must be swept"
+        );
+        assert!(
+            backend.diag_prev.contains_key(&kept),
+            "an on-disk file's entry survives the sweep"
+        );
     }
 }
 

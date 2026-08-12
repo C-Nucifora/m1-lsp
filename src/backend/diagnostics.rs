@@ -108,8 +108,10 @@ impl Backend {
         // the syntax pass instead of re-parsing every keystroke; closed files (the
         // pull path's coverage) are read from disk and parsed fresh.
         let (text, lindex, warm_cst) = match self.docs.get(uri) {
+            // Share the index's buffer instead of cloning the String — the
+            // index was built from exactly this text (#344).
             Some(doc) => (
-                doc.text.clone(),
+                doc.line_index.shared_text(),
                 doc.line_index.clone(),
                 Some(doc.cst.clone()),
             ),
@@ -117,7 +119,7 @@ impl Backend {
                 let path = uri.to_file_path().ok()?;
                 let text = crate::disk_read::read_disk(&path)?;
                 let li = crate::line_index::LineIndex::new(&text);
-                (text, li, None)
+                (li.shared_text(), li, None)
             }
         };
         let enc = self.enc();

@@ -13,18 +13,32 @@ use tower_lsp::lsp_types::Position;
 pub use m1_workspace::PositionEncoding;
 
 /// Byte offsets of each line start in a document, plus the text itself.
+///
+/// The text is held as an `Arc<str>` (#344): construction copies the document
+/// once, but every clone after that — `doc_context` clones the index per
+/// request, `diagnostics_for` clones it per pass — is a pointer bump instead
+/// of a full-buffer copy, and [`Self::shared_text`] lets those same callers
+/// share the text itself rather than cloning the `String` alongside.
 #[derive(Clone)]
 pub struct LineIndex {
     inner: m1_workspace::LineIndex,
-    text: String,
+    text: std::sync::Arc<str>,
 }
 
 impl LineIndex {
     pub fn new(text: &str) -> Self {
         Self {
             inner: m1_workspace::LineIndex::new(text),
-            text: text.to_string(),
+            text: std::sync::Arc::from(text),
         }
+    }
+
+    /// The indexed document text, shared — a pointer clone, not a copy. The
+    /// text a `LineIndex` was built from is exactly the text its positions
+    /// resolve against, so callers that carry (text + index) pairs can hold
+    /// this instead of a second `String` copy of the buffer (#344).
+    pub fn shared_text(&self) -> std::sync::Arc<str> {
+        self.text.clone()
     }
 
     pub fn position(&self, byte: usize, enc: PositionEncoding) -> Position {

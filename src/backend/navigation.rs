@@ -173,10 +173,7 @@ impl Backend {
         } else {
             None
         };
-        let text = doc
-            .as_ref()
-            .map(|d| d.text.as_str())
-            .or(disk_text.as_deref());
+        let text = doc.as_ref().map(|d| &*d.text).or(disk_text.as_deref());
         let cst = doc.as_ref().map(|d| d.cst.as_ref());
         Ok(self
             .store
