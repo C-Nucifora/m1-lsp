@@ -224,7 +224,19 @@ fn collect_locals_with(
     // Iterate the tree with m1-core's explicit work-stack pre-order iterator
     // rather than recursion, so a pathologically deep document can't overflow the
     // call stack (#133). Same pre-order visit, same result.
-    let mut locals = HashMap::new();
+    //
+    // One Scope accumulates the locals across the whole walk: each declaration
+    // types its initializer against the locals inserted so far (the same
+    // declaration-order threading as before), then adds itself. Building a
+    // fresh Scope per declaration — with `locals.clone()` — made this O(L²)
+    // in map-entry clones per call, on the scope-build path every semantic
+    // token / hover / completion request takes (#342).
+    let mut scope = Scope {
+        locals: HashMap::new(),
+        group: group.map(str::to_string),
+        project,
+        fn_symbol: None,
+    };
     for n in root.descendants() {
         if n.kind() == Kind::LocalDeclaration
             && let Some(name) = n
@@ -232,17 +244,11 @@ fn collect_locals_with(
                 .into_iter()
                 .find(|c| c.kind() == Kind::Identifier)
         {
-            let scope = Scope {
-                locals: locals.clone(),
-                group: group.map(str::to_string),
-                project,
-                fn_symbol: None,
-            };
             let t = local_decl_type(n, &scope);
-            locals.insert(name.text().to_string(), t);
+            scope.locals.insert(name.text().to_string(), t);
         }
     }
-    locals
+    scope.locals
 }
 
 /// Collect locals (name -> inferred type) from the CST, mirroring m1-typecheck.
