@@ -17,6 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 tower-lsp = "0.20"
+tower-service = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros"] }
 dashmap = "6"
 serde = { version = "1", features = ["derive"] }

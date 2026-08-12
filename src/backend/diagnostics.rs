@@ -181,17 +181,33 @@ impl Backend {
     /// computed from the project model, so they go stale on `.m1prj`/config
     /// reload until the client refreshes them. Each refresh is gated on the
     /// capability the client declared at initialize.
-    pub(super) async fn refresh_project_views(&self) {
+    ///
+    /// The refreshes are requests (the client acknowledges each), but their
+    /// replies carry nothing — so they run on a detached task rather than
+    /// being awaited in the calling handler. Awaiting a client round-trip
+    /// inside a notification handler pins one of the serve window's
+    /// concurrency slots for the round-trip's duration, and a client that
+    /// never answers would pin it forever (#336).
+    pub(super) fn refresh_project_views(&self) {
         use std::sync::atomic::Ordering::Relaxed;
-        if self.inlay_refresh_support.load(Relaxed) {
-            let _ = self.client.inlay_hint_refresh().await;
+        let inlay = self.inlay_refresh_support.load(Relaxed);
+        let semtok = self.semtok_refresh_support.load(Relaxed);
+        let lens = self.code_lens_refresh_support.load(Relaxed);
+        if !(inlay || semtok || lens) {
+            return;
         }
-        if self.semtok_refresh_support.load(Relaxed) {
-            let _ = self.client.semantic_tokens_refresh().await;
-        }
-        if self.code_lens_refresh_support.load(Relaxed) {
-            let _ = self.client.code_lens_refresh().await;
-        }
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            if inlay {
+                let _ = client.inlay_hint_refresh().await;
+            }
+            if semtok {
+                let _ = client.semantic_tokens_refresh().await;
+            }
+            if lens {
+                let _ = client.code_lens_refresh().await;
+            }
+        });
     }
 
     /// Publish the project-scope diagnostics (the `.m1cfg`-coverage / name
@@ -203,17 +219,21 @@ impl Backend {
     pub(super) async fn publish_project_diagnostics(&self) {
         // Every caller of this function has just (re)loaded the project model,
         // so the project-derived views need a refresh too (#232).
-        self.refresh_project_views().await;
+        self.refresh_project_views();
 
         // Pull-capable clients receive project-scope diagnostics via
         // `workspace/diagnostic`; after a project-model change (reload, `.m1prj`
         // or config edit) nudge them to re-pull instead of pushing — pushing here
-        // too would duplicate diagnostics in VS Code (#NNN).
+        // too would duplicate diagnostics in VS Code (#NNN). Detached for the
+        // same reason as `refresh_project_views` (#336).
         if self
             .client_pull_diagnostics
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            let _ = self.client.workspace_diagnostic_refresh().await;
+            let client = self.client.clone();
+            tokio::spawn(async move {
+                let _ = client.workspace_diagnostic_refresh().await;
+            });
             return;
         }
         let Some(prj_path) = self

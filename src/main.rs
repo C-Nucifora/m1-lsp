@@ -70,5 +70,10 @@ async fn main() {
             store.clone(),
         )
     });
-    Server::new(norm_rx, stdout, socket).serve(service).await;
+    // Handlers run as their own tasks and the serve window gets real headroom,
+    // so a blocking scan in one request can't stall the serve loop (#336).
+    Server::new(norm_rx, stdout, socket)
+        .concurrency_level(m1_lsp::concurrency::CONCURRENCY_LEVEL)
+        .serve(m1_lsp::concurrency::SpawnHandlers::new(service))
+        .await;
 }
