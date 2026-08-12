@@ -68,7 +68,9 @@ fn object_markdown(sym: &Symbol) -> Option<String> {
     if let Some(can) = &sym.can
         && let (Some(id), Some(dlc)) = (can.can_id, can.dlc)
     {
-        s.push_str(&format!("\n\nCAN id: `0x{id:X}`  ·  `{dlc}` bytes"));
+        // `IdType="Extended"` marks a 29-bit id; say so next to the hex id.
+        let ext = if can.extended { " (extended)" } else { "" };
+        s.push_str(&format!("\n\nCAN id: `0x{id:X}`{ext}  ·  `{dlc}` bytes"));
     }
     Some(s)
 }
@@ -492,6 +494,27 @@ mod tests {
         assert!(md.contains("output: `N.m`"), "got: {md}");
     }
 
+    // A CAN message object's hover shows the frame id (hex, as `.m1dbc` files
+    // and CAN tooling spell it) and flags a 29-bit `IdType="Extended"` id.
+    #[test]
+    fn hover_marks_an_extended_can_id() {
+        use m1_typecheck::symbols::CanMeta;
+        let sym = Symbol {
+            path: "Steering DBC.Status".into(),
+            kind: SymbolKind::Object,
+            classname: Some("BuiltIn.CAN.Message".into()),
+            can: Some(CanMeta {
+                can_id: Some(0x2968),
+                dlc: Some(8),
+                extended: true,
+                ..CanMeta::default()
+            }),
+            ..Symbol::default()
+        };
+        let md = symbol_markdown(&sym, None);
+        assert!(md.contains("CAN id: `0x2968` (extended)"), "got: {md}");
+    }
+
     #[test]
     fn hover_shows_dbc_signal_layout() {
         use m1_typecheck::symbols::CanMeta;
@@ -513,13 +536,11 @@ mod tests {
             def_line: None,
             dbc_range: Some((-51.2, 51.1)),
             can: Some(CanMeta {
-                can_id: None,
-                dlc: None,
-                transmit: None,
                 start_bit: Some(10),
                 length: Some(10),
                 multiplier: Some(0.1),
                 offset: Some(0.0),
+                ..CanMeta::default()
             }),
             call_rate_hz: None,
             scheduled: false,
@@ -561,7 +582,7 @@ mod tests {
   <Props CANId="291" DLC="8"/>
  </Component>
  <Component Classname="BuiltIn.CAN.Signal" Name="Bus.BMS Status.Battery Voltage">
-  <Props Type="u32" Qty="V" StartBit="16" Length="16" Multiplier="0.01" Offset="0.0"/>
+  <Props Type="u32" Qty="V" StartBit="10" Length="10" Multiplier="0.01" Offset="0.0"/>
  </Component>
 </List></ComponentStream></DBC>"#,
             )
@@ -573,8 +594,9 @@ mod tests {
         let key = "Bus.BMS Status.Battery Voltage";
         let sig = project.symbols().get(key).unwrap();
         let md = symbol_markdown(sig, Some(&project));
+        // `.m1dbc` attributes are hex: CANId "291" is 0x291, StartBit "10" is 16.
         assert!(
-            md.contains("Message: `BMS Status` (0x123, 8 bytes)"),
+            md.contains("Message: `BMS Status` (0x291, 8 bytes)"),
             "got: {md}"
         );
         assert!(md.contains("Scale: `0.01`"), "got: {md}");
