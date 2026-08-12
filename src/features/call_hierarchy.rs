@@ -76,11 +76,12 @@ pub(crate) fn backing_file(sym: &Symbol) -> String {
 }
 
 /// The Function/Method symbol backing a given script file, if any — the source of
-/// the script's call rate and group label.
+/// the script's call rate and group label. A hash lookup via the index built at
+/// project load (#343); the old whole-table scan formatted a conventional
+/// basename per symbol per call.
 pub(crate) fn script_symbol<'a>(loaded: &'a LoadedProject, file_name: &str) -> Option<&'a Symbol> {
-    loaded.project.symbols().iter().find(|s| {
-        matches!(s.kind, SymbolKind::Function | SymbolKind::Method) && backing_file(s) == file_name
-    })
+    let path = loaded.script_symbols.get(file_name)?;
+    loaded.project.symbols().get(path)
 }
 
 /// Resolve a path reference (as written in a script — possibly group-relative)

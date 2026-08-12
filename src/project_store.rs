@@ -4,7 +4,7 @@ use crate::eval::config::EvalConfig;
 use crate::eval::engine::{EvalOutcome, Provenance};
 use crate::features::call_hierarchy::CallGraph;
 use m1_typecheck::Project;
-use m1_typecheck::symbols::Symbol;
+use m1_typecheck::symbols::{Symbol, SymbolKind};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,6 +21,13 @@ pub struct LoadedProject {
     pub dbc_paths: Vec<PathBuf>,
     /// Every `*.m1scr` under the root, found once at load (see `walk_scripts`).
     pub script_files: Vec<PathBuf>,
+    /// Backing-file basename → Function/Method symbol path, computed once at
+    /// load (#343). `script_symbol` used to scan the whole symbol table —
+    /// formatting a conventional basename per symbol — on every code-lens
+    /// request and once per script inside a call-graph build; this makes it a
+    /// hash lookup. First match wins on a (conventionally impossible)
+    /// basename collision, mirroring the old scan's iteration order.
+    pub script_symbols: std::collections::HashMap<String, String>,
 }
 
 impl LoadedProject {
@@ -119,6 +126,22 @@ pub(crate) fn contained_join(root: &Path, filename: &str) -> Option<PathBuf> {
 /// symlink-skip, depth cap — the m1-workspace#7 guarantees — #256).
 fn walk_scripts(root: &Path) -> Vec<PathBuf> {
     m1_workspace::find_scripts(root)
+}
+
+/// Basename → symbol-path index for the Function/Method symbols that back
+/// scripts (see [`LoadedProject::script_symbols`], #343). Built after the
+/// project model is final (post-augment, post-inference); `or_insert` keeps
+/// the first match, mirroring the scan it replaces.
+fn script_symbol_index(project: &Project) -> std::collections::HashMap<String, String> {
+    let mut index = std::collections::HashMap::new();
+    for s in project.symbols().iter() {
+        if matches!(s.kind, SymbolKind::Function | SymbolKind::Method) {
+            index
+                .entry(crate::features::call_hierarchy::backing_file(s))
+                .or_insert_with(|| s.path.clone());
+        }
+    }
+    index
 }
 
 /// Read each cached script path into a `(basename, source)` pair for the
@@ -738,6 +761,7 @@ impl ProjectStore {
                 // by a reload when the project model changes.
                 let scripts = scripts_from_disk(&script_files);
                 project.infer_return_types(&m1_typecheck::parsed::parse_all(&scripts));
+                let script_symbols = script_symbol_index(&project);
                 *self.inner.write().unwrap() = Some(Arc::new(LoadedProject {
                     project,
                     root,
@@ -745,6 +769,7 @@ impl ProjectStore {
                     m1cfg_path,
                     dbc_paths,
                     script_files,
+                    script_symbols,
                 }));
                 self.bump_generation();
                 self.invalidate_call_graph();
@@ -790,6 +815,7 @@ impl ProjectStore {
         // Re-infer return types against the refreshed model (as at load, #110).
         let scripts = scripts_from_disk(&script_files);
         project.infer_return_types(&m1_typecheck::parsed::parse_all(&scripts));
+        let script_symbols = script_symbol_index(&project);
         *self.inner.write().unwrap() = Some(Arc::new(LoadedProject {
             project,
             root,
@@ -797,6 +823,7 @@ impl ProjectStore {
             m1cfg_path,
             dbc_paths,
             script_files,
+            script_symbols,
         }));
         self.bump_generation();
         self.invalidate_call_graph();
