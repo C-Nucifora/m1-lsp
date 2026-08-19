@@ -259,6 +259,7 @@ fn offline_scenario(lp: &LoadedProject) -> Scenario {
     Scenario {
         mode: RunMode::WholeProject,
         inputs: Vec::new(),
+        io: Vec::new(),
         duration_s: offline_duration_s(slowest),
         // Auto (0.0): the evaluator derives the exact lcm grid of the declared
         // rates. A project with NO periodic rate has nothing to derive from
