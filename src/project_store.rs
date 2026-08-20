@@ -986,18 +986,19 @@ mod tests {
     }
 
     #[test]
-    fn tag_and_usage_audits_are_default_on() {
-        // The M1-Build-parity checks now run by default (matching the CLI and a
-        // *Validate Project* run): an untagged channel flags T092 in both tag
-        // groups, and a channel no script assigns flags T093 — all without any
-        // `select` opt-in. Only T089 (rate-inversion, which M1 Build does not
-        // emit) stays gated on the `rate_inversion` flag.
+    fn calibrated_tag_and_usage_audits_are_default_on() {
+        // Project audits run by default: calibrated T092 accepts ordinary
+        // untagged channels but still flags untagged project tables, while
+        // T093 flags a channel no script assigns.
+        // Only T089 (rate inversion, which M1 Build does not emit) stays gated
+        // on the `rate_inversion` flag.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
             tmp.path().join("Project.m1prj"),
             "<?xml version=\"1.0\"?>\n<Project>\n\
              <Component Classname=\"BuiltIn.GroupCompound\" Name=\"Root.A\"/>\n\
              <Component Classname=\"BuiltIn.Channel\" Name=\"Root.A.Chan\"><Props Type=\"u32\"/></Component>\n\
+             <Component Classname=\"BuiltIn.Table\" Name=\"Root.A.Map\"><Props/></Component>\n\
              </Project>",
         )
         .unwrap();
@@ -1008,9 +1009,10 @@ mod tests {
             v.iter().filter(|d| d.code == code).count()
         };
         let diags = store.project_diagnostics();
-        assert!(
-            count(&diags, m1_typecheck::diagnostics::TypeCode::T092) >= 2,
-            "default-on: the untagged channel flags both tag groups; got {diags:?}"
+        assert_eq!(
+            count(&diags, m1_typecheck::diagnostics::TypeCode::T092),
+            1,
+            "default-on calibrated T092 flags only the untagged table; got {diags:?}"
         );
         assert_eq!(
             count(&diags, m1_typecheck::diagnostics::TypeCode::T093),
