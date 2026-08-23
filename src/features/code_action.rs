@@ -1437,7 +1437,7 @@ mod tests {
         let backend = crate::lint_backend::M1Lint::new();
         let src = "x = a == b;\n";
         let li = LineIndex::new(src);
-        let diags = backend.lint(src, &li, ENC);
+        let diags = backend.lint(&uri(), src, &li, ENC);
         let d = diags
             .iter()
             .find(|d| suppress_code(d) == Some("L004"))
@@ -1447,7 +1447,7 @@ mod tests {
         let edits = action_edits(&actions, "Suppress L004 for this statement").unwrap();
         let fixed = apply(src, &edits, &li);
         let li2 = LineIndex::new(&fixed);
-        let after = backend.lint(&fixed, &li2, ENC);
+        let after = backend.lint(&uri(), &fixed, &li2, ENC);
         assert!(
             !after.iter().any(|d| suppress_code(d) == Some("L004")),
             "L004 still present after suppression:\n{fixed}"

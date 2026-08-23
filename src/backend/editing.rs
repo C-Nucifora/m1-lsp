@@ -339,7 +339,7 @@ impl Backend {
         // Whole-file "fix all auto-fixable lint issues" via the shared m1-lint
         // fixer — covers every fixable rule (L003/L007/L011/L018…), not just the
         // hand-ported few (#158).
-        if let Some(fixed) = self.lint.fix(&text)
+        if let Some(fixed) = self.lint.fix(&uri, &text)
             && fixed != text
         {
             actions.push(code_action::fix_all_lint_action(
