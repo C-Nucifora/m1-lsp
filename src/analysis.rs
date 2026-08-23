@@ -34,7 +34,7 @@ fn unsupported_c_tokens(
 
 /// Source of lint diagnostics (v1).
 pub trait LintProvider: Send + Sync {
-    fn lint(&self, src: &str, li: &LineIndex, enc: PositionEncoding) -> Vec<LspDiag>;
+    fn lint(&self, uri: &Url, src: &str, li: &LineIndex, enc: PositionEncoding) -> Vec<LspDiag>;
 
     /// Re-resolve lint configuration by discovering a `.m1lint.toml` from `root`
     /// (and the user-global fallback). Called on `initialize` and whenever a
@@ -44,12 +44,12 @@ pub trait LintProvider: Send + Sync {
     /// Apply a lint config resolved by the unified `m1-tools.toml` layer. Default:
     /// no-op (providers without config). Supersedes `reload_config`'s own
     /// discovery when the backend drives configuration centrally.
-    fn set_lint_config(&self, _cfg: &m1_lint::config::Config) {}
+    fn set_lint_config(&self, _cfg: &m1_lint::config::Config, _root: &std::path::Path) {}
 
     /// Apply every enabled auto-fixable rule to `src`, returning the fully-fixed
     /// source — or `None` when there is nothing to fix. Backs the editor
     /// "fix all auto-fixable lint issues" action (#158). Default: `None`.
-    fn fix(&self, _src: &str) -> Option<String> {
+    fn fix(&self, _uri: &Url, _src: &str) -> Option<String> {
         None
     }
 }
@@ -57,7 +57,13 @@ pub trait LintProvider: Send + Sync {
 /// A no-op lint provider (syntax diagnostics only).
 pub struct NoLint;
 impl LintProvider for NoLint {
-    fn lint(&self, _src: &str, _li: &LineIndex, _enc: PositionEncoding) -> Vec<LspDiag> {
+    fn lint(
+        &self,
+        _uri: &Url,
+        _src: &str,
+        _li: &LineIndex,
+        _enc: PositionEncoding,
+    ) -> Vec<LspDiag> {
         Vec::new()
     }
 }
@@ -133,7 +139,7 @@ pub fn analyze_with_cst(
         .collect();
     out.extend(unsupported_c_tokens(cst.root(), li, enc));
 
-    let mut lint_diags = lint.lint(src, li, enc);
+    let mut lint_diags = lint.lint(uri, src, li, enc);
     // When a project is loaded, m1-typecheck's T002 supersedes m1-lint's L006
     // float-equality heuristic; drop L006 to avoid double-reporting.
     if types.project_loaded() {
@@ -142,10 +148,18 @@ pub fn analyze_with_cst(
     out.extend(lint_diags);
     out.extend(types.types(uri, src, li, enc));
 
-    // Unified cross-source filter (m1-tools.toml `[diagnostics]`): drop ignored
-    // codes / keep only selected ones, across every source above.
+    // Unified cross-source filter (m1-tools.toml `[diagnostics]`): lint codes
+    // have already been projected into m1-lint's registry, then overlaid by the
+    // higher-precedence `.m1lint.toml`. Do not filter them a second time here or
+    // the lower unified layer would incorrectly win over the tool-specific file.
+    // Core/intrinsic/type diagnostics still use this shared post-filter.
     if !filter.is_empty() {
         out.retain(|d| match &d.code {
+            Some(NumberOrString::String(c))
+                if m1_lint::diagnostic::LintCode::from_code_str(c).is_some() =>
+            {
+                true
+            }
             Some(NumberOrString::String(c)) => filter.allows(c),
             Some(NumberOrString::Number(n)) => filter.allows(&n.to_string()),
             None => true,
@@ -197,7 +211,13 @@ mod tests {
 
     struct L006Only;
     impl LintProvider for L006Only {
-        fn lint(&self, _s: &str, _li: &LineIndex, _e: PositionEncoding) -> Vec<LspDiag> {
+        fn lint(
+            &self,
+            _uri: &Url,
+            _s: &str,
+            _li: &LineIndex,
+            _e: PositionEncoding,
+        ) -> Vec<LspDiag> {
             vec![
                 LspDiag {
                     code: Some(NumberOrString::String("L006".into())),
@@ -296,28 +316,68 @@ mod tests {
 
     #[test]
     fn unified_filter_drops_ignored_codes_across_sources() {
-        // The filter applies to every source: it drops an ignored lint L-code and
-        // an ignored intrinsic check, regardless of which backend produced them.
-        let src = "x = a == b and c;\n"; // emits an unsupported-c-token for `==`
+        // The lint registry owns L-code filtering while the shared post-filter
+        // owns intrinsic/type codes. Together they enforce one unified config.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("m1-tools.toml"),
+            "[diagnostics]\nignore = [\"unsupported-c-token\", \"L004\"]\n",
+        )
+        .unwrap();
+        let cfg = crate::config::M1Config::resolve(None, tmp.path());
+        let lint = crate::lint_backend::M1Lint::new();
+        lint.set_lint_config(&cfg.lint, tmp.path());
+
+        let src = "x = 1.0 == y;\n";
         let li = LineIndex::new(src);
-        let mut filter = DiagFilter::default();
-        filter.ignore.insert("unsupported-c-token".into());
-        filter.ignore.insert("L004".into());
         let diags = analyze(
             &uri(),
             src,
             &li,
             PositionEncoding::Utf16,
-            &L006Only, // emits L006 + L004
+            &lint,
             &NoTypes,
-            &filter,
+            &cfg.diagnostics,
         );
         assert!(
             !diags.iter().any(|d| matches!(&d.code,
                 Some(NumberOrString::String(c)) if c == "unsupported-c-token" || c == "L004")),
             "ignored codes from any source must be dropped: {diags:?}"
         );
-        // A non-ignored code (L006, no project) survives.
         assert!(diags.iter().any(is_l006), "non-ignored L006 must survive");
+    }
+
+    #[test]
+    fn tool_specific_lint_filter_overrides_the_unified_filter() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("m1-tools.toml"),
+            "[diagnostics]\nignore = [\"L004\"]\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join(".m1lint.toml"), "select = [\"L004\"]\n").unwrap();
+
+        let cfg = crate::config::M1Config::resolve(None, tmp.path());
+        let lint = crate::lint_backend::M1Lint::new();
+        lint.set_lint_config(&cfg.lint, tmp.path());
+        let src = "x = a == b;\n";
+        let li = LineIndex::new(src);
+        let diags = analyze(
+            &uri(),
+            src,
+            &li,
+            PositionEncoding::Utf16,
+            &lint,
+            &NoTypes,
+            &cfg.diagnostics,
+        );
+
+        assert!(
+            diags.iter().any(|d| matches!(
+                &d.code,
+                Some(NumberOrString::String(code)) if code == "L004"
+            )),
+            "the higher-precedence .m1lint.toml selection must re-enable L004: {diags:?}"
+        );
     }
 }

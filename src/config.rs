@@ -7,8 +7,8 @@
 //!
 //! Precedence (low → high): tool defaults → editor settings (sent as
 //! `initializationOptions` / `didChangeConfiguration`, same shape as the toml) →
-//! `m1-tools.toml` discovered in the workspace. A legacy `.m1lint.toml` still
-//! drives the lint section when no `m1-tools.toml` is present.
+//! `m1-tools.toml` discovered in the workspace → tool-specific files. A legacy
+//! `.m1lint.toml` therefore overlays the unified lint section when present.
 use m1_fmt::FormatOptions;
 use m1_lint::config::Config as LintConfig;
 use m1_workspace::config::M1ToolsConfig;
@@ -70,8 +70,8 @@ impl M1Config {
     /// `editor` settings (JSON, same shape as the toml) over the defaults, the
     /// workspace `m1-tools.toml` over both, and the tool-specific files over
     /// the unified file — mirroring the CLI's relative order (#268):
-    /// `.m1fmt.toml` overlays the format section; with no `m1-tools.toml`, a
-    /// legacy `.m1lint.toml` still takes over the lint section (back-compat).
+    /// `.m1fmt.toml` overlays the format section and a legacy `.m1lint.toml`
+    /// overlays the lint section (back-compat).
     pub fn resolve(editor: Option<&serde_json::Value>, root: &Path) -> M1Config {
         Self::resolve_with_issues(editor, root).0
     }
@@ -89,8 +89,15 @@ impl M1Config {
         let mut issues = Vec::new();
         let mut cfg = M1Config::default();
         if let Some(v) = editor {
-            match serde_json::from_value::<M1ToolsConfig>(v.clone()) {
-                Ok(tc) => apply(tc, &mut cfg, &mut issues),
+            match parse_editor_config(v) {
+                Ok((tc, unknown_keys)) => {
+                    for key in unknown_keys {
+                        issues.push(format!(
+                            "editor settings: unknown key `{key}` (typo? the tool default stays in effect)"
+                        ));
+                    }
+                    apply_validated(tc, "editor settings", &mut cfg, &mut issues);
+                }
                 Err(e) => issues.push(format!("editor settings ignored (invalid shape): {e}")),
             }
         }
@@ -102,7 +109,8 @@ impl M1Config {
                         found.path.display()
                     ));
                 }
-                apply(found.config, &mut cfg, &mut issues);
+                let source = found.path.display().to_string();
+                apply_validated(found.config, &source, &mut cfg, &mut issues);
             }
             Ok(None) => {}
             Err(e) => issues.push(format!("{e} — falling back to the layers below it")),
@@ -124,8 +132,48 @@ impl M1Config {
         if let Some(fc) = m1_fmt::config::discover(root) {
             apply_fmt_file(fc, &mut cfg.format);
         }
+        cfg.format.indent_width = cfg
+            .format
+            .indent_width
+            .min(m1_fmt::config::MAX_INDENT_WIDTH);
+        cfg.format.continuation_indent = cfg
+            .format
+            .continuation_indent
+            .min(m1_fmt::config::MAX_INDENT_WIDTH);
         (cfg, issues)
     }
+}
+
+/// Parse the tool-owned editor settings while retaining unknown-key paths.
+/// `eval` belongs to the LSP-local evaluator and is validated separately.
+fn parse_editor_config(
+    editor: &serde_json::Value,
+) -> Result<(M1ToolsConfig, Vec<String>), serde_json::Error> {
+    let mut tools = editor.clone();
+    if let Some(object) = tools.as_object_mut() {
+        object.remove("eval");
+    }
+    let json = serde_json::to_string(&tools)?;
+    let mut deserializer = serde_json::Deserializer::from_str(&json);
+    let mut unknown_keys = Vec::new();
+    let config = serde_ignored::deserialize(&mut deserializer, |path| {
+        unknown_keys.push(path.to_string())
+    })?;
+    Ok((config, unknown_keys))
+}
+
+/// Reject an invalid configuration layer as a unit, preserving every lower
+/// precedence layer and reporting all validation failures to the client.
+fn apply_validated(tc: M1ToolsConfig, source: &str, cfg: &mut M1Config, issues: &mut Vec<String>) {
+    if let Err(errors) = tc.validate() {
+        issues.extend(
+            errors
+                .into_iter()
+                .map(|e| format!("{source}: invalid configuration: {e}")),
+        );
+        return;
+    }
+    apply(tc, cfg, issues);
 }
 
 /// Overlay a `.m1fmt.toml` (already parsed by m1-fmt's own discovery) onto the
@@ -166,21 +214,58 @@ fn apply_fmt_file(fc: m1_fmt::config::FileConfig, fmt: &mut FormatOptions) {
 /// `[diagnostics.severity]` entry naming an unknown code or level, #278) are
 /// pushed onto `issues` for `window/logMessage`.
 fn apply(tc: M1ToolsConfig, cfg: &mut M1Config, issues: &mut Vec<String>) {
-    if let Some(n) = tc.lint.max_line_length {
-        cfg.lint.max_line_length = n;
+    // Let m1-lint own the mapping of every lint-facing field so a new shared
+    // style/threshold knob cannot silently stop at the LSP boundary again.
+    // The unified diagnostic filter is cross-tool, so project only L-codes into
+    // the lint-specific loader; an all-T select deliberately becomes an empty
+    // lint selection. Severity is applied separately below because typecheck
+    // severities are fixed and the lint helper rejects non-L codes.
+    let lint_codes = |codes: &Option<Vec<String>>, issues: &mut Vec<String>| {
+        codes.as_ref().map(|codes| {
+            codes
+                .iter()
+                .filter_map(|code| {
+                    if !code.starts_with('L') {
+                        return None;
+                    }
+                    if m1_lint::diagnostic::LintCode::from_code_str(code).is_some() {
+                        Some(code.clone())
+                    } else {
+                        issues.push(format!(
+                            "[diagnostics] unknown lint code {code:?} for this m1-lsp version"
+                        ));
+                        None
+                    }
+                })
+                .collect()
+        })
+    };
+    let mut lint_tc = tc.clone();
+    lint_tc.diagnostics.select = lint_codes(&tc.diagnostics.select, issues);
+    lint_tc.diagnostics.ignore = lint_codes(&tc.diagnostics.ignore, issues);
+    lint_tc.diagnostics.severity = None;
+    if let Some(style) = lint_tc.format.indent_style.as_deref()
+        && m1_lint::config::IndentStyle::parse(style).is_none()
+    {
+        issues.push(format!(
+            "[format] invalid indent_style {style:?}; that field was ignored"
+        ));
+        lint_tc.format.indent_style = None;
     }
-    if let Some(n) = tc.lint.max_nesting_depth {
-        cfg.lint.max_nesting_depth = n;
+    if let Some(style) = lint_tc.format.brace_style.as_deref()
+        && m1_lint::config::BraceStyle::parse(style).is_none()
+    {
+        issues.push(format!(
+            "[format] invalid brace_style {style:?}; that field was ignored"
+        ));
+        lint_tc.format.brace_style = None;
     }
-    if let Some(n) = tc.lint.max_complexity {
-        cfg.lint.max_complexity = n;
+    let mut lint = cfg.lint.clone();
+    match lint.apply_tools_config(&lint_tc) {
+        Ok(()) => cfg.lint = lint,
+        Err(e) => issues.push(format!("lint settings ignored: {e}")),
     }
-    if let Some(n) = tc.lint.max_cognitive_complexity {
-        cfg.lint.max_cognitive_complexity = n;
-    }
-    if let Some(ex) = tc.lint.exclude {
-        cfg.lint.exclude = ex;
-    }
+
     if let Some(n) = tc.format.line_width {
         cfg.format.line_width = n;
     }
@@ -190,13 +275,10 @@ fn apply(tc: M1ToolsConfig, cfg: &mut M1Config, issues: &mut Vec<String>) {
     if let Some(n) = tc.format.indent_width {
         cfg.format.indent_width = n;
     }
-    if let Some(s) = tc.format.indent_style.as_deref() {
-        if let Some(fs) = m1_fmt::config::parse_indent_style(s) {
-            cfg.format.indent_style = fs;
-        }
-        if let Some(ls) = m1_lint::config::IndentStyle::parse(s) {
-            cfg.lint.indent_style = ls;
-        }
+    if let Some(s) = tc.format.indent_style.as_deref()
+        && let Some(fs) = m1_fmt::config::parse_indent_style(s)
+    {
+        cfg.format.indent_style = fs;
     }
     if let Some(s) = tc
         .format
@@ -242,12 +324,12 @@ fn apply(tc: M1ToolsConfig, cfg: &mut M1Config, issues: &mut Vec<String>) {
     // but only lint codes are reclassifiable here, so an entry the lint layer
     // can't take (e.g. a typecheck T-code) surfaces as an issue rather than
     // silently vanishing.
-    if let Some(sev) = &tc.diagnostics.severity
-        && let Err(e) = cfg
-            .lint
-            .apply_severity_overrides(sev.iter().map(|(c, l)| (c.as_str(), l.as_str())))
-    {
-        issues.push(format!("[diagnostics.severity] ignored: {e}"));
+    if let Some(sev) = &tc.diagnostics.severity {
+        let mut lint = cfg.lint.clone();
+        match lint.apply_severity_overrides(sev.iter().map(|(c, l)| (c.as_str(), l.as_str()))) {
+            Ok(()) => cfg.lint = lint,
+            Err(e) => issues.push(format!("[diagnostics.severity] ignored: {e}")),
+        }
     }
 }
 
@@ -317,13 +399,18 @@ pub fn scaffold() -> String {
         "final_blank_line = {}   # end the file with one blank line (pairs with L027)",
         fmt.final_blank_line
     );
+    s.push_str("exclude = []            # globs skipped by directory formatting\n");
     s.push('\n');
 
     s.push_str("[diagnostics]\n");
     s.push_str("# Disable any diagnostic from any tool, or restrict to a subset.\n");
     s.push_str("# Accepts any code listed below (lint L*, typecheck T*).\n");
     s.push_str("ignore = []             # disable these codes\n");
-    s.push_str("select = []             # if non-empty, run ONLY these codes\n\n");
+    s.push_str("select = []             # if non-empty, run ONLY these codes\n");
+    s.push_str("ignore_symbols = []     # e.g. \"T050:Root.Engine.Speed\"\n\n");
+
+    s.push_str("[diagnostics.severity]\n");
+    s.push_str("# L010 = \"error\"       # error | warning | info | hint\n\n");
 
     s.push_str("# Lint rules (m1-lint):\n");
     for code in LintCode::all_codes() {
@@ -387,6 +474,13 @@ mod tests {
         for c in TypeCode::all_codes() {
             assert!(toml.contains(c.as_str()), "missing {}", c.as_str());
         }
+        let generated = M1ToolsConfig::from_toml_str(&toml).unwrap();
+        assert_eq!(generated.format.exclude, Some(Vec::new()));
+        assert_eq!(generated.diagnostics.ignore_symbols, Some(Vec::new()));
+        assert_eq!(
+            generated.diagnostics.severity,
+            Some(std::collections::BTreeMap::new())
+        );
         // Re-parsing the generated file yields the defaults (it's just defaults).
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("m1-tools.toml"), &toml).unwrap();
@@ -409,8 +503,63 @@ mod tests {
         assert_eq!(cfg.format.brace_style, m1_fmt::BraceStyle::Kr);
         assert_eq!(cfg.format.indent_style, m1_fmt::IndentStyle::Spaces);
         assert_eq!(cfg.format.indent_width, 2);
-        // The shared indent decision also drives the linter (L010).
+        // Both shared style decisions drive their corresponding lint rules.
         assert_eq!(cfg.lint.indent_style, m1_lint::config::IndentStyle::Spaces);
+        assert_eq!(cfg.lint.brace_style, m1_lint::config::BraceStyle::Kr);
+    }
+
+    #[test]
+    fn unified_diagnostic_filters_configure_the_lint_registry() {
+        use m1_lint::diagnostic::LintCode;
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("m1-tools.toml"),
+            "[diagnostics]\nselect = [\"L004\", \"L017\", \"T064\"]\n\
+             ignore = [\"L004\", \"T041\"]\n",
+        )
+        .unwrap();
+
+        let cfg = M1Config::resolve(None, tmp.path());
+        assert_eq!(cfg.lint.enabled.len(), 1);
+        assert!(cfg.lint.enabled.contains(&LintCode::L017));
+        assert!(!cfg.lint.enabled.contains(&LintCode::L004));
+    }
+
+    #[test]
+    fn unknown_lint_filter_code_is_reported_without_leaving_lints_unfiltered() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("m1-tools.toml"),
+            "[diagnostics]\nselect = [\"L999\"]\n",
+        )
+        .unwrap();
+
+        let (cfg, issues) = M1Config::resolve_with_issues(None, tmp.path());
+        assert!(cfg.lint.enabled.is_empty());
+        assert!(issues.iter().any(|i| i.contains("L999")));
+    }
+
+    #[test]
+    fn invalid_style_does_not_discard_other_lint_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("m1-tools.toml"),
+            "[format]\nbrace_style = \"stroustrup\"\n\
+             [diagnostics]\nselect = [\"L017\"]\n",
+        )
+        .unwrap();
+
+        let (cfg, issues) = M1Config::resolve_with_issues(None, tmp.path());
+        assert_eq!(cfg.format.brace_style, m1_fmt::BraceStyle::Allman);
+        assert_eq!(cfg.lint.brace_style, m1_lint::config::BraceStyle::Allman);
+        assert_eq!(cfg.lint.enabled.len(), 1);
+        assert!(
+            cfg.lint
+                .enabled
+                .contains(&m1_lint::diagnostic::LintCode::L017)
+        );
+        assert!(issues.iter().any(|i| i.contains("stroustrup")));
     }
 
     #[test]
@@ -463,6 +612,23 @@ mod tests {
         assert_eq!(
             cfg.format.line_width, 100,
             "unset tool-file keys fall through"
+        );
+    }
+
+    #[test]
+    fn m1fmt_widths_use_the_formatter_safety_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".m1fmt.toml"),
+            "indent_width = 100\ncontinuation_indent = 200\n",
+        )
+        .unwrap();
+
+        let cfg = M1Config::resolve(None, tmp.path());
+        assert_eq!(cfg.format.indent_width, m1_fmt::config::MAX_INDENT_WIDTH);
+        assert_eq!(
+            cfg.format.continuation_indent,
+            m1_fmt::config::MAX_INDENT_WIDTH
         );
     }
 
@@ -529,6 +695,64 @@ mod tests {
         assert!(
             issues.iter().any(|i| i.contains("severity")),
             "expected a [diagnostics.severity] issue: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_unified_file_values_are_reported_and_not_applied() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("m1-tools.toml"),
+            "[lint]\nmax_nesting_depth = 0\n\
+             [format]\nline_width = 0\n\
+             [diagnostics]\nignore_symbols = [\"T050\"]\n",
+        )
+        .unwrap();
+
+        let (cfg, issues) = M1Config::resolve_with_issues(None, tmp.path());
+        assert_eq!(cfg.lint.max_nesting_depth, 4);
+        assert_eq!(cfg.format.line_width, 88);
+        assert!(cfg.diagnostics.ignore_symbols.is_empty());
+        assert!(issues.iter().any(|i| i.contains("max_nesting_depth")));
+        assert!(issues.iter().any(|i| i.contains("line_width")));
+        assert!(issues.iter().any(|i| i.contains("ignore_symbols")));
+    }
+
+    #[test]
+    fn invalid_editor_values_are_reported_and_not_applied() {
+        let tmp = tempfile::tempdir().unwrap();
+        let editor = serde_json::json!({
+            "format": { "line_width": 0 },
+            "diagnostics": { "select": ["t041"] }
+        });
+
+        let (cfg, issues) = M1Config::resolve_with_issues(Some(&editor), tmp.path());
+        assert_eq!(cfg.format.line_width, 88);
+        assert!(cfg.diagnostics.select.is_empty());
+        assert!(issues.iter().any(|i| i.contains("line_width")));
+        assert!(issues.iter().any(|i| i.contains("t041")));
+    }
+
+    #[test]
+    fn unknown_editor_keys_are_reported_without_rejecting_known_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let editor = serde_json::json!({
+            "lint": { "max_line_length": 100 },
+            "diagnostics": { "selekt": ["L017"] },
+            "eval": { "enabled": true }
+        });
+
+        let (cfg, issues) = M1Config::resolve_with_issues(Some(&editor), tmp.path());
+        assert_eq!(cfg.lint.max_line_length, 100);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("diagnostics.selekt"))
+        );
+        assert!(
+            issues
+                .iter()
+                .all(|issue| !issue.contains("unknown key `eval`"))
         );
     }
 

@@ -503,6 +503,62 @@ async fn pull_diagnostic_reports_findings_for_unopened_script() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn lint_exclude_suppresses_lint_for_a_matching_document() {
+    use tower_lsp::lsp_types::Url;
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("m1-tools.toml"),
+        "[lint]\nexclude = [\"generated/*\"]\n",
+    )
+    .unwrap();
+    let generated = tmp.path().join("generated");
+    std::fs::create_dir(&generated).unwrap();
+    let script = generated.join("Generated.m1scr");
+    std::fs::write(&script, "x=1;\n").unwrap();
+    let root_uri = Url::from_file_path(tmp.path()).unwrap();
+    let script_uri = Url::from_file_path(&script).unwrap();
+
+    let (service, socket) = LspService::new(|client| {
+        m1_lsp::backend::Backend::with_backends(
+            client,
+            Box::new(m1_lsp::lint_backend::M1Lint::new()),
+            Box::new(m1_lsp::analysis::NoTypes),
+            Box::new(m1_lsp::format::NoFormat),
+            std::sync::Arc::new(m1_lsp::project_store::ProjectStore::new()),
+        )
+    });
+    let (mut client, server) = duplex(1 << 16);
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server);
+        Server::new(r, w, socket).serve(service).await;
+    });
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+            "params":{"capabilities":{},"processId":null,"rootUri":root_uri}}),
+    )
+    .await;
+    let _ = read_response(&mut client, 1).await;
+
+    write_msg(
+        &mut client,
+        &json!({"jsonrpc":"2.0","id":2,"method":"textDocument/diagnostic","params":{
+            "textDocument":{"uri":script_uri}}}),
+    )
+    .await;
+    let resp = read_response(&mut client, 2).await;
+    let items = resp["result"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        items.iter().all(|d| d["source"] != json!("m1-lint")),
+        "excluded file must not receive lint diagnostics: {items:?}"
+    );
+}
+
 // #140: `workspace/diagnostic` must aggregate findings across every script in
 // the loaded project, including files that were never opened.
 // Needs the multi-threaded runtime: the handler runs its collection loop under
