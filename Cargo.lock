@@ -656,6 +656,7 @@ dependencies = [
  "m1-typecheck",
  "m1-workspace",
  "serde",
+ "serde_ignored",
  "serde_json",
  "tempfile",
  "tokio",

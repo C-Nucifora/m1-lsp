@@ -510,10 +510,12 @@ async fn lint_exclude_suppresses_lint_for_a_matching_document() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(
         tmp.path().join("m1-tools.toml"),
-        "[lint]\nexclude = [\"*.gen.m1scr\"]\n",
+        "[lint]\nexclude = [\"generated/*\"]\n",
     )
     .unwrap();
-    let script = tmp.path().join("Generated.gen.m1scr");
+    let generated = tmp.path().join("generated");
+    std::fs::create_dir(&generated).unwrap();
+    let script = generated.join("Generated.m1scr");
     std::fs::write(&script, "x=1;\n").unwrap();
     let root_uri = Url::from_file_path(tmp.path()).unwrap();
     let script_uri = Url::from_file_path(&script).unwrap();

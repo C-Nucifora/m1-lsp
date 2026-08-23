@@ -44,7 +44,7 @@ pub trait LintProvider: Send + Sync {
     /// Apply a lint config resolved by the unified `m1-tools.toml` layer. Default:
     /// no-op (providers without config). Supersedes `reload_config`'s own
     /// discovery when the backend drives configuration centrally.
-    fn set_lint_config(&self, _cfg: &m1_lint::config::Config) {}
+    fn set_lint_config(&self, _cfg: &m1_lint::config::Config, _root: &std::path::Path) {}
 
     /// Apply every enabled auto-fixable rule to `src`, returning the fully-fixed
     /// source — or `None` when there is nothing to fix. Backs the editor
@@ -326,7 +326,7 @@ mod tests {
         .unwrap();
         let cfg = crate::config::M1Config::resolve(None, tmp.path());
         let lint = crate::lint_backend::M1Lint::new();
-        lint.set_lint_config(&cfg.lint);
+        lint.set_lint_config(&cfg.lint, tmp.path());
 
         let src = "x = 1.0 == y;\n";
         let li = LineIndex::new(src);
@@ -359,7 +359,7 @@ mod tests {
 
         let cfg = crate::config::M1Config::resolve(None, tmp.path());
         let lint = crate::lint_backend::M1Lint::new();
-        lint.set_lint_config(&cfg.lint);
+        lint.set_lint_config(&cfg.lint, tmp.path());
         let src = "x = a == b;\n";
         let li = LineIndex::new(src);
         let diags = analyze(

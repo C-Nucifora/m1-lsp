@@ -1,5 +1,5 @@
 //! Real lint provider backed by m1-lint.
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use crate::analysis::LintProvider;
@@ -13,20 +13,28 @@ use tower_lsp::lsp_types::{Diagnostic as LspDiag, NumberOrString, Url};
 struct LintState {
     runner: Runner,
     matcher: m1_lint::config::ExcludeMatcher,
+    root: Option<PathBuf>,
 }
 
 impl LintState {
-    fn from_config(cfg: &Config) -> Self {
+    fn from_config(cfg: &Config, root: Option<&Path>) -> Self {
         Self {
             runner: Runner::new(Registry::from_config(cfg)),
             matcher: m1_lint::config::ExcludeMatcher::new(cfg),
+            root: root.map(Path::to_path_buf),
         }
     }
 
     fn is_excluded(&self, uri: &Url) -> bool {
-        uri.to_file_path()
-            .ok()
-            .is_some_and(|path| self.matcher.is_excluded(&path))
+        let Ok(path) = uri.to_file_path() else {
+            return false;
+        };
+        self.matcher.is_excluded(&path)
+            || self
+                .root
+                .as_deref()
+                .and_then(|root| path.strip_prefix(root).ok())
+                .is_some_and(|relative| self.matcher.is_excluded(relative))
     }
 }
 
@@ -44,7 +52,7 @@ impl M1Lint {
         // reduced v1 set here meant single-file / no-workspace-root sessions
         // silently dropped L010–L012 until a project root was set.
         Self {
-            state: RwLock::new(LintState::from_config(&Config::default())),
+            state: RwLock::new(LintState::from_config(&Config::default(), None)),
         }
     }
 }
@@ -88,14 +96,14 @@ impl LintProvider for M1Lint {
         // fallback) and rebuild the rule set. On a config error, keep the
         // current ruleset rather than reverting to defaults silently.
         if let Ok(cfg) = Config::discover(root) {
-            *self.state.write().unwrap() = LintState::from_config(&cfg);
+            *self.state.write().unwrap() = LintState::from_config(&cfg, Some(root));
         }
     }
 
-    fn set_lint_config(&self, cfg: &Config) {
+    fn set_lint_config(&self, cfg: &Config, root: &Path) {
         // Apply a config resolved centrally by the unified `m1-tools.toml` layer
         // (thresholds + enabled set), replacing any file-discovered one.
-        *self.state.write().unwrap() = LintState::from_config(cfg);
+        *self.state.write().unwrap() = LintState::from_config(cfg, Some(root));
     }
 
     fn fix(&self, uri: &Url, src: &str) -> Option<String> {
@@ -140,13 +148,15 @@ mod tests {
 
     #[test]
     fn excluded_document_is_neither_linted_nor_fixed() {
+        let tmp = tempfile::tempdir().unwrap();
         let cfg = Config {
-            exclude: vec!["*.gen.m1scr".into()],
+            exclude: vec!["generated/*".into()],
             ..Config::default()
         };
         let lint = M1Lint::new();
-        lint.set_lint_config(&cfg);
-        let excluded = Url::parse("file:///Generated.gen.m1scr").unwrap();
+        lint.set_lint_config(&cfg, tmp.path());
+        let excluded = Url::from_file_path(tmp.path().join("generated/Test.m1scr")).unwrap();
+        let included = Url::from_file_path(tmp.path().join("src/Test.m1scr")).unwrap();
         let src = "//x\n";
         let li = LineIndex::new(src);
 
@@ -155,7 +165,7 @@ mod tests {
                 .is_empty()
         );
         assert!(lint.fix(&excluded, src).is_none());
-        assert!(lint.fix(&uri(), src).is_some());
+        assert!(lint.fix(&included, src).is_some());
     }
 
     #[test]

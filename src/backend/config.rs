@@ -16,7 +16,7 @@ impl Backend {
     pub(super) fn apply_config(&self, root: &std::path::Path) {
         let editor = self.editor_settings.read().unwrap().clone();
         let (cfg, mut issues) = M1Config::resolve_with_issues(editor.as_ref(), root);
-        self.lint.set_lint_config(&cfg.lint);
+        self.lint.set_lint_config(&cfg.lint, root);
         self.types.set_type_config(&cfg.diagnostics);
         self.formatter.set_format_options(&cfg.format);
         *self.config.write().unwrap() = cfg;

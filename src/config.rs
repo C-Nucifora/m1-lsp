@@ -89,8 +89,15 @@ impl M1Config {
         let mut issues = Vec::new();
         let mut cfg = M1Config::default();
         if let Some(v) = editor {
-            match serde_json::from_value::<M1ToolsConfig>(v.clone()) {
-                Ok(tc) => apply_validated(tc, "editor settings", &mut cfg, &mut issues),
+            match parse_editor_config(v) {
+                Ok((tc, unknown_keys)) => {
+                    for key in unknown_keys {
+                        issues.push(format!(
+                            "editor settings: unknown key `{key}` (typo? the tool default stays in effect)"
+                        ));
+                    }
+                    apply_validated(tc, "editor settings", &mut cfg, &mut issues);
+                }
                 Err(e) => issues.push(format!("editor settings ignored (invalid shape): {e}")),
             }
         }
@@ -135,6 +142,24 @@ impl M1Config {
             .min(m1_fmt::config::MAX_INDENT_WIDTH);
         (cfg, issues)
     }
+}
+
+/// Parse the tool-owned editor settings while retaining unknown-key paths.
+/// `eval` belongs to the LSP-local evaluator and is validated separately.
+fn parse_editor_config(
+    editor: &serde_json::Value,
+) -> Result<(M1ToolsConfig, Vec<String>), serde_json::Error> {
+    let mut tools = editor.clone();
+    if let Some(object) = tools.as_object_mut() {
+        object.remove("eval");
+    }
+    let json = serde_json::to_string(&tools)?;
+    let mut deserializer = serde_json::Deserializer::from_str(&json);
+    let mut unknown_keys = Vec::new();
+    let config = serde_ignored::deserialize(&mut deserializer, |path| {
+        unknown_keys.push(path.to_string())
+    })?;
+    Ok((config, unknown_keys))
 }
 
 /// Reject an invalid configuration layer as a unit, preserving every lower
@@ -706,6 +731,29 @@ mod tests {
         assert!(cfg.diagnostics.select.is_empty());
         assert!(issues.iter().any(|i| i.contains("line_width")));
         assert!(issues.iter().any(|i| i.contains("t041")));
+    }
+
+    #[test]
+    fn unknown_editor_keys_are_reported_without_rejecting_known_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let editor = serde_json::json!({
+            "lint": { "max_line_length": 100 },
+            "diagnostics": { "selekt": ["L017"] },
+            "eval": { "enabled": true }
+        });
+
+        let (cfg, issues) = M1Config::resolve_with_issues(Some(&editor), tmp.path());
+        assert_eq!(cfg.lint.max_line_length, 100);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("diagnostics.selekt"))
+        );
+        assert!(
+            issues
+                .iter()
+                .all(|issue| !issue.contains("unknown key `eval`"))
+        );
     }
 
     #[test]
