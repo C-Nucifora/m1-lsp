@@ -82,26 +82,27 @@ pub fn type_diagnostic(
     // T062 flags use of a deprecated overload; tag it so editors strike it through.
     let tags = (code == "T062").then(|| vec![DiagnosticTag::DEPRECATED]);
     // Two-location diagnostics (m1-typecheck#200): T030/T085/T086 carry their
-    // declaration site as a 0-based project-file line; the LSP knows the
-    // project path, so it becomes clickable DiagnosticRelatedInformation.
-    let related_information = project_path
-        .filter(|_| !d.related.is_empty())
-        .and_then(|prj| Url::from_file_path(prj).ok())
-        .map(|url| {
-            d.related
-                .iter()
-                .map(|r| {
-                    let RelatedPlace::Project { line } = r.place;
-                    DiagnosticRelatedInformation {
-                        location: Location {
-                            uri: url.clone(),
-                            range: Range::new(Position::new(line, 0), Position::new(line, 0)),
-                        },
-                        message: r.message.clone(),
-                    }
+    // declaration site in the project file or a project-relative DBC. The LSP
+    // knows the project path, so both become clickable related information.
+    let related_information = project_path.filter(|_| !d.related.is_empty()).map(|prj| {
+        d.related
+            .iter()
+            .filter_map(|r| {
+                let (path, line) = match &r.place {
+                    RelatedPlace::Project { line } => (prj.to_path_buf(), *line),
+                    RelatedPlace::Dbc { path, line } => (prj.parent()?.join(path), *line),
+                };
+                let url = Url::from_file_path(path).ok()?;
+                Some(DiagnosticRelatedInformation {
+                    location: Location {
+                        uri: url,
+                        range: Range::new(Position::new(line, 0), Position::new(line, 0)),
+                    },
+                    message: r.message.clone(),
                 })
-                .collect()
-        });
+            })
+            .collect()
+    });
     LspDiag {
         range: range(&d.inner.byte_range, li, enc),
         severity: Some(severity(d.inner.severity)),
@@ -168,6 +169,42 @@ mod tests {
             href.as_str(),
             "https://github.com/C-Nucifora/m1-typecheck#float-equality"
         );
+    }
+
+    #[test]
+    fn type_diagnostic_resolves_dbc_related_location() {
+        use m1_core::Severity;
+        use m1_typecheck::diagnostics::{RelatedLocation, TypeCode, make};
+        let src = "x = 1.0 == y;\n";
+        let cst = m1_core::parse(src);
+        let li = LineIndex::new(src);
+        let mut d = make(
+            TypeCode::T002,
+            &cst.root(),
+            Severity::Warning,
+            "float equality".into(),
+        );
+        d.related.push(RelatedLocation {
+            place: RelatedPlace::Dbc {
+                path: "dbc/vehicle.m1dbc".into(),
+                line: 7,
+            },
+            message: "declared here".into(),
+        });
+
+        let lsp = type_diagnostic(
+            &d,
+            &li,
+            PositionEncoding::Utf16,
+            Some(std::path::Path::new("/project/Project.m1prj")),
+        );
+        let related = lsp.related_information.expect("related location");
+
+        assert_eq!(
+            related[0].location.uri.as_str(),
+            "file:///project/dbc/vehicle.m1dbc"
+        );
+        assert_eq!(related[0].location.range.start.line, 7);
     }
 
     #[test]
