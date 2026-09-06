@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn value_hint_on_assignment_target_with_scenario() {
         let (_tmp, store) = eval_project();
-        let trace = trace_for("Root.Demo.Output", Value::Float(50.0));
+        let trace = trace_for("Root.Demo.Output", Value::m1_float(50.0));
         let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
         let hs = eval_hints(
             &store,
@@ -627,7 +627,7 @@ mod tests {
     #[test]
     fn offline_default_value_hint_is_muted() {
         let (_tmp, store) = eval_project();
-        let trace = trace_for("Root.Demo.Output", Value::Float(50.0));
+        let trace = trace_for("Root.Demo.Output", Value::m1_float(50.0));
         let prov = Provenance::OfflineDefault;
         let hs = eval_hints(
             &store,
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn value_hint_on_channel_read() {
         let (_tmp, store) = eval_project();
-        let trace = trace_for("Root.Demo.Output", Value::Float(50.0));
+        let trace = trace_for("Root.Demo.Output", Value::m1_float(50.0));
         let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
         let hs = eval_hints(
             &store,
@@ -683,7 +683,7 @@ mod tests {
     fn no_value_hint_when_channel_absent_from_trace() {
         let (_tmp, store) = eval_project();
         // The trace only carries some *other* channel, not Root.Demo.Output.
-        let trace = trace_for("Root.Demo.Elsewhere", Value::Float(50.0));
+        let trace = trace_for("Root.Demo.Elsewhere", Value::m1_float(50.0));
         let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
         let hs = eval_hints(
             &store,
@@ -706,7 +706,7 @@ mod tests {
     #[test]
     fn value_hints_are_additive_to_existing_hints() {
         let (_tmp, store) = eval_project();
-        let trace = trace_for("Root.Demo.Output", Value::Float(50.0));
+        let trace = trace_for("Root.Demo.Output", Value::m1_float(50.0));
         let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
         // `local v = Demo.Output;` produces a `: Float` type hint and a `[V]` unit
         // hint already; the eval context adds a `= 50` value hint on the read.

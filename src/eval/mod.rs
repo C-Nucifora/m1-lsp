@@ -48,8 +48,8 @@ mod tests {
         _assert_named::<Trace>();
         _assert_named::<Value>();
 
-        let v = Value::Int(50);
-        assert!(matches!(v, Value::Int(50)));
+        let v = Value::m1_integer(50);
+        assert_eq!(v, Value::m1_integer(50));
     }
 
     /// The re-exports are also reachable via the original `m1_eval` crate path,

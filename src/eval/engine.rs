@@ -258,8 +258,12 @@ fn offline_scenario(lp: &LoadedProject) -> Scenario {
         .fold(None::<f64>, |acc, r| Some(acc.map_or(r, |m| m.min(r))));
     Scenario {
         mode: RunMode::WholeProject,
+        initial_state: Vec::new(),
         inputs: Vec::new(),
         io: Vec::new(),
+        // Offline editor evaluation has no external serial or CAN scenario.
+        serial: Default::default(),
+        can: Default::default(),
         duration_s: offline_duration_s(slowest),
         // Auto (0.0): the evaluator derives the exact lcm grid of the declared
         // rates. A project with NO periodic rate has nothing to derive from
@@ -329,6 +333,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn offline_scenario_has_no_external_virtual_inputs() {
+        with_mini(|lp| {
+            let scenario = offline_scenario(lp);
+            assert!(scenario.initial_state.is_empty());
+            assert!(scenario.serial.rx.is_empty());
+            assert!(scenario.can.rx.is_empty());
+        });
+    }
+
     /// A scenario file → a trace whose `Output` column carries the computed value,
     /// tagged with `Provenance::Scenario`. Mirrors m1-eval's own function-mode run.
     #[test]
@@ -361,7 +375,7 @@ mod tests {
                 .get("Root.Demo.Output")
                 .expect("Output column present");
             // 0.03 s at 100 Hz = 3 ticks; Output = 20 * 2.5 (Gain) = 50 each.
-            assert_eq!(col, &vec![crate::eval::Value::Float(50.0); 3]);
+            assert_eq!(col, &vec![crate::eval::Value::m1_float(50.0); 3]);
         });
     }
 

@@ -944,7 +944,11 @@ mod tests {
     #[test]
     fn scenario_hover_shows_value_alongside_type() {
         let (_tmp, project) = eval_project();
-        let trace = trace_for("Root.Demo.Output", crate::eval::Value::Float(50.0), false);
+        let trace = trace_for(
+            "Root.Demo.Output",
+            crate::eval::Value::m1_float(50.0),
+            false,
+        );
         let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
         let md = eval_hover_md(
             &project,
@@ -975,7 +979,11 @@ mod tests {
     #[test]
     fn offline_default_hover_shows_value_with_label() {
         let (_tmp, project) = eval_project();
-        let trace = trace_for("Root.Demo.Output", crate::eval::Value::Float(50.0), false);
+        let trace = trace_for(
+            "Root.Demo.Output",
+            crate::eval::Value::m1_float(50.0),
+            false,
+        );
         let prov = Provenance::OfflineDefault;
         let md = eval_hover_md(
             &project,
@@ -998,7 +1006,7 @@ mod tests {
     #[test]
     fn external_channel_hover_is_labelled() {
         let (_tmp, project) = eval_project();
-        let trace = trace_for("Root.Demo.Output", crate::eval::Value::Float(50.0), true);
+        let trace = trace_for("Root.Demo.Output", crate::eval::Value::m1_float(50.0), true);
         let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
         let md = eval_hover_md(
             &project,
@@ -1053,7 +1061,11 @@ mod tests {
         // so even with a trace available no `value:` line is added.
         let (_tmp, project) = eval_project();
         // The trace only has the Output channel; nothing for Demo/Update/Map.
-        let trace = trace_for("Root.Demo.Output", crate::eval::Value::Float(50.0), false);
+        let trace = trace_for(
+            "Root.Demo.Output",
+            crate::eval::Value::m1_float(50.0),
+            false,
+        );
         let prov = Provenance::OfflineDefault;
         let ctx = EvalContext {
             trace: &trace,
@@ -1102,7 +1114,11 @@ mod tests {
         let src = "local x = 0;\nOutput = x;\n";
         // Hover the `x` *use* on line 2 (the second occurrence of "x").
         let use_byte = src.match_indices('x').nth(1).unwrap().0;
-        let trace = expr_trace_for("Demo.Update.m1scr", use_byte, crate::eval::Value::Int(7));
+        let trace = expr_trace_for(
+            "Demo.Update.m1scr",
+            use_byte,
+            crate::eval::Value::m1_integer(7),
+        );
         let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
 
         let cst = m1_core::parse(src);
@@ -1149,7 +1165,7 @@ mod tests {
         let trace = expr_trace_for(
             "Demo.Update.m1scr",
             use_byte + 100,
-            crate::eval::Value::Int(7),
+            crate::eval::Value::m1_integer(7),
         );
         let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
 
@@ -1206,7 +1222,11 @@ mod tests {
         let (_tmp, project) = eval_project();
         let src = "local x = 0;\nOutput = x;\n";
         let use_byte = src.match_indices('x').nth(1).unwrap().0;
-        let trace = expr_trace_for("Demo.Update.m1scr", use_byte, crate::eval::Value::Int(7));
+        let trace = expr_trace_for(
+            "Demo.Update.m1scr",
+            use_byte,
+            crate::eval::Value::m1_integer(7),
+        );
         let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
 
         let cst = m1_core::parse(src);
@@ -1245,11 +1265,15 @@ mod tests {
         let (_tmp, project) = eval_project();
         let src = "Output = 1;\n";
         let chan_byte = src.find("Output").unwrap();
-        let mut trace = trace_for("Root.Demo.Output", crate::eval::Value::Float(50.0), false);
+        let mut trace = trace_for(
+            "Root.Demo.Output",
+            crate::eval::Value::m1_float(50.0),
+            false,
+        );
         // Also record an expr column at the same offset; it must be ignored.
         trace.record_expr(
             ("Demo.Update.m1scr".to_string(), chan_byte),
-            crate::eval::Value::Int(7),
+            crate::eval::Value::m1_integer(7),
         );
         let prov = Provenance::Scenario(std::path::PathBuf::from("idle.toml"));
 
