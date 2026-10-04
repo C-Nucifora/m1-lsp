@@ -26,6 +26,7 @@
 use crate::eval::config::TickPolicy;
 use crate::eval::engine::Provenance;
 use crate::eval::{Trace, Value};
+use m1_eval::M1Scalar;
 
 /// Render a single [`Value`] as its bare display text (no surrounding backticks —
 /// the caller wraps it). Mirrors the trace's own CSV/JSON scalar rendering so the
@@ -40,9 +41,10 @@ use crate::eval::{Trace, Value};
 pub fn value_markdown(v: &Value) -> String {
     match v {
         Value::Bool(b) => b.to_string(),
-        Value::Int(x) => x.to_string(),
-        Value::Uint(x) => x.to_string(),
-        Value::Float(x) => fmt_f64(*x),
+        Value::M1(M1Scalar::Integer(x)) => x.to_string(),
+        Value::M1(M1Scalar::UnsignedInteger(x)) => x.to_string(),
+        Value::M1(M1Scalar::FloatingPoint(x)) => fmt_f64(f64::from(*x)),
+        Value::M1(M1Scalar::FixedPoint7dps(x)) => x.to_string(),
         Value::Enum { member, .. } => member.clone(),
         Value::Str(s) => s.clone(),
     }
@@ -199,18 +201,18 @@ mod tests {
 
     #[test]
     fn integral_float_renders_without_trailing_decimal() {
-        assert_eq!(value_markdown(&Value::Float(50.0)), "50");
+        assert_eq!(value_markdown(&Value::m1_float(50.0)), "50");
     }
 
     #[test]
     fn fractional_float_renders_compactly() {
-        assert_eq!(value_markdown(&Value::Float(2.5)), "2.5");
+        assert_eq!(value_markdown(&Value::m1_float(2.5)), "2.5");
     }
 
     #[test]
     fn int_uint_bool_render_plainly() {
-        assert_eq!(value_markdown(&Value::Int(-3)), "-3");
-        assert_eq!(value_markdown(&Value::Uint(7)), "7");
+        assert_eq!(value_markdown(&Value::m1_integer(-3)), "-3");
+        assert_eq!(value_markdown(&Value::m1_unsigned(7)), "7");
         assert_eq!(value_markdown(&Value::Bool(true)), "true");
         assert_eq!(value_markdown(&Value::Bool(false)), "false");
     }
@@ -233,7 +235,7 @@ mod tests {
 
     #[test]
     fn scenario_channel_shows_value_and_time() {
-        let tr = trace_with("Root.Demo.Output", vec![Value::Float(50.0); 3]);
+        let tr = trace_with("Root.Demo.Output", vec![Value::m1_float(50.0); 3]);
         let frag = eval_hover_fragment(
             "Root.Demo.Output",
             &tr,
@@ -253,7 +255,7 @@ mod tests {
 
     #[test]
     fn offline_default_value_is_labelled() {
-        let tr = trace_with("Root.Demo.Output", vec![Value::Float(50.0)]);
+        let tr = trace_with("Root.Demo.Output", vec![Value::m1_float(50.0)]);
         let frag = eval_hover_fragment(
             "Root.Demo.Output",
             &tr,
@@ -270,7 +272,7 @@ mod tests {
 
     #[test]
     fn external_channel_is_labelled() {
-        let mut tr = trace_with("Root.Demo.CanIn", vec![Value::Int(1)]);
+        let mut tr = trace_with("Root.Demo.CanIn", vec![Value::m1_integer(1)]);
         tr.mark_external("Root.Demo.CanIn");
         let frag = eval_hover_fragment(
             "Root.Demo.CanIn",
@@ -287,7 +289,7 @@ mod tests {
 
     #[test]
     fn offline_and_external_show_both_suffixes() {
-        let mut tr = trace_with("Root.Demo.CanIn", vec![Value::Int(1)]);
+        let mut tr = trace_with("Root.Demo.CanIn", vec![Value::m1_integer(1)]);
         tr.mark_external("Root.Demo.CanIn");
         let frag = eval_hover_fragment(
             "Root.Demo.CanIn",
@@ -305,7 +307,7 @@ mod tests {
 
     #[test]
     fn missing_channel_yields_none() {
-        let tr = trace_with("Root.Demo.Output", vec![Value::Float(50.0)]);
+        let tr = trace_with("Root.Demo.Output", vec![Value::m1_float(50.0)]);
         assert!(
             eval_hover_fragment(
                 "Root.Demo.Nope",
@@ -338,7 +340,11 @@ mod tests {
     fn first_tick_policy_reads_first_value_and_time() {
         let tr = trace_with(
             "Root.Demo.Output",
-            vec![Value::Float(10.0), Value::Float(20.0), Value::Float(30.0)],
+            vec![
+                Value::m1_float(10.0),
+                Value::m1_float(20.0),
+                Value::m1_float(30.0),
+            ],
         );
         let frag = eval_hover_fragment(
             "Root.Demo.Output",
@@ -355,7 +361,7 @@ mod tests {
 
     #[test]
     fn present_expr_site_renders_value_and_time() {
-        let tr = trace_with_expr("demo.m1scr", 42, vec![Value::Int(7); 3]);
+        let tr = trace_with_expr("demo.m1scr", 42, vec![Value::m1_integer(7); 3]);
         let frag = eval_expr_fragment(
             "demo.m1scr",
             42,
@@ -374,7 +380,7 @@ mod tests {
     fn absent_expr_site_yields_none() {
         // A sparse miss — the run never recorded this site — is honest, not an
         // error: no value line at all.
-        let tr = trace_with_expr("demo.m1scr", 42, vec![Value::Int(7)]);
+        let tr = trace_with_expr("demo.m1scr", 42, vec![Value::m1_integer(7)]);
         assert!(
             eval_expr_fragment(
                 "demo.m1scr",
@@ -402,7 +408,7 @@ mod tests {
 
     #[test]
     fn offline_default_expr_is_labelled() {
-        let tr = trace_with_expr("demo.m1scr", 42, vec![Value::Float(2.5)]);
+        let tr = trace_with_expr("demo.m1scr", 42, vec![Value::m1_float(2.5)]);
         let frag = eval_expr_fragment(
             "demo.m1scr",
             42,
@@ -422,7 +428,7 @@ mod tests {
     fn expr_fragment_never_shows_externally_driven() {
         // `(externally driven)` is a channel-only concept; even if a channel of the
         // same trace is external, an expression fragment never carries the suffix.
-        let mut tr = trace_with_expr("demo.m1scr", 42, vec![Value::Int(1)]);
+        let mut tr = trace_with_expr("demo.m1scr", 42, vec![Value::m1_integer(1)]);
         tr.mark_external("Root.Demo.CanIn");
         let frag = eval_expr_fragment(
             "demo.m1scr",
