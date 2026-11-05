@@ -41,11 +41,16 @@ pub const CONCURRENCY_LEVEL: usize = 16;
 /// Runs each handler future as its own tokio task (see the module docs).
 pub struct SpawnHandlers<S> {
     inner: S,
+    document_sync: tokio::sync::watch::Receiver<bool>,
 }
 
 impl<S> SpawnHandlers<S> {
     pub fn new(inner: S) -> Self {
-        Self { inner }
+        let (_, document_sync) = tokio::sync::watch::channel(true);
+        Self {
+            inner,
+            document_sync,
+        }
     }
 }
 
@@ -64,13 +69,40 @@ where
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
+        let mut previous = self.document_sync.clone();
+        let completed = if matches!(
+            req.method(),
+            "textDocument/didOpen"
+                | "textDocument/didChange"
+                | "textDocument/didClose"
+                | "textDocument/didSave"
+                | "workspace/didChangeConfiguration"
+                | "workspace/didChangeWatchedFiles"
+        ) {
+            let (completed, pending) = tokio::sync::watch::channel(false);
+            self.document_sync = pending;
+            Some(completed)
+        } else {
+            None
+        };
         let fut = self.inner.call(req);
         // A panic inside a handler re-panics here, matching the pre-wrapper
         // behaviour (an unwinding handler took down the serve loop).
         Box::pin(async move {
-            tokio::spawn(fut)
-                .await
-                .expect("request handler task panicked")
+            tokio::spawn(async move {
+                // Assign barriers in call order, before tasks can be scheduled
+                // out of order and apply incremental edits to the wrong text.
+                if !*previous.borrow() {
+                    let _ = previous.changed().await;
+                }
+                let result = fut.await;
+                if let Some(completed) = completed {
+                    let _ = completed.send(true);
+                }
+                result
+            })
+            .await
+            .expect("request handler task panicked")
         })
     }
 }

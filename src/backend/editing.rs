@@ -1,6 +1,6 @@
 //! Mutating / assist handlers: document + range + on-type formatting, completion
 //! (list + resolve), signature help, the rename family (prepare / rename /
-//! will-rename-files, with the post-rename project refresh), and code actions
+//! will-rename-files), and code actions
 //! (quick-fixes, fix-all, refactors, format actions).
 use tower_lsp::jsonrpc::{Error, Result};
 use tower_lsp::lsp_types::*;
@@ -237,9 +237,6 @@ impl Backend {
         // silently do nothing); a successful edit may span several files.
         match result {
             Ok(edit) => {
-                // Refresh the project model from the edit so the renamed symbol is
-                // live immediately, without waiting for a client file-watch event.
-                self.refresh_after_rename(&edit).await;
                 // Tag multi-file / file-renaming edits with a confirmation
                 // annotation so capable clients can preview them (#151).
                 let supported = self
@@ -251,53 +248,6 @@ impl Backend {
             }
             Err(e) => Err(Error::invalid_params(e)),
         }
-    }
-
-    /// Refresh the in-memory project model after a rename that rewrote
-    /// `Project.m1prj`. The client applies the workspace edit to a buffer it may
-    /// never save (and never tells us via file-watching), so the cached symbol
-    /// table would otherwise keep the old name — making the just-renamed symbol
-    /// read as undefined until the server restarts. We derive the post-rename
-    /// `.m1prj` text from the edit we just computed, reload from it, and
-    /// re-publish so diagnostics reflect the new name immediately.
-    async fn refresh_after_rename(&self, edit: &WorkspaceEdit) {
-        let Some(prj_path) = self
-            .store
-            .with_project(|p| p.map(|lp| lp.m1prj_path.clone()))
-        else {
-            return;
-        };
-        let Ok(prj_uri) = Url::from_file_path(&prj_path) else {
-            return;
-        };
-        let orig = self
-            .docs
-            .get(&prj_uri)
-            .map(|d| d.text.clone())
-            .or_else(|| crate::disk_read::read_disk(&prj_path));
-        let Some(orig) = orig else {
-            return;
-        };
-        let Some(new_text) = rename::apply_workspace_edit_to(edit, &prj_uri, &orig, self.enc())
-        else {
-            // The rename didn't touch the project file (e.g. a local-only rename).
-            return;
-        };
-        if let Err(e) = self.store.reload_from_m1prj_text(&new_text) {
-            self.client
-                .log_message(
-                    MessageType::WARNING,
-                    format!("m1-lsp: post-rename project refresh failed: {e}"),
-                )
-                .await;
-            return;
-        }
-        let uris: Vec<Url> = self.docs.iter().map(|e| e.key().clone()).collect();
-        for uri in uris {
-            self.publish(uri).await;
-        }
-        // The rename may have changed which parameters are covered / names valid.
-        self.publish_project_diagnostics().await;
     }
 
     pub(super) async fn code_action_impl(
