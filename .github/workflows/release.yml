@@ -37,7 +37,7 @@ jobs:
           # of the per-platform binaries. Keying only on "release exists" meant a
           # release tagged before its binaries uploaded (or created by hand) could
           # never self-heal — the bundled-server consumers were left with a 404.
-          required="m1-lsp-x86_64-unknown-linux-gnu m1-lsp-aarch64-apple-darwin m1-lsp-x86_64-pc-windows-msvc.exe"
+          required="m1-lsp-x86_64-unknown-linux-gnu m1-lsp-aarch64-apple-darwin m1-lsp-x86_64-pc-windows-msvc.exe SHA256SUMS"
           if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             assets=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
             missing=
@@ -179,6 +179,7 @@ jobs:
           else
             gh release create "$TAG" out/* \
               --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
               --title "m1-lsp $TAG" \
               --notes-file body.md
           fi

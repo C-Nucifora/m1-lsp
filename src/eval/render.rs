@@ -43,7 +43,13 @@ pub fn value_markdown(v: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         Value::M1(M1Scalar::Integer(x)) => x.to_string(),
         Value::M1(M1Scalar::UnsignedInteger(x)) => x.to_string(),
-        Value::M1(M1Scalar::FloatingPoint(x)) => fmt_f64(f64::from(*x)),
+        Value::M1(M1Scalar::FloatingPoint(x)) => {
+            if x.is_finite() {
+                x.to_string()
+            } else {
+                fmt_f64(f64::from(*x))
+            }
+        }
         Value::M1(M1Scalar::FixedPoint7dps(x)) => x.to_string(),
         Value::Enum { member, .. } => member.clone(),
         Value::Str(s) => s.clone(),
@@ -51,8 +57,8 @@ pub fn value_markdown(v: &Value) -> String {
 }
 
 /// Format an `f64` compactly: the shortest representation that round-trips, with
-/// non-finite values spelled out. Matches [`m1_eval::Trace`]'s own scalar
-/// formatting so an integral float shows as `50`, not `50.0`.
+/// non-finite values spelled out. Used for trace timestamps and non-finite M1
+/// floats; finite M1 scalars retain their original width when formatted.
 fn fmt_f64(x: f64) -> String {
     if x.is_nan() {
         "NaN".to_string()
@@ -207,6 +213,18 @@ mod tests {
     #[test]
     fn fractional_float_renders_compactly() {
         assert_eq!(value_markdown(&Value::m1_float(2.5)), "2.5");
+    }
+
+    #[test]
+    fn m1_float_rendering_preserves_the_short_f32_representation() {
+        assert_eq!(value_markdown(&Value::m1_float(0.1)), "0.1");
+        assert_eq!(value_markdown(&Value::m1_float(-0.1)), "-0.1");
+        assert_eq!(value_markdown(&Value::m1_float(f32::INFINITY)), "Infinity");
+        assert_eq!(
+            value_markdown(&Value::m1_float(f32::NEG_INFINITY)),
+            "-Infinity"
+        );
+        assert_eq!(value_markdown(&Value::m1_float(f32::NAN)), "NaN");
     }
 
     #[test]
