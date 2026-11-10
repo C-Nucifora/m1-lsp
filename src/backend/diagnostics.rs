@@ -429,6 +429,72 @@ mod project_diagnostics_pipeline_tests {
     const M1CFG: &str = "<?xml version=\"1.0\"?>\n<Configuration>\n <Group Name=\"\">\n\
          </Group>\n</Configuration>";
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_tag_findings_reach_project_diagnostics_once_and_obey_filtering() {
+        let tmp = tempfile::tempdir().unwrap();
+        let xml = r#"<MoTeCM1BuildSession><Project><ComponentStream><List>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.Example"><Props><List.UserTags><Entry Value="Vehicle"/></List.UserTags></Props></Component>
+<Component Classname="BuiltIn.Channel" Name="Root.Example.State"><Props Type="::This.Mode" Security="Tune"><List.UserTags><Entry Value="Diagnostic"/></List.UserTags></Props></Component>
+<Component Classname="BuiltIn.IOResourceParameter" Name="Root.Example.Resource"><Props Security="Tune"><List.UserTags><Entry Value="Pin"/></List.UserTags></Props></Component>
+<Component Classname="BuiltIn.IOResourceValueInput" Name="Root.Example.Input"><Props NameCreation="AutoParam" NameTarget="This.Value"><List.UserTags><Entry Value="Pin"/></List.UserTags></Props></Component>
+<Component Classname="BuiltIn.IOResourceParameter" Name="Root.Example.Input.Value"><Props Security="Tune"/></Component>
+</List></ComponentStream></Project></MoTeCM1BuildSession>"#;
+        let prj_path = tmp.path().join("Project.m1prj");
+        std::fs::write(&prj_path, xml).unwrap();
+        std::fs::write(tmp.path().join("parameters.m1cfg"), M1CFG).unwrap();
+        let store = Arc::new(ProjectStore::new());
+        assert!(store.discover_and_load(tmp.path()).unwrap());
+        let (service, _socket) = LspService::new(|client| {
+            Backend::with_backends(
+                client,
+                Box::new(NoLint),
+                Box::new(NoTypes),
+                Box::new(NoFormat),
+                Arc::clone(&store),
+            )
+        });
+        let backend = service.inner();
+        let uri = Url::from_file_path(&prj_path).unwrap();
+        let diagnostics = backend.diagnostics_for(&uri).unwrap();
+        let tags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == Some(NumberOrString::String("T112".into())))
+            .collect();
+        assert_eq!(tags.len(), 3, "{diagnostics:?}");
+        assert_eq!(
+            tags.iter().filter(|d| d.message.contains("1647")).count(),
+            1
+        );
+        assert_eq!(
+            tags.iter().filter(|d| d.message.contains("1140")).count(),
+            2
+        );
+        assert!(
+            tags.iter()
+                .all(|d| d.severity == Some(DiagnosticSeverity::WARNING))
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| { d.code == Some(NumberOrString::String("T092".into())) })
+        );
+
+        backend
+            .config
+            .write()
+            .unwrap()
+            .diagnostics
+            .ignore
+            .insert("T112".into());
+        assert!(
+            backend
+                .diagnostics_for(&uri)
+                .unwrap()
+                .iter()
+                .all(|d| { d.code != Some(NumberOrString::String("T112".into())) })
+        );
+    }
+
     // The push path (`diagnostics_for` on the active `.m1prj`) and the
     // published path (`publish_project_diagnostics`) both convert the store's
     // project-scope diagnostics into LSP diagnostics through the exact same

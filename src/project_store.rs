@@ -808,7 +808,7 @@ impl ProjectStore {
                 lp.dbc_paths.clone(),
             )
         };
-        let mut project = Project::from_xml(m1prj_text)
+        let mut project = Project::from_xml_with_module_dirs(m1prj_text, &[])
             .map_err(|e| e.to_string())
             .and_then(|p| augment(p, &root, &m1cfg_path, &dbc_paths))?;
         let script_files = walk_scripts(&root);
@@ -932,6 +932,48 @@ mod tests {
         assert!(
             store.with_project(|p| p.is_none()),
             "store must be cleared after a fatal load failure"
+        );
+    }
+
+    #[test]
+    fn missing_selected_module_coverage_survives_text_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let with_selection = r#"<MoTeCM1BuildSession><Project>
+<SelectedModuleSets><File Name="Missing LSP Regression Module" VersionMajor="1" VersionMinor="0" VersionBuild="0"/></SelectedModuleSets>
+<ComponentStream><List><Component Classname="BuiltIn.GroupCompound" Name="Root"/></List></ComponentStream>
+</Project></MoTeCM1BuildSession>"#;
+        let without_selection = r#"<MoTeCM1BuildSession><Project>
+<ComponentStream><List><Component Classname="BuiltIn.GroupCompound" Name="Root"/></List></ComponentStream>
+</Project></MoTeCM1BuildSession>"#;
+        let path = tmp.path().join("Project.m1prj");
+        std::fs::write(&path, with_selection).unwrap();
+        let store = ProjectStore::new();
+        assert!(store.load_from(&path).unwrap());
+        let coverage = || {
+            store
+                .project_diagnostics()
+                .into_iter()
+                .filter(|d| d.code.as_str() == "T113")
+                .collect::<Vec<_>>()
+        };
+        let initial = coverage();
+        assert_eq!(initial.len(), 1, "{initial:?}");
+        assert!(
+            initial[0]
+                .inner
+                .message
+                .contains("Missing LSP Regression Module")
+        );
+        assert!(store.reload_from_m1prj_text(with_selection).unwrap());
+        assert_eq!(
+            coverage().len(),
+            1,
+            "text reload must retain coverage warnings"
+        );
+        assert!(store.reload_from_m1prj_text(without_selection).unwrap());
+        assert!(
+            coverage().is_empty(),
+            "edited selection must invalidate cached findings"
         );
     }
 
