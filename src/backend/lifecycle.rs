@@ -242,6 +242,7 @@ impl Backend {
         // folder at `initialize`, leaving the server project-less. Fall back to
         // discovering the project from the opened file itself (#73).
         self.ensure_project_loaded(&d.uri).await;
+        self.refresh_project_document(&d.uri).await;
         self.publish(d.uri).await;
     }
 
@@ -270,6 +271,7 @@ impl Backend {
         // The edited buffer can change script reads/writes — drop the cached
         // call graph (rebuilt on the next call-hierarchy request).
         self.store.invalidate_call_graph();
+        self.refresh_project_document(&uri).await;
         self.publish(uri).await;
     }
 
@@ -287,7 +289,41 @@ impl Backend {
         self.diag_prev.remove(&uri);
         // The graph would now read this file from disk instead of the buffer.
         self.store.invalidate_call_graph();
-        self.client.publish_diagnostics(uri, vec![], None).await;
+        self.client
+            .publish_diagnostics(uri.clone(), vec![], None)
+            .await;
+        self.refresh_project_document(&uri).await;
+    }
+
+    /// Refresh only from text the client actually opened or changed, or disk
+    /// after close. A proposed rename can still be rejected in the client.
+    async fn refresh_project_document(&self, uri: &Url) {
+        let active = self
+            .store
+            .with_project(|p| p.and_then(|lp| Url::from_file_path(&lp.m1prj_path).ok()));
+        if active.as_ref() != Some(uri) {
+            return;
+        }
+        let text = self.docs.get(uri).map(|d| d.text.clone()).or_else(|| {
+            uri.to_file_path()
+                .ok()
+                .and_then(|p| crate::disk_read::read_disk(&p))
+        });
+        let Some(text) = text else { return };
+        if let Err(e) = self.store.reload_from_m1prj_text(&text) {
+            self.client
+                .log_message(
+                    MessageType::WARNING,
+                    format!("m1-lsp: project refresh failed: {e}"),
+                )
+                .await;
+            return;
+        }
+        let uris: Vec<Url> = self.docs.iter().map(|e| e.key().clone()).collect();
+        for uri in uris {
+            self.publish(uri).await;
+        }
+        self.publish_project_diagnostics().await;
     }
 
     pub(super) async fn did_change_watched_files_impl(&self, params: DidChangeWatchedFilesParams) {
@@ -420,6 +456,8 @@ impl Backend {
         else {
             return;
         };
+        // Standalone files need editor and file settings even without a project.
+        self.apply_config(&dir);
         match self.store.discover_and_load(&dir) {
             Ok(true) => {
                 self.client
@@ -428,8 +466,6 @@ impl Backend {
                         "m1-lsp: project loaded (didOpen fallback)",
                     )
                     .await;
-                // Resolve the unified config now that we have a workspace root.
-                self.apply_config(&dir);
                 // Surface the project-scope audit for the just-loaded project (#139).
                 self.publish_project_diagnostics().await;
             }
