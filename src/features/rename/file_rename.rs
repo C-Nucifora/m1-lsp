@@ -38,15 +38,12 @@ pub fn execute_file_rename(
     loaded: &LoadedProject,
     open_text: &dyn Fn(&Url) -> Option<String>,
 ) -> Result<Option<WorkspaceEdit>, String> {
+    if !super::helpers::owns_uri(loaded, old_uri) {
+        return Ok(None);
+    }
     let (Some(old_base), Some(new_base)) = (file_name_of(old_uri), file_name_of(new_uri)) else {
         return Ok(None);
     };
-    // A move to another directory keeps the basename: the mapping is
-    // basename-keyed, so nothing needs editing.
-    if old_base == new_base {
-        return Ok(None);
-    }
-
     let project = &loaded.project;
     let Some(sym_path) = project.function_symbol_for_script(&old_base) else {
         return Ok(None); // not a project-backed script
@@ -54,6 +51,16 @@ pub fn execute_file_rename(
     let Some(sym) = project.symbols().get(&sym_path) else {
         return Ok(None);
     };
+    super::helpers::check_project_scope(loaded, old_uri)?;
+    if !super::helpers::owns_uri(loaded, new_uri) {
+        return Err(
+            "moving a backing script into another project cannot preserve its mapping; update the project mapping explicitly".to_string(),
+        );
+    }
+    // Basename mappings survive moves within this project's directory tree.
+    if old_base == new_base {
+        return Ok(None);
+    }
 
     // Explicit `Filename="…"`: update the attribute; the symbol name (and so
     // every reference) is independent of the basename.

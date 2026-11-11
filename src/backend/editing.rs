@@ -117,7 +117,14 @@ impl Backend {
         // The `.m1prj` is XML, not a script: offer rename on a component's Name.
         if is_m1prj(&uri) {
             return Ok(self.store.with_project(|p| {
-                rename::prepare_m1prj(&doc.text, byte, doc.enc, p.map(|lp| lp.project.as_ref()))
+                let project =
+                    p.filter(|lp| uri.to_file_path().ok().as_ref() == Some(&lp.m1prj_path));
+                rename::prepare_m1prj(
+                    &doc.text,
+                    byte,
+                    doc.enc,
+                    project.map(|lp| lp.project.as_ref()),
+                )
             }));
         }
         let cst = doc.parse();
@@ -127,7 +134,11 @@ impl Backend {
                 byte,
                 &doc.line_index,
                 doc.enc,
-                p.map(|lp| lp.project.as_ref()),
+                p.filter(|lp| {
+                    uri.to_file_path()
+                        .is_ok_and(|path| crate::project_store::belongs_to_project(&lp.root, &path))
+                })
+                .map(|lp| lp.project.as_ref()),
                 doc.file_name.as_deref(),
             )
         }))

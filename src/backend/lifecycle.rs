@@ -392,18 +392,30 @@ impl Backend {
             let name = p.file_name().and_then(|n| n.to_str())?;
             matches!(name, ".m1lint.toml" | ".m1fmt.toml" | "m1-tools.toml").then_some(p)
         });
-        if let Some(p) = &config_change
-            && let Some(dir) = p.parent()
-        {
-            self.apply_config(dir);
+        if let Some(p) = &config_change {
+            // Re-resolve from this client's original anchor, so an ancestor
+            // event cannot replace a nearer project's configuration.
+            let root = self
+                .config_root
+                .read()
+                .unwrap()
+                .clone()
+                .or_else(|| p.parent().map(std::path::Path::to_path_buf));
+            if let Some(root) = root {
+                self.apply_config(&root);
+            }
         }
-        // A created/deleted `.m1scr` changes the cached workspace script set
-        // (an edit to an existing one doesn't); refresh it cheaply, no reparse.
+        // Script events and nested project markers change script membership.
+        // Refresh independently of XML parsing, which may fail for an open buffer.
         let scripts_changed = params.changes.iter().any(|c| {
             c.uri
                 .to_file_path()
                 .ok()
-                .map(|p| p.extension().and_then(|x| x.to_str()) == Some("m1scr"))
+                .map(|p| {
+                    p.extension().and_then(|x| x.to_str()) == Some("m1scr")
+                        || p.file_name().and_then(|x| x.to_str())
+                            == Some(m1_workspace::PROJECT_FILE)
+                })
                 .unwrap_or(false)
         });
         if scripts_changed {

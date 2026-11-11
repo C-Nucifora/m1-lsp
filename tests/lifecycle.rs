@@ -447,6 +447,93 @@ fn invalid_project_buffer_keeps_script_membership_current() {
 }
 
 #[test]
+fn invalid_project_buffer_still_observes_nested_project_boundaries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("Project.m1prj");
+    let xml = r#"<Project><Component Classname="BuiltIn.GroupCompound" Name="Root"/><Component Classname="BuiltIn.Channel" Name="Root.Signal"><Props Type="f32"/></Component></Project>"#;
+    std::fs::write(&project, xml).unwrap();
+    let nested = tmp.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    for folder in [tmp.path(), nested.as_path()] {
+        std::fs::write(folder.join("Main.m1scr"), "Signal = 1;\n").unwrap();
+    }
+    let uri = |file: &std::path::Path| tower_lsp::lsp_types::Url::from_file_path(file).unwrap();
+    let own = uri(&tmp.path().join("Main.m1scr"));
+    let child = uri(&nested.join("Main.m1scr"));
+    let marker = nested.join("Project.m1prj");
+    let mut client = Client::new(json!({"textDocument":{"diagnostic":{}}}));
+    client.open(own.as_str(), "Signal = 1;\n");
+    client.open(uri(&project).as_str(), "<broken");
+    client.request("workspace/symbol", json!({"query":"Signal"}));
+    for nested_exists in [true, false] {
+        if nested_exists {
+            std::fs::write(&marker, xml).unwrap();
+        } else {
+            std::fs::remove_file(&marker).unwrap();
+        }
+        client.notify(
+            "workspace/didChangeWatchedFiles",
+            json!({"changes":[{"uri":uri(&marker),"type":if nested_exists {1} else {3}}]}),
+        );
+        let references = client.request("textDocument/references", json!({"textDocument":{"uri":own},"position":{"line":0,"character":2},"context":{"includeDeclaration":false}}));
+        let files: Vec<_> = references["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["uri"].as_str().unwrap())
+            .collect();
+        assert!(files.contains(&own.as_str()));
+        assert_eq!(
+            files.contains(&child.as_str()),
+            !nested_exists,
+            "{references}"
+        );
+    }
+}
+
+#[test]
+fn ancestor_config_events_preserve_the_child_resolution_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let child = tmp.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    std::fs::write(
+        child.join("Project.m1prj"),
+        r#"<Project><Component Classname="BuiltIn.GroupCompound" Name="Root"/></Project>"#,
+    )
+    .unwrap();
+    let parent_config = tmp.path().join("m1-tools.toml");
+    let child_config = child.join("m1-tools.toml");
+    std::fs::write(&parent_config, "[lint]\nmax_line_length = 20\n").unwrap();
+    std::fs::write(&child_config, "[lint]\nmax_line_length = 120\n").unwrap();
+    let uri = tower_lsp::lsp_types::Url::from_file_path(child.join("Main.m1scr")).unwrap();
+    let mut client = Client::new(json!({"textDocument":{"diagnostic":{}}}));
+    client.open(uri.as_str(), &format!("// {}\n", "x".repeat(95)));
+    let too_long = |client: &mut Client| {
+        let report = client.request(
+            "textDocument/diagnostic",
+            json!({"textDocument":{"uri":uri}}),
+        );
+        report["result"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["code"] == "L001")
+    };
+    assert!(!too_long(&mut client));
+    client.notify("workspace/didChangeWatchedFiles", json!({"changes":[{"uri":tower_lsp::lsp_types::Url::from_file_path(&parent_config).unwrap(),"type":2}]}));
+    assert!(
+        !too_long(&mut client),
+        "ancestor event must not override child config"
+    );
+    std::fs::remove_file(&child_config).unwrap();
+    client.notify("workspace/didChangeWatchedFiles", json!({"changes":[{"uri":tower_lsp::lsp_types::Url::from_file_path(&child_config).unwrap(),"type":3}]}));
+    assert!(
+        too_long(&mut client),
+        "removing child override restores inherited config"
+    );
+}
+
+#[test]
 fn refreshes_resume_after_optional_request_saturation() {
     let mut client = Client::new(
         json!({"window":{"workDoneProgress":true},"textDocument":{"diagnostic":{}},"workspace":{"diagnostics":{"refreshSupport":true},"inlayHint":{"refreshSupport":true},"semanticTokens":{"refreshSupport":true},"codeLens":{"refreshSupport":true}}}),

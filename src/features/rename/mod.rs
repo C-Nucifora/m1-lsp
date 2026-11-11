@@ -145,6 +145,7 @@ pub fn execute(
                 .to_string(),
         );
     };
+    helpers::check_project_scope(loaded, &uri)?;
     let project = &loaded.project;
     let target = match cursor_target(root, byte, project, file_name)? {
         Some(t) => t,

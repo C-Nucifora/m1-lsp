@@ -13,6 +13,28 @@ use tower_lsp::lsp_types::{
     TextEdit, Url,
 };
 
+pub(super) fn owns_uri(loaded: &LoadedProject, uri: &Url) -> bool {
+    uri.to_file_path()
+        .is_ok_and(|path| crate::project_store::belongs_to_project(&loaded.root, &path))
+}
+
+/// Refuse a stale project snapshot rather than emit a partial cross-project edit.
+pub(super) fn check_project_scope(loaded: &LoadedProject, uri: &Url) -> Result<(), String> {
+    if !owns_uri(loaded, uri) {
+        return Err("this document belongs to a different project".to_string());
+    }
+    if loaded
+        .script_files
+        .iter()
+        .any(|path| !crate::project_store::belongs_to_project(&loaded.root, path))
+    {
+        return Err(
+            "project membership has changed; reload the project before renaming".to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// A local name: a leading letter/underscore, then letters/digits/underscores,
 /// and — like other M1 names — optional *internal* spaces (`Torque Request`), but
 /// no leading/trailing space and no leading digit (#148).

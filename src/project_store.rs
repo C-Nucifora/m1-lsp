@@ -144,6 +144,36 @@ pub(crate) fn contained_join(root: &Path, filename: &str) -> Option<PathBuf> {
 /// symlink-skip, depth cap — the m1-workspace#7 guarantees — #256).
 fn walk_scripts(root: &Path) -> Vec<PathBuf> {
     m1_workspace::find_scripts(root)
+        .into_iter()
+        .filter(|file| belongs_to_project(root, file))
+        .collect()
+}
+
+/// A nested project owns its discovered scripts and databases independently.
+pub(crate) fn belongs_to_project(root: &Path, file: &Path) -> bool {
+    let Some(parent) = file.parent() else {
+        return false;
+    };
+    for dir in parent.ancestors() {
+        if dir == root || (root.as_os_str().is_empty() && dir == Path::new(".")) {
+            return true;
+        }
+        if dir
+            .join(m1_workspace::PROJECT_FILE)
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_file())
+        {
+            return false;
+        }
+    }
+    false
+}
+
+fn project_dbc_files(root: &Path) -> Vec<PathBuf> {
+    m1_workspace::find_dbc_files(root)
+        .into_iter()
+        .filter(|file| belongs_to_project(root, file))
+        .collect()
 }
 
 /// Basename → symbol-path index for the Function/Method symbols that back
@@ -765,7 +795,7 @@ impl ProjectStore {
     pub fn load_from(&self, m1prj_path: &Path) -> Result<bool, String> {
         let root = m1prj_path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let m1cfg_path = m1_workspace::find_config_file(&root);
-        let dbc_paths = m1_workspace::find_dbc_files(&root);
+        let dbc_paths = project_dbc_files(&root);
         // Build the full project first; if .m1prj or .m1cfg fails, clear the
         // store so we don't keep serving a stale/partial project. A bad .m1dbc
         // is non-fatal (skipped in `augment`) — one malformed CAN file must not
@@ -825,7 +855,7 @@ impl ProjectStore {
             (lp.root.clone(), lp.m1prj_path.clone())
         };
         let m1cfg_path = m1_workspace::find_config_file(&root);
-        let dbc_paths = m1_workspace::find_dbc_files(&root);
+        let dbc_paths = project_dbc_files(&root);
         let mut project = Project::from_xml(m1prj_text)
             .map_err(|e| e.to_string())
             .and_then(|p| augment(p, &root, &m1cfg_path, &dbc_paths))?;
@@ -900,6 +930,89 @@ mod tests {
   </List>
  </ComponentStream>
 </DBC>"#;
+
+    #[test]
+    fn project_boundary_root_spellings() {
+        const CHILD_ENV: &str = "M1_BOUNDARY_ROOT_TEST";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let absolute = std::env::current_dir().unwrap();
+            for root in [
+                PathBuf::new(),
+                PathBuf::from("."),
+                PathBuf::from("relative"),
+                absolute.clone(),
+                absolute.join("relative"),
+            ] {
+                assert_eq!(walk_scripts(&root).len(), 2, "root={root:?}");
+                assert_eq!(project_dbc_files(&root).len(), 1, "root={root:?}");
+            }
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let relative = tmp.path().join("relative");
+        std::fs::create_dir(&relative).unwrap();
+        for root in [tmp.path(), relative.as_path()] {
+            write_project(root);
+            for directory in ["ordinary", "nested"] {
+                let dir = root.join(directory);
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::write(dir.join("Script.m1scr"), "local x = 1;\n").unwrap();
+            }
+            write_project(&root.join("nested"));
+            std::fs::write(root.join("Own.m1scr"), "local x = 1;\n").unwrap();
+            std::fs::write(root.join("Own.m1dbc"), DBC).unwrap();
+            std::fs::write(root.join("nested/Child.m1dbc"), DBC).unwrap();
+        }
+        // Isolate the working-directory change from other parallel tests.
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "project_store::tests::project_boundary_root_spellings",
+            ])
+            .env(CHILD_ENV, "1")
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+    }
+
+    #[test]
+    fn nested_project_files_are_excluded_from_load_and_refresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_project(tmp.path());
+        let nested = tmp.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        write_project(&nested);
+        std::fs::write(nested.join("Child.m1scr"), "local child = 1;\n").unwrap();
+        std::fs::write(nested.join("Child.m1dbc"), DBC).unwrap();
+        let own = tmp.path().join("Own.m1scr");
+        std::fs::write(&own, "local own = 1;\n").unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+        let check = || {
+            store.with_project(|loaded| {
+                let loaded = loaded.unwrap();
+                assert_eq!(loaded.script_files.as_slice(), std::slice::from_ref(&own));
+                assert!(loaded.dbc_paths.is_empty());
+                assert!(
+                    loaded
+                        .project
+                        .symbols()
+                        .iter()
+                        .all(|s| !s.path.contains("Balls3EV25"))
+                );
+            })
+        };
+        check();
+        store.reload_from_m1prj_text(M1PRJ).unwrap();
+        check();
+    }
 
     #[test]
     fn malformed_dbc_is_skipped_not_fatal() {
