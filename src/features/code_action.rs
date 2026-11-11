@@ -329,12 +329,15 @@ pub fn refactors(
     range: Range,
 ) -> Vec<CodeActionOrCommand> {
     let cst = m1_core::parse(text);
+    if !cst.syntax_diagnostics().is_empty() {
+        return Vec::new();
+    }
     let root = cst.root();
     let mut out = Vec::new();
     if let Some(a) = extract_local(text, li, enc, uri, range, root) {
         out.push(a);
     }
-    if let Some(a) = inline_local(li, enc, uri, range, root) {
+    if let Some(a) = inline_local(text, li, enc, uri, range, root) {
         out.push(a);
     }
     out
@@ -494,20 +497,23 @@ fn is_value_expression(n: Node) -> bool {
 
 /// A fresh local name (`myValue`, `myValue2`, …) not already declared in `root`.
 fn fresh_local_name(root: Node) -> String {
-    let locals = crate::features::locate::collect_locals(root);
+    let names: std::collections::HashSet<_> = root
+        .descendants()
+        .filter(|n| n.kind() == Kind::Identifier)
+        .map(|n| n.text())
+        .collect();
     let base = "myValue";
-    if !locals.contains_key(base) {
+    if !names.contains(base) {
         return base.to_string();
     }
     (2..)
         .map(|i| format!("{base}{i}"))
-        .find(|c| !locals.contains_key(c))
+        .find(|c| !names.contains(c.as_str()))
         .unwrap()
 }
 
 /// "Extract to local": wrap the selected expression in a `local` above its
-/// statement and replace every textually-identical value-position occurrence with
-/// the new name. `None` for an empty selection, a selection that doesn't cover a
+/// statement and replace that occurrence with the new name. `None` for an empty selection, a selection that doesn't cover a
 /// whole expression, or an expression in lvalue / type-annotation position.
 fn extract_local(
     text: &str,
@@ -553,31 +559,52 @@ fn extract_local(
         return None;
     }
 
-    // Every identical value-position occurrence, earliest first.
-    let mut occ: Vec<Node> = root
-        .descendants()
-        .filter(|n| is_value_expression(*n) && n.text().trim() == needle)
-        .collect();
-    occ.sort_by_key(|n| n.byte_range().start);
-    occ.dedup_by_key(|n| n.byte_range().start);
-    let first = *occ.first()?;
-
-    let name = fresh_local_name(root);
-    let stmt = enclosing_statement(first);
-    let line = li.position(stmt.byte_range().start, enc).line;
-    let indent = line_indent(text, li, enc, line);
-    let insert_pos = Position::new(line, 0);
-
-    let mut edits = vec![TextEdit {
-        range: Range::new(insert_pos, insert_pos),
-        new_text: format!("{indent}local {name} = {needle};\n"),
-    }];
-    for n in occ {
-        edits.push(TextEdit {
-            range: crate::convert::range(&n.byte_range(), li, enc),
-            new_text: name.clone(),
-        });
+    // Moving the complete RHS immediately before its statement preserves its
+    // evaluation count and control flow. Partial expressions may be conditional
+    // or follow a side-effecting operand, so leave them in place.
+    let stmt = enclosing_statement(expr);
+    if expr.byte_range() != (s..e)
+        || !matches!(
+            stmt.kind(),
+            Kind::AssignmentStatement | Kind::LocalDeclaration
+        )
+        || stmt.child_by_field(Field::Value)?.byte_range() != expr.byte_range()
+    {
+        return None;
     }
+    if stmt.children().iter().any(|n| n.kind() == Kind::Static) {
+        // Static initializers cannot refer to the runtime local this action introduces.
+        return None;
+    }
+    if stmt.kind() == Kind::AssignmentStatement {
+        if stmt.child_by_field(Field::Operator)?.text() != "=" {
+            return None;
+        }
+        let target = stmt.child_by_field(Field::Target)?;
+        if target.descendants().any(|n| {
+            !matches!(
+                n.kind(),
+                Kind::Identifier | Kind::MemberExpression | Kind::Dot
+            )
+        }) {
+            return None;
+        }
+    }
+    let name = fresh_local_name(root);
+    let start = stmt.byte_range().start;
+    let line = li.position(start, enc).line;
+    let indent = line_indent(text, li, enc, line);
+    let insert_pos = li.position(start, enc);
+    let edits = vec![
+        TextEdit {
+            range: Range::new(insert_pos, insert_pos),
+            new_text: format!("local {name} = {needle};\n{indent}"),
+        },
+        TextEdit {
+            range: crate::convert::range(&expr.byte_range(), li, enc),
+            new_text: name,
+        },
+    ];
     Some(refactor_action(
         "Extract to local",
         uri,
@@ -588,9 +615,9 @@ fn extract_local(
 
 /// "Inline local": replace each read of the cursor's `local` with its
 /// initializer and delete the declaration. `None` when the cursor isn't on a
-/// local, the local has no initializer, or it is reassigned anywhere (so its
-/// value isn't a single constant expression).
+/// local, has a nonliteral or annotated initializer, or is reassigned anywhere.
 fn inline_local(
+    text: &str,
     li: &LineIndex,
     enc: PositionEncoding,
     uri: &Url,
@@ -602,13 +629,24 @@ fn inline_local(
     let name = ident.text();
 
     // The declaration and its single initializer.
-    let decl = root.descendants().find(|n| {
+    let mut declarations = root.descendants().filter(|n| {
         n.kind() == Kind::LocalDeclaration
             && n.child_by_field(Field::Name).map(|nm| nm.text()) == Some(name)
-    })?;
+    });
+    let decl = declarations.next()?;
+    if declarations.next().is_some() {
+        return None;
+    }
     let decl_name = decl.child_by_field(Field::Name)?;
     let init = decl.child_by_field(Field::Value)?;
-    let init_text = init.text().to_string();
+    if decl.child_by_field(Field::TypeAnnotation).is_some() || !is_literal_initializer(init) {
+        return None;
+    }
+    let init_text = if init.kind() == Kind::NegativeNumber {
+        format!("({})", init.text())
+    } else {
+        init.text().to_string()
+    };
 
     // Collect read occurrences; bail if the local is ever an assignment target
     // (its value isn't a single expression we can substitute everywhere).
@@ -620,7 +658,7 @@ fn inline_local(
         if n.byte_range() == decl_name.byte_range() {
             continue; // the declaration's own name
         }
-        if within_assignment_target(n) {
+        if within_assignment_target(n) || n.byte_range().start < decl.byte_range().end {
             return None;
         }
         reads.push(n);
@@ -633,10 +671,24 @@ fn inline_local(
             new_text: init_text.clone(),
         })
         .collect();
-    // Delete the whole declaration line.
-    let decl_line = li.position(decl.byte_range().start, enc).line;
+    // Consume its line only if nothing except whitespace surrounds the exact
+    // declaration. Adjacent statements and comments belong to the user.
+    let mut deletion = decl.byte_range();
+    let line_start = text[..deletion.start].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[deletion.end..]
+        .find('\n')
+        .map_or(text.len(), |i| deletion.end + i + 1);
+    if text[line_start..deletion.start]
+        .chars()
+        .all(char::is_whitespace)
+        && text[deletion.end..line_end]
+            .chars()
+            .all(char::is_whitespace)
+    {
+        deletion = line_start..line_end;
+    }
     edits.push(TextEdit {
-        range: Range::new(Position::new(decl_line, 0), Position::new(decl_line + 1, 0)),
+        range: crate::convert::range(&deletion, li, enc),
         new_text: String::new(),
     });
     Some(refactor_action(
@@ -645,6 +697,23 @@ fn inline_local(
         edits,
         CodeActionKind::REFACTOR_INLINE,
     ))
+}
+
+/// Literal values have no runtime reads, effects or grouping to duplicate.
+fn is_literal_initializer(mut node: Node) -> bool {
+    loop {
+        match node.kind() {
+            Kind::Number | Kind::NegativeNumber | Kind::Boolean | Kind::String => return true,
+            Kind::ParenthesizedExpression => {
+                let children = node.named_children();
+                if children.len() != 1 {
+                    return false;
+                }
+                node = children[0];
+            }
+            _ => return false,
+        }
+    }
 }
 
 /// A `REFACTOR`-kind code action carrying a single-file `WorkspaceEdit`.
@@ -909,13 +978,13 @@ mod tests {
         let edits = action_edits(&actions, "Extract to local")
             .expect("an Extract to local action should be offered");
         let out = apply(src, &edits, &li);
-        // A `local` is introduced above the first statement, and every identical
-        // occurrence is replaced with the new name.
+        // The selected occurrence is extracted; the later expression still
+        // reads its inputs at its original evaluation point.
         assert_eq!(
             out,
             "local myValue = (Demo.Raw Value - Demo.Offset) * Demo.Scale Factor;\n\
              Demo.Widget Count = myValue;\n\
-             Demo.Mode Output = myValue;\n",
+             Demo.Mode Output = (Demo.Raw Value - Demo.Offset) * Demo.Scale Factor;\n",
             "got:\n{out}"
         );
     }
@@ -935,7 +1004,7 @@ mod tests {
 
     #[test]
     fn inline_local_replaces_uses_and_deletes_declaration() {
-        let src = "local myValue = Demo.Sensor Value * 2.0;\n\
+        let src = "local myValue = 2.0;\n\
                    Demo.Widget Count = myValue;\n\
                    Demo.Mode Output = myValue + 1;\n";
         let li = LineIndex::new(src);
@@ -946,8 +1015,8 @@ mod tests {
         let out = apply(src, &edits, &li);
         assert_eq!(
             out,
-            "Demo.Widget Count = Demo.Sensor Value * 2.0;\n\
-             Demo.Mode Output = Demo.Sensor Value * 2.0 + 1;\n",
+            "Demo.Widget Count = 2.0;\n\
+             Demo.Mode Output = 2.0 + 1;\n",
             "got:\n{out}"
         );
     }
@@ -964,6 +1033,125 @@ mod tests {
             action_edits(&actions, "Inline local").is_none(),
             "a reassigned local must not be inlinable"
         );
+    }
+
+    #[test]
+    fn inline_preserves_neighboring_statements_comments_and_eof() {
+        for (src, expected) in [
+            (
+                "local apple = 1; banana = 2;\nresult = apple;\n",
+                " banana = 2;\nresult = 1;\n",
+            ),
+            ("local apple = 1; result = apple;", " result = 1;"),
+            (
+                "local apple = 1; // keep\nresult = apple;",
+                " // keep\nresult = 1;",
+            ),
+            (
+                "local apple = (\n  1\n);\nresult = apple;",
+                "result = (\n  1\n);",
+            ),
+            ("local apple = 1;", ""),
+        ] {
+            let li = LineIndex::new(src);
+            let actions = refactors(src, &li, ENC, &uri(), cursor(src, "apple", &li));
+            let edits = action_edits(&actions, "Inline local").expect(src);
+            let mut spans: Vec<_> = edits
+                .iter()
+                .map(|e| (li.offset(e.range.start, ENC), li.offset(e.range.end, ENC)))
+                .collect();
+            spans.sort_unstable();
+            assert!(
+                spans.windows(2).all(|w| w[0].1 <= w[1].0),
+                "overlapping edits: {edits:?}"
+            );
+            assert_eq!(apply(src, &edits, &li), expected);
+        }
+    }
+
+    #[test]
+    fn inline_does_not_move_or_duplicate_runtime_computations() {
+        for src in [
+            "local apple = Read();\nresult = apple + apple;\n",
+            "local apple = Channel;\nChannel = 2;\nresult = apple;\n",
+            "local apple = 1 + 2;\nresult = apple * 3;\n",
+            "local apple = Read();\n",
+        ] {
+            let li = LineIndex::new(src);
+            let actions = refactors(src, &li, ENC, &uri(), cursor(src, "apple", &li));
+            assert!(action_edits(&actions, "Inline local").is_none(), "{src}");
+        }
+    }
+
+    #[test]
+    fn extract_preserves_each_evaluation_and_its_statement_position() {
+        for (src, selected, expected) in [
+            (
+                "first = Read();\nsecond = Read();\n",
+                "Read()",
+                "local myValue = Read();\nfirst = myValue;\nsecond = Read();\n",
+            ),
+            (
+                "Channel = 1; result = Channel;",
+                "Channel;",
+                "Channel = 1; local myValue = Channel;\nresult = myValue;",
+            ),
+        ] {
+            let li = LineIndex::new(src);
+            let offset = if selected == "Channel;" {
+                src.rfind("Channel").unwrap()
+            } else {
+                src.find(selected).unwrap()
+            };
+            let len = selected.trim_end_matches(';').len();
+            let range = Range::new(li.position(offset, ENC), li.position(offset + len, ENC));
+            let actions = refactors(src, &li, ENC, &uri(), range);
+            let edits = action_edits(&actions, "Extract to local").expect(src);
+            assert_eq!(apply(src, &edits, &li), expected);
+        }
+    }
+
+    #[test]
+    fn extract_refuses_static_initializers() {
+        let src = "static local apple = 1;\nresult = apple;\n";
+        let li = LineIndex::new(src);
+        let start = src.find('1').unwrap();
+        let selection = Range::new(
+            li.position(start, PositionEncoding::Utf16),
+            li.position(start + 1, PositionEncoding::Utf16),
+        );
+        let actions = refactors(src, &li, PositionEncoding::Utf16, &uri(), selection);
+        assert!(!actions.iter().any(
+            |a| matches!(a, CodeActionOrCommand::CodeAction(a) if a.title == "Extract to local")
+        ));
+    }
+
+    #[test]
+    fn extract_does_not_eagerly_evaluate_a_conditional_subexpression() {
+        let src = "result = Flag ? Read() : 0;\n";
+        let li = LineIndex::new(src);
+        let actions = refactors(src, &li, ENC, &uri(), sel(src, "Read()", &li));
+        assert!(action_edits(&actions, "Extract to local").is_none());
+    }
+
+    #[test]
+    fn refactors_do_not_capture_names_or_inline_duplicate_declarations() {
+        let src = "result = Read();\nother = myValue;\n";
+        let li = LineIndex::new(src);
+        let actions = refactors(src, &li, ENC, &uri(), sel(src, "Read()", &li));
+        let edits = action_edits(&actions, "Extract to local").unwrap();
+        assert_eq!(
+            apply(src, &edits, &li),
+            "local myValue2 = Read();\nresult = myValue2;\nother = myValue;\n"
+        );
+        for src in [
+            "local apple = 1;\nlocal apple = 2;\nresult = apple;\n",
+            "result = apple;\nlocal apple = 1;\n",
+        ] {
+            let li = LineIndex::new(src);
+            let actions = refactors(src, &li, ENC, &uri(), cursor(src, "apple", &li));
+            assert!(action_edits(&actions, "Inline local").is_none(), "{src}");
+        }
     }
 
     #[test]
@@ -1334,7 +1522,7 @@ mod tests {
                 enc,
                 &uri(),
                 std::slice::from_ref(&d),
-                p.map(|lp| &lp.project),
+                p.map(|lp| lp.project.as_ref()),
             );
             let titles: Vec<_> = actions
                 .iter()

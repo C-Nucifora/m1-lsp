@@ -21,8 +21,19 @@ pub fn is_valid_identifier(name: &str) -> bool {
         return false;
     }
     let mut chars = name.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ')
+    if !matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ')
+    {
+        return false;
+    }
+    let cst = m1_core::parse(&format!("local {name} = 0;"));
+    cst.syntax_diagnostics().is_empty()
+        && cst.root().named_children().first().is_some_and(|decl| {
+            decl.kind() == m1_core::Kind::LocalDeclaration
+                && decl
+                    .child_by_field(m1_core::Field::Name)
+                    .is_some_and(|n| n.text() == name)
+        })
 }
 
 /// A valid M1 symbol leaf name: non-empty, no surrounding space, and free of the

@@ -391,7 +391,7 @@ mod tests {
                 full,
                 &li,
                 PositionEncoding::Utf16,
-                p.map(|lp| &lp.project),
+                p.map(|lp| lp.project.as_ref()),
                 Some("Demo.Update.m1scr"),
             );
             let type_labels: Vec<String> = hs
@@ -435,7 +435,7 @@ mod tests {
                 full,
                 &li,
                 PositionEncoding::Utf16,
-                p.map(|lp| &lp.project),
+                p.map(|lp| lp.project.as_ref()),
                 Some("X.m1scr"),
             );
             // base unit of rad/s is deg/s per the manual's angle exception.
@@ -549,7 +549,7 @@ mod tests {
                 full,
                 &li,
                 PositionEncoding::Utf16,
-                p.map(|lp| &lp.project),
+                p.map(|lp| lp.project.as_ref()),
                 Some("Demo.Update.m1scr"),
                 ctx,
             )
@@ -611,7 +611,7 @@ mod tests {
                 full,
                 &li,
                 PositionEncoding::Utf16,
-                p.map(|lp| &lp.project),
+                p.map(|lp| lp.project.as_ref()),
                 Some("Demo.Update.m1scr"),
             )
         });

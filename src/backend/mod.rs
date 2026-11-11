@@ -42,7 +42,19 @@ mod navigation;
 mod progress;
 mod tokens;
 
+#[derive(Default)]
+pub(super) struct DiagnosticState {
+    environment: u64,
+    membership: u64,
+    last_project: Option<Url>,
+}
+
 pub struct Backend {
+    // Orders state commits and final output enqueue; analysis runs outside it.
+    state: tokio::sync::Mutex<DiagnosticState>,
+    optional_requests: Arc<tokio::sync::Semaphore>,
+    pending_requests: Arc<std::sync::Mutex<progress::PendingRequests>>,
+    progress_seq: std::sync::atomic::AtomicU64,
     client: Client,
     docs: DashMap<Url, Document>,
     encoding: std::sync::RwLock<PositionEncoding>,
@@ -131,6 +143,12 @@ impl Backend {
         store: Arc<ProjectStore>,
     ) -> Self {
         Self {
+            state: tokio::sync::Mutex::new(DiagnosticState::default()),
+            optional_requests: Arc::new(tokio::sync::Semaphore::new(
+                crate::concurrency::CONCURRENCY_LEVEL,
+            )),
+            pending_requests: Arc::default(),
+            progress_seq: std::sync::atomic::AtomicU64::new(0),
             client,
             docs: DashMap::new(),
             encoding: std::sync::RwLock::new(PositionEncoding::Utf16),
@@ -160,30 +178,37 @@ impl Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        crate::concurrency::wait_for_prior().await;
         self.initialize_impl(params).await
     }
 
     async fn initialized(&self, params: InitializedParams) {
+        crate::concurrency::wait_for_prior().await;
         self.initialized_impl(params).await
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        crate::concurrency::wait_for_prior().await;
         self.did_open_impl(params).await
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        crate::concurrency::wait_for_prior().await;
         self.did_change_impl(params).await
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        crate::concurrency::wait_for_prior().await;
         self.did_save_impl(params).await
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        crate::concurrency::wait_for_prior().await;
         self.did_close_impl(params).await
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        crate::concurrency::wait_for_prior().await;
         self.formatting_impl(params).await
     }
 
@@ -191,6 +216,7 @@ impl LanguageServer for Backend {
         &self,
         params: DocumentRangeFormattingParams,
     ) -> Result<Option<Vec<TextEdit>>> {
+        crate::concurrency::wait_for_prior().await;
         self.range_formatting_impl(params).await
     }
 
@@ -198,6 +224,7 @@ impl LanguageServer for Backend {
         &self,
         params: DocumentOnTypeFormattingParams,
     ) -> Result<Option<Vec<TextEdit>>> {
+        crate::concurrency::wait_for_prior().await;
         self.on_type_formatting_impl(params).await
     }
 
@@ -205,10 +232,12 @@ impl LanguageServer for Backend {
         &self,
         params: WorkspaceSymbolParams,
     ) -> Result<Option<Vec<SymbolInformation>>> {
+        crate::concurrency::wait_for_prior().await;
         self.symbol_impl(params).await
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        crate::concurrency::wait_for_prior().await;
         self.hover_impl(params).await
     }
 
@@ -216,6 +245,7 @@ impl LanguageServer for Backend {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
+        crate::concurrency::wait_for_prior().await;
         self.goto_definition_impl(params).await
     }
 
@@ -223,6 +253,7 @@ impl LanguageServer for Backend {
         &self,
         params: request::GotoDeclarationParams,
     ) -> Result<Option<request::GotoDeclarationResponse>> {
+        crate::concurrency::wait_for_prior().await;
         self.goto_declaration_impl(params).await
     }
 
@@ -230,10 +261,12 @@ impl LanguageServer for Backend {
         &self,
         params: request::GotoTypeDefinitionParams,
     ) -> Result<Option<request::GotoTypeDefinitionResponse>> {
+        crate::concurrency::wait_for_prior().await;
         self.goto_type_definition_impl(params).await
     }
 
     async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
+        crate::concurrency::wait_for_prior().await;
         self.document_link_impl(params).await
     }
 
@@ -241,6 +274,7 @@ impl LanguageServer for Backend {
         &self,
         params: SelectionRangeParams,
     ) -> Result<Option<Vec<SelectionRange>>> {
+        crate::concurrency::wait_for_prior().await;
         self.selection_range_impl(params).await
     }
 
@@ -248,6 +282,7 @@ impl LanguageServer for Backend {
         &self,
         params: GotoImplementationParams,
     ) -> Result<Option<GotoImplementationResponse>> {
+        crate::concurrency::wait_for_prior().await;
         self.goto_implementation_impl(params).await
     }
 
@@ -255,26 +290,32 @@ impl LanguageServer for Backend {
         &self,
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
+        crate::concurrency::wait_for_prior().await;
         self.document_symbol_impl(params).await
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        crate::concurrency::wait_for_prior().await;
         self.completion_impl(params).await
     }
 
     async fn completion_resolve(&self, item: CompletionItem) -> Result<CompletionItem> {
+        crate::concurrency::wait_for_prior().await;
         self.completion_resolve_impl(item).await
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        crate::concurrency::wait_for_prior().await;
         self.signature_help_impl(params).await
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        crate::concurrency::wait_for_prior().await;
         self.inlay_hint_impl(params).await
     }
 
     async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        crate::concurrency::wait_for_prior().await;
         self.code_lens_impl(params).await
     }
 
@@ -282,6 +323,7 @@ impl LanguageServer for Backend {
         &self,
         params: CallHierarchyPrepareParams,
     ) -> Result<Option<Vec<CallHierarchyItem>>> {
+        crate::concurrency::wait_for_prior().await;
         self.prepare_call_hierarchy_impl(params).await
     }
 
@@ -289,6 +331,7 @@ impl LanguageServer for Backend {
         &self,
         params: CallHierarchyIncomingCallsParams,
     ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        crate::concurrency::wait_for_prior().await;
         self.incoming_calls_impl(params).await
     }
 
@@ -296,6 +339,7 @@ impl LanguageServer for Backend {
         &self,
         params: CallHierarchyOutgoingCallsParams,
     ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        crate::concurrency::wait_for_prior().await;
         self.outgoing_calls_impl(params).await
     }
 
@@ -303,14 +347,17 @@ impl LanguageServer for Backend {
         &self,
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
+        crate::concurrency::wait_for_prior().await;
         self.prepare_rename_impl(params).await
     }
 
     async fn will_rename_files(&self, params: RenameFilesParams) -> Result<Option<WorkspaceEdit>> {
+        crate::concurrency::wait_for_prior().await;
         self.will_rename_files_impl(params).await
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        crate::concurrency::wait_for_prior().await;
         self.rename_impl(params).await
     }
 
@@ -318,6 +365,7 @@ impl LanguageServer for Backend {
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
+        crate::concurrency::wait_for_prior().await;
         self.semantic_tokens_full_impl(params).await
     }
 
@@ -325,6 +373,7 @@ impl LanguageServer for Backend {
         &self,
         params: SemanticTokensDeltaParams,
     ) -> Result<Option<SemanticTokensFullDeltaResult>> {
+        crate::concurrency::wait_for_prior().await;
         self.semantic_tokens_full_delta_impl(params).await
     }
 
@@ -332,10 +381,12 @@ impl LanguageServer for Backend {
         &self,
         params: SemanticTokensRangeParams,
     ) -> Result<Option<SemanticTokensRangeResult>> {
+        crate::concurrency::wait_for_prior().await;
         self.semantic_tokens_range_impl(params).await
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        crate::concurrency::wait_for_prior().await;
         self.references_impl(params).await
     }
 
@@ -343,22 +394,27 @@ impl LanguageServer for Backend {
         &self,
         params: DocumentHighlightParams,
     ) -> Result<Option<Vec<DocumentHighlight>>> {
+        crate::concurrency::wait_for_prior().await;
         self.document_highlight_impl(params).await
     }
 
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
+        crate::concurrency::wait_for_prior().await;
         self.folding_range_impl(params).await
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        crate::concurrency::wait_for_prior().await;
         self.code_action_impl(params).await
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        crate::concurrency::wait_for_prior().await;
         self.did_change_watched_files_impl(params).await
     }
 
     async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        crate::concurrency::wait_for_prior().await;
         self.did_change_configuration_impl(params).await
     }
 
@@ -366,6 +422,7 @@ impl LanguageServer for Backend {
         &self,
         params: DocumentDiagnosticParams,
     ) -> Result<DocumentDiagnosticReportResult> {
+        crate::concurrency::wait_for_prior().await;
         self.diagnostic_impl(params).await
     }
 
@@ -373,6 +430,7 @@ impl LanguageServer for Backend {
         &self,
         params: WorkspaceDiagnosticParams,
     ) -> Result<WorkspaceDiagnosticReportResult> {
+        crate::concurrency::wait_for_prior().await;
         self.workspace_diagnostic_impl(params).await
     }
 

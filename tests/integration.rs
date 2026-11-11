@@ -38,7 +38,7 @@ fn initialize_msg(id: i64) -> Value {
         "params":{"capabilities":{},"processId":null,"rootUri":null}})
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn initialize_advertises_capabilities() {
     let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
     // A single bidirectional duplex pair: the test drives `client`, the server
@@ -96,7 +96,7 @@ async fn negotiate_encoding(encs: Value) -> String {
         .to_string()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn position_encoding_respects_client_preference_order() {
     // The client's list is in preference order; pick the first we support.
     assert_eq!(
@@ -130,7 +130,7 @@ async fn read_response(stream: &mut DuplexStream, id: i64) -> Value {
 // discover the project from the file itself. We prove it via `prepareRename` on a
 // project leaf symbol: it reads the project store, so a non-null range means the
 // project was loaded by the didOpen fallback (it would be null otherwise).
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn did_open_discovers_project_without_root_uri() {
     use std::io::Write;
     use tower_lsp::lsp_types::Url;
@@ -209,7 +209,7 @@ async fn read_publish_for(stream: &mut DuplexStream, uri: &str) -> Vec<Value> {
 // surfaced in the editor, anchored to the `.m1prj`, once the project loads — not
 // only on the CLI. A parameter declared in the project but missing from the
 // `.m1cfg` should produce a T041 publishDiagnostics on the `.m1prj` URI.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn project_diagnostics_published_for_m1prj_on_init() {
     use std::io::Write;
     use tower_lsp::lsp_types::Url;
@@ -274,7 +274,7 @@ async fn project_diagnostics_published_for_m1prj_on_init() {
 
 // #141: Go to Definition on a bare `local` returns its declaration in the same
 // file, and works with no project loaded (locals are file-scoped).
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn goto_definition_resolves_a_local_without_project() {
     use tower_lsp::lsp_types::Url;
 
@@ -315,7 +315,7 @@ async fn goto_definition_resolves_a_local_without_project() {
 // in-file symbols (declaration == definition). The two handlers share one
 // resolution path; this asserts they return byte-identical locations so the
 // shared helper can't drift between them.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn goto_declaration_mirrors_goto_definition_for_a_local() {
     use tower_lsp::lsp_types::Url;
 
@@ -362,7 +362,7 @@ async fn goto_declaration_mirrors_goto_definition_for_a_local() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn code_action_offers_format_document_without_diagnostics() {
     use tower_lsp::lsp_types::Url;
 
@@ -421,7 +421,7 @@ async fn code_action_offers_format_document_without_diagnostics() {
 // #140: pull diagnostics. The server must advertise `diagnosticProvider` so
 // pull-capable clients (Neovim's vim.diagnostic, Helix) know it answers
 // `textDocument/diagnostic` and `workspace/diagnostic`.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn initialize_advertises_diagnostic_provider() {
     let (service, socket) = LspService::new(m1_lsp::backend::Backend::new);
     let (mut client, server) = duplex(1 << 16);

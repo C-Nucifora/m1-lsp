@@ -127,15 +127,9 @@ pub fn execute(
     open_text: &dyn Fn(&Url) -> Option<String>,
 ) -> Result<WorkspaceEdit, String> {
     // Local rename: file-scoped, in-buffer.
-    if let Some(node) = local::local_ident_at(root, byte) {
-        if !is_valid_identifier(new_name) {
-            return Err(format!(
-                "‘{new_name}’ is not a valid local name (letters, digits, underscore and internal spaces; no leading digit or surrounding space)"
-            ));
-        }
-        let name = node.text().to_string();
-        let mut edits = Vec::new();
-        local::collect_local_edits(root, &name, new_name, li, enc, &mut edits);
+    if local::local_ident_at(root, byte).is_some() {
+        let edits = local::local_rename_edits(root, byte, new_name, li, enc)
+            .ok_or_else(|| format!("‘{new_name}’ is not a valid, distinct local name"))?;
         let mut changes = HashMap::new();
         changes.insert(uri, edits);
         return Ok(WorkspaceEdit {

@@ -12,8 +12,9 @@ use std::sync::{Arc, RwLock};
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
 /// A loaded project plus the paths it came from (for reload + goto).
+#[derive(Clone)]
 pub struct LoadedProject {
-    pub project: Project,
+    pub project: Arc<Project>,
     pub root: PathBuf,
     pub m1prj_path: PathBuf,
     pub m1cfg_path: Option<PathBuf>,
@@ -38,7 +39,24 @@ impl LoadedProject {
     pub fn symbol_location(&self, sym: &Symbol) -> Option<Location> {
         let (target, line) = match &sym.filename {
             Some(f) => (contained_join(&self.root, f)?, 0),
-            None => (self.m1prj_path.clone(), sym.def_line?),
+            None => {
+                let script = if matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) {
+                    let name = crate::features::call_hierarchy::backing_file(sym);
+                    let mut matches = self
+                        .script_files
+                        .iter()
+                        .filter(|p| p.file_name().and_then(|n| n.to_str()) == Some(name.as_str()));
+                    let first = matches.next();
+                    // Ambiguous basenames have no unique backing file.
+                    first.filter(|_| matches.next().is_none())
+                } else {
+                    None
+                };
+                match script {
+                    Some(path) => (path.clone(), 0),
+                    None => (self.m1prj_path.clone(), sym.def_line?),
+                }
+            }
         };
         let uri = Url::from_file_path(&target).ok()?;
         Some(Location {
@@ -284,7 +302,8 @@ pub struct ProjectStore {
     /// (re)load and script-set change — the points where the project model or file
     /// set changes without the surviving files' content hash moving; plain buffer
     /// edits leave it alone.
-    analysis: RwLock<Option<ProjectAnalysis>>,
+    analysis: RwLock<Option<Arc<ProjectAnalysis>>>,
+    analysis_epoch: AtomicU64,
     /// Serializes [`Self::ensure_analysis`]'s rebuild (double-checked locking,
     /// #340): concurrent first-requests after an invalidation run the
     /// whole-corpus parse + taint solve once — the losers wait here, then read
@@ -295,6 +314,8 @@ pub struct ProjectStore {
 
 /// The cached cross-script analysis; see [`ProjectStore::analysis`].
 struct ProjectAnalysis {
+    generation: u64,
+    epoch: u64,
     /// Combined hash of every project script's path + on-disk content.
     content_hash: u64,
     /// Each script parsed exactly once (m1-typecheck's parse-once API), shared by
@@ -303,7 +324,9 @@ struct ProjectAnalysis {
     /// Solved cross-script channel taints (T080/T081 provenance).
     taints: m1_typecheck::cross_script::ChannelTaints,
     /// Project-scope diagnostics, memoized per `rate_inversion` (T089) flag.
-    diags: std::collections::HashMap<bool, Vec<m1_typecheck::diagnostics::TypeDiagnostic>>,
+    diags: std::sync::Mutex<
+        std::collections::HashMap<bool, Vec<m1_typecheck::diagnostics::TypeDiagnostic>>,
+    >,
 }
 
 impl ProjectStore {
@@ -323,31 +346,30 @@ impl ProjectStore {
         self.inner.read().unwrap().clone()
     }
 
+    fn snapshot_with_generation(&self) -> Option<(Arc<LoadedProject>, u64)> {
+        let current = self.inner.read().unwrap();
+        Some((current.clone()?, self.generation.load(Ordering::Acquire)))
+    }
+
+    fn replace_project(&self, project: Option<LoadedProject>) {
+        let mut current = self.inner.write().unwrap();
+        self.bump_generation();
+        *current = project.map(Arc::new);
+    }
+
     /// Re-walk the project root for `*.m1scr` files, refreshing the cached set
     /// without re-parsing the project. Cheap; called when a script file is
     /// created or deleted (an edit to an existing script doesn't change the set).
     pub fn refresh_scripts(&self) {
-        let stale_prj = {
-            let mut guard = self.inner.write().unwrap();
-            match guard.as_mut() {
-                // The common case: no request holds a snapshot right now, so
-                // the handle is unique and the set updates in place.
-                Some(arc) => match Arc::get_mut(arc) {
-                    Some(lp) => {
-                        lp.script_files = walk_scripts(&lp.root);
-                        None
-                    }
-                    // A request (or an in-flight graph/eval build) still holds
-                    // a snapshot. `Project` isn't `Clone`, so fall back to a
-                    // full reload from disk below — rare (a script was created
-                    // or deleted in the same instant) and always correct.
-                    None => Some(arc.m1prj_path.clone()),
-                },
-                None => None,
+        {
+            let mut current = self.inner.write().unwrap();
+            if let Some(project) = current.as_mut() {
+                // Copy only the file metadata when a reader retains a snapshot.
+                // The immutable model may contain valid unsaved project edits.
+                let project = Arc::make_mut(project);
+                project.script_files = walk_scripts(&project.root);
+                self.bump_generation();
             }
-        };
-        if let Some(prj) = stale_prj {
-            let _ = self.load_from(&prj);
         }
         // The script set changed (file created/deleted) — drop the stale graph
         // and the cross-script analysis (its parse/taints cover the old set).
@@ -451,7 +473,9 @@ impl ProjectStore {
     /// created/deleted) — a plain edit to an existing script is picked up by the
     /// content hash instead.
     pub fn invalidate_analysis(&self) {
-        *self.analysis.write().unwrap() = None;
+        let mut analysis = self.analysis.write().unwrap();
+        self.analysis_epoch.fetch_add(1, Ordering::Release);
+        *analysis = None;
     }
 
     /// Drop `Self::analysis` when the on-disk corpus no longer matches the hash
@@ -468,7 +492,7 @@ impl ProjectStore {
     pub fn revalidate_analysis(&self) {
         use std::hash::{Hash, Hasher};
         let Some(script_files) = self.with_project(|p| p.map(|lp| lp.script_files.clone())) else {
-            *self.analysis.write().unwrap() = None;
+            self.invalidate_analysis();
             return;
         };
         if self.analysis.read().unwrap().is_none() {
@@ -504,6 +528,7 @@ impl ProjectStore {
                 .as_ref()
                 .is_some_and(|a| a.content_hash != content_hash)
             {
+                self.analysis_epoch.fetch_add(1, Ordering::Release);
                 *guard = None;
             }
         }
@@ -529,17 +554,14 @@ impl ProjectStore {
         if self.analysis.read().unwrap().is_some() {
             return;
         }
-        let Some(script_files) = self.with_project(|p| p.map(|lp| lp.script_files.clone())) else {
-            return; // no project: nothing to build
+        let Some((project, generation)) = self.snapshot_with_generation() else {
+            return;
         };
-        // The taints below are solved against the project model as of NOW;
-        // remember which model that is so the store can be skipped if a reload
-        // supersedes it mid-build (#341 — previously the build implicitly
-        // blocked the reload by holding the project read lock).
-        let generation = self.generation.load(Ordering::Acquire);
+        let epoch = self.analysis_epoch.load(Ordering::Acquire);
+        let script_files = &project.script_files;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         let mut scripts: Vec<(String, String)> = Vec::with_capacity(script_files.len());
-        for path in &script_files {
+        for path in script_files {
             let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
                 continue;
             };
@@ -555,22 +577,27 @@ impl ProjectStore {
         // Reparse once and re-solve the cross-script taint graph (both
         // expensive, both run here with no RwLock held).
         let parsed = m1_typecheck::parsed::parse_all(&scripts);
-        let taints = self
-            .with_project(|p| p.map(|lp| m1_typecheck::cross_script::solve(&lp.project, &parsed)))
-            .unwrap_or_default();
-        // A reload changed the model mid-build: this analysis was solved
-        // against the superseded project, so drop it — the next request
-        // rebuilds against the fresh one (its invalidate_analysis already
-        // cleared the cell, and storing here would resurrect stale taints).
-        if self.generation.load(Ordering::Acquire) != generation {
-            return;
-        }
-        *self.analysis.write().unwrap() = Some(ProjectAnalysis {
+        let taints = m1_typecheck::cross_script::solve(&project.project, &parsed);
+        self.install_analysis(Arc::new(ProjectAnalysis {
+            generation,
+            epoch,
             content_hash,
             parsed,
             taints,
-            diags: std::collections::HashMap::new(),
-        });
+            diags: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }));
+    }
+
+    fn install_analysis(&self, candidate: Arc<ProjectAnalysis>) {
+        // Hold both guards so a reload cannot pass validation before installation.
+        let current = self.inner.read().unwrap();
+        let mut analysis = self.analysis.write().unwrap();
+        if current.is_some()
+            && self.generation.load(Ordering::Acquire) == candidate.generation
+            && self.analysis_epoch.load(Ordering::Acquire) == candidate.epoch
+        {
+            *analysis = Some(candidate);
+        }
     }
 
     /// Run `f` against the loaded project and its solved cross-script channel
@@ -584,12 +611,16 @@ impl ProjectStore {
         f: impl FnOnce(Option<(&LoadedProject, &m1_typecheck::cross_script::ChannelTaints)>) -> R,
     ) -> R {
         self.ensure_analysis();
-        let Some(lp) = self.snapshot() else {
+        let Some((lp, generation)) = self.snapshot_with_generation() else {
             return f(None);
         };
-        let analysis = self.analysis.read().unwrap();
+        let analysis = self.analysis.read().unwrap().clone();
         let empty = m1_typecheck::cross_script::ChannelTaints::default();
-        let taints = analysis.as_ref().map(|a| &a.taints).unwrap_or(&empty);
+        let taints = analysis
+            .as_ref()
+            .filter(|a| a.generation == generation)
+            .map(|a| &a.taints)
+            .unwrap_or(&empty);
         f(Some((&lp, taints)))
     }
 
@@ -669,61 +700,52 @@ impl ProjectStore {
         self.revalidate_analysis();
         self.ensure_analysis();
 
-        // Serve the memoized set when it was already computed under this flag.
-        if let Some(diags) = self
+        let Some((lp, generation)) = self.snapshot_with_generation() else {
+            return Vec::new();
+        };
+        let Some(analysis) = self
             .analysis
             .read()
             .unwrap()
-            .as_ref()
-            .and_then(|a| a.diags.get(&rate_inversion).cloned())
-        {
+            .clone()
+            .filter(|a| a.generation == generation)
+        else {
+            return Vec::new();
+        };
+        if let Some(diags) = analysis.diags.lock().unwrap().get(&rate_inversion).cloned() {
             return diags;
         }
-
-        // Miss for this flag: run the project-wide passes over the *cached* parse
-        // (no re-read, no re-parse) and memoize the result.
-        let computed = self.with_project(|p| {
-            let lp = p?;
-            let analysis = self.analysis.read().unwrap();
-            let parsed: &[m1_typecheck::parsed::ParsedScript] = analysis
-                .as_ref()
-                .map(|a| a.parsed.as_slice())
-                .unwrap_or(&[]);
-            let mut v = lp.project.missing_cfg_parameters();
-            v.extend(lp.project.audit());
-            v.extend(lp.project.audit_tags());
-            v.extend(lp.project.audit_display_units());
-            // T088 and T097 (recursive-call, m1-typecheck#187) are default-on like
-            // the CLI; T089 stays behind its opt-in.
-            v.extend(m1_typecheck::schedule::check(
-                &lp.project,
-                parsed,
-                true,
-                rate_inversion,
-                true,
-            ));
-            v.extend(m1_typecheck::schedule::check_usage(
-                &lp.project,
-                parsed,
-                true,
-                true,
-            ));
-            // T107 dbc-init-missing (M1 Build Error 1375): a DBC used but never
-            // Init'd — default-on, whole-project.
-            v.extend(m1_typecheck::dbc_init::check(&lp.project, parsed));
-            Some(v)
-        });
-        // Only cache when a project is loaded; with none loaded the empty result
-        // is cheap and a project may load before the next poll.
-        match computed {
-            Some(v) => {
-                if let Some(a) = self.analysis.write().unwrap().as_mut() {
-                    a.diags.insert(rate_inversion, v.clone());
-                }
-                v
-            }
-            None => Vec::new(),
-        }
+        // Keep this exact cache and model. A reload can detach it, but old work
+        // cannot write findings into its replacement.
+        let parsed = &analysis.parsed;
+        let mut v = lp.project.missing_cfg_parameters();
+        v.extend(lp.project.audit());
+        v.extend(lp.project.audit_tags());
+        v.extend(lp.project.audit_display_units());
+        // T088 and T097 (recursive-call, m1-typecheck#187) are default-on like
+        // the CLI; T089 stays behind its opt-in.
+        v.extend(m1_typecheck::schedule::check(
+            &lp.project,
+            parsed,
+            true,
+            rate_inversion,
+            true,
+        ));
+        v.extend(m1_typecheck::schedule::check_usage(
+            &lp.project,
+            parsed,
+            true,
+            true,
+        ));
+        // T107 dbc-init-missing (M1 Build Error 1375): a DBC used but never
+        // Init'd — default-on, whole-project.
+        v.extend(m1_typecheck::dbc_init::check(&lp.project, parsed));
+        analysis
+            .diags
+            .lock()
+            .unwrap()
+            .insert(rate_inversion, v.clone());
+        v
     }
 
     /// Discover + load from `start_dir`, replacing any cached project. Returns
@@ -731,7 +753,9 @@ impl ProjectStore {
     /// `Err(msg)` if a found project failed to load (store is left empty).
     pub fn discover_and_load(&self, start_dir: &Path) -> Result<bool, String> {
         let Some(m1prj_path) = m1_workspace::find_project_file(start_dir) else {
-            *self.inner.write().unwrap() = None;
+            self.replace_project(None);
+            self.invalidate_call_graph();
+            self.invalidate_analysis();
             return Ok(false);
         };
         self.load_from(&m1prj_path)
@@ -762,8 +786,8 @@ impl ProjectStore {
                 let scripts = scripts_from_disk(&script_files);
                 project.infer_return_types(&m1_typecheck::parsed::parse_all(&scripts));
                 let script_symbols = script_symbol_index(&project);
-                *self.inner.write().unwrap() = Some(Arc::new(LoadedProject {
-                    project,
+                self.replace_project(Some(LoadedProject {
+                    project: Arc::new(project),
                     root,
                     m1prj_path: m1prj_path.to_path_buf(),
                     m1cfg_path,
@@ -771,13 +795,12 @@ impl ProjectStore {
                     script_files,
                     script_symbols,
                 }));
-                self.bump_generation();
                 self.invalidate_call_graph();
                 self.invalidate_analysis();
                 Ok(true)
             }
             Err(e) => {
-                *self.inner.write().unwrap() = None;
+                self.replace_project(None);
                 self.invalidate_call_graph();
                 self.invalidate_analysis();
                 Err(e)
@@ -787,27 +810,22 @@ impl ProjectStore {
 
     /// Rebuild the cached project from edited `.m1prj` **text** (not disk), then
     /// re-apply the disk-sourced `.m1cfg`/`.m1dbc` and re-walk scripts. Used after
-    /// a rename rewrites `Project.m1prj`: the client applies the edit to a buffer
-    /// it may not save (and never notifies us via file-watching), so we refresh
-    /// the symbol model immediately from the text the rename produced — otherwise
-    /// the renamed symbol reads as undefined until the server restarts.
+    /// document notification changes `Project.m1prj`, including unsaved edits.
+    /// Proposed rename edits do not change the model until the client applies them.
     ///
     /// `Ok(false)` if no project is loaded. On a parse/augment failure the
     /// previous model is **kept** (not cleared) — a transiently invalid edit
     /// shouldn't drop the whole project; `Err` is returned for logging.
     pub fn reload_from_m1prj_text(&self, m1prj_text: &str) -> Result<bool, String> {
-        let (root, m1prj_path, m1cfg_path, dbc_paths) = {
+        let (root, m1prj_path) = {
             let guard = self.inner.read().unwrap();
             let Some(lp) = guard.as_ref() else {
                 return Ok(false);
             };
-            (
-                lp.root.clone(),
-                lp.m1prj_path.clone(),
-                lp.m1cfg_path.clone(),
-                lp.dbc_paths.clone(),
-            )
+            (lp.root.clone(), lp.m1prj_path.clone())
         };
+        let m1cfg_path = m1_workspace::find_config_file(&root);
+        let dbc_paths = m1_workspace::find_dbc_files(&root);
         let mut project = Project::from_xml(m1prj_text)
             .map_err(|e| e.to_string())
             .and_then(|p| augment(p, &root, &m1cfg_path, &dbc_paths))?;
@@ -816,8 +834,8 @@ impl ProjectStore {
         let scripts = scripts_from_disk(&script_files);
         project.infer_return_types(&m1_typecheck::parsed::parse_all(&scripts));
         let script_symbols = script_symbol_index(&project);
-        *self.inner.write().unwrap() = Some(Arc::new(LoadedProject {
-            project,
+        self.replace_project(Some(LoadedProject {
+            project: Arc::new(project),
             root,
             m1prj_path,
             m1cfg_path,
@@ -825,7 +843,6 @@ impl ProjectStore {
             script_files,
             script_symbols,
         }));
-        self.bump_generation();
         self.invalidate_call_graph();
         self.invalidate_analysis();
         Ok(true)
@@ -1120,6 +1137,37 @@ mod tests {
         });
     }
 
+    #[test]
+    fn script_refresh_preserves_unsaved_model_with_retained_snapshot() {
+        for retain in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            write_project(tmp.path());
+            let store = ProjectStore::new();
+            store.discover_and_load(tmp.path()).unwrap();
+            store
+                .reload_from_m1prj_text(&M1PRJ.replace("Speed Glonk", "Unsaved"))
+                .unwrap();
+            let held = retain.then(|| store.snapshot().unwrap());
+            let script = tmp.path().join("Added.m1scr");
+            for present in [true, false] {
+                if present {
+                    std::fs::write(&script, "local x = 1;\n").unwrap();
+                } else {
+                    std::fs::remove_file(&script).unwrap();
+                }
+                store.refresh_scripts();
+                store.with_project(|p| {
+                    let lp = p.unwrap();
+                    assert!(lp.project.symbols().get("Root.Unsaved").is_some());
+                    assert_eq!(lp.script_files.contains(&script), present);
+                });
+            }
+            if let Some(held) = held {
+                assert!(held.script_files.is_empty());
+            }
+        }
+    }
+
     // #259 + finding-2: project-scope diagnostics are memoized over a shared,
     // content-hashed parse cache so a pull-diagnostic poll on an unchanged corpus
     // is a cache hit. Crucially, a buffer edit (which fires `invalidate_call_graph`
@@ -1146,7 +1194,7 @@ mod tests {
             let cached = store.analysis.read().unwrap();
             let a = cached.as_ref().expect("first call populates the cache");
             assert_eq!(
-                a.diags.get(&false).map(Vec::len),
+                a.diags.lock().unwrap().get(&false).map(Vec::len),
                 Some(first_len),
                 "cached set matches the returned set"
             );
@@ -1184,7 +1232,7 @@ mod tests {
 
     // #341: refresh_scripts updates the script set even while a request still
     // holds a project snapshot (the Arc isn't unique, so the in-place path is
-    // unavailable and it falls back to a full reload). The held snapshot keeps
+    // unavailable and its file metadata is copied). The held snapshot keeps
     // its point-in-time view — that's the contract that lets requests run
     // without holding the store lock.
     #[test]
@@ -1525,5 +1573,39 @@ mod tests {
             assert_eq!(sym.value_type, m1_typecheck::ValueType::Unsigned);
             assert_eq!(sym.unit.as_deref(), Some("ratio"));
         });
+    }
+    #[test]
+    fn superseded_analysis_cannot_replace_new_cache_or_memoized_findings() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_project(tmp.path());
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+        store.ensure_analysis();
+        let old = store.analysis.read().unwrap().clone().unwrap();
+        store.invalidate_analysis();
+        store.ensure_analysis();
+        let fresh = store.analysis.read().unwrap().clone().unwrap();
+        assert!(!Arc::ptr_eq(&old, &fresh));
+        // An old builder finishes after a new analysis has been installed.
+        store.install_analysis(old.clone());
+        assert!(Arc::ptr_eq(
+            store.analysis.read().unwrap().as_ref().unwrap(),
+            &fresh
+        ));
+        // An old project-diagnostic pass writes only to its own detached cache.
+        old.diags.lock().unwrap().insert(true, vec![]);
+        assert!(!fresh.diags.lock().unwrap().contains_key(&true));
+        store.load_from(&tmp.path().join("Project.m1prj")).unwrap();
+        store.ensure_analysis();
+        let reloaded = store.analysis.read().unwrap().clone().unwrap();
+        store.install_analysis(fresh);
+        assert!(Arc::ptr_eq(
+            store.analysis.read().unwrap().as_ref().unwrap(),
+            &reloaded
+        ));
+        std::fs::write(tmp.path().join("Project.m1prj"), "<bad").unwrap();
+        assert!(store.load_from(&tmp.path().join("Project.m1prj")).is_err());
+        store.install_analysis(reloaded);
+        assert!(store.analysis.read().unwrap().is_none());
     }
 }

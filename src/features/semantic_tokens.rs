@@ -559,7 +559,7 @@ mod tests {
         store.with_project(|p| {
             let toks = semantic_tokens(
                 cst.root(),
-                p.map(|lp| &lp.project),
+                p.map(|lp| lp.project.as_ref()),
                 Some("X.m1scr"),
                 &li,
                 PositionEncoding::Utf16,

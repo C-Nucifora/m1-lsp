@@ -213,7 +213,11 @@ impl Backend {
                 method: "workspace/didChangeWatchedFiles".into(),
                 register_options: Some(options),
             };
-            let _ = self.client.register_capability(vec![reg]).await;
+            self.queue_client_request(super::progress::DeferredRequest::Watch(
+                RegistrationParams {
+                    registrations: vec![reg],
+                },
+            ));
         } else {
             self.client
                 .log_message(
@@ -232,17 +236,43 @@ impl Backend {
     }
 
     pub(super) async fn did_open_impl(&self, params: DidOpenTextDocumentParams) {
+        let mut state = self.state.lock().await;
+        state.membership += 1;
         let d = params.text_document;
-        self.docs
-            .insert(d.uri.clone(), Document::new(d.text, d.version));
+        tokio::task::block_in_place(|| {
+            self.docs
+                .insert(d.uri.clone(), Document::new(d.text, d.version));
+        });
         // A new/updated buffer can change script reads/writes — drop the cached
         // call graph so the next call-hierarchy request rebuilds from live text.
         self.store.invalidate_call_graph();
         // Some clients open a file without ever sending a `rootUri`/workspace
         // folder at `initialize`, leaving the server project-less. Fall back to
         // discovering the project from the opened file itself (#73).
-        self.ensure_project_loaded(&d.uri).await;
-        self.publish(d.uri).await;
+        let discovery = tokio::task::block_in_place(|| self.ensure_project_loaded(&d.uri));
+        let reload = self.reload_open_project(&d.uri);
+        let changed_model = discovery.is_some() || reload.is_some();
+        if changed_model {
+            state.environment += 1;
+        }
+        drop(state);
+        crate::concurrency::state_committed();
+        if let Some((level, message)) = discovery {
+            self.client.log_message(level, message).await;
+        }
+        if let Some(Err(error)) = reload {
+            self.client
+                .log_message(
+                    MessageType::WARNING,
+                    format!("m1-lsp: buffer project reload failed: {error}"),
+                )
+                .await;
+        }
+        if changed_model {
+            self.publish_all().await;
+        } else {
+            self.publish(d.uri).await;
+        }
     }
 
     pub(super) async fn did_change_impl(&self, params: DidChangeTextDocumentParams) {
@@ -250,17 +280,19 @@ impl Backend {
         // LSP, every range refers to the state after the previous change);
         // `range: None` remains the full-replacement fallback. Each ranged
         // change reparses incrementally, reusing untouched subtrees.
+        let mut state = self.state.lock().await;
         let uri = params.text_document.uri;
         let enc = self.enc();
         if let Some(mut doc) = self.docs.get_mut(&uri) {
             for change in params.content_changes {
                 doc.apply_change(change.range, &change.text, enc);
             }
-            doc.version = params.text_document.version;
+            doc.set_version(params.text_document.version);
         } else if let Some(change) = params.content_changes.into_iter().last() {
             // No open document (shouldn't happen): only a full change can
             // seed one.
             if change.range.is_none() {
+                state.membership += 1;
                 self.docs.insert(
                     uri.clone(),
                     Document::new(change.text, params.text_document.version),
@@ -270,27 +302,77 @@ impl Backend {
         // The edited buffer can change script reads/writes — drop the cached
         // call graph (rebuilt on the next call-hierarchy request).
         self.store.invalidate_call_graph();
-        self.publish(uri).await;
+        let reload = self.reload_open_project(&uri);
+        if reload.is_some() {
+            state.environment += 1;
+        }
+        drop(state);
+        crate::concurrency::state_committed();
+        if let Some(result) = reload {
+            if let Err(error) = result {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("m1-lsp: buffer project reload failed: {error}"),
+                    )
+                    .await;
+            }
+            self.publish_all().await;
+        } else {
+            self.publish(uri).await;
+        }
     }
 
-    pub(super) async fn did_save_impl(&self, params: DidSaveTextDocumentParams) {
-        // Disk now matches the buffer; the graph reads buffers first, so this is
-        // belt-and-braces, but keeps the cache honest for any disk-sourced script.
+    pub(super) async fn did_save_impl(&self, _params: DidSaveTextDocumentParams) {
+        let mut state = self.state.lock().await;
         self.store.invalidate_call_graph();
-        self.publish(params.text_document.uri).await;
+        state.environment += 1;
+        drop(state);
+        crate::concurrency::state_committed();
+        self.publish_all().await;
     }
 
     pub(super) async fn did_close_impl(&self, params: DidCloseTextDocumentParams) {
+        let mut state = self.state.lock().await;
+        state.membership += 1;
         let uri = params.text_document.uri;
         self.docs.remove(&uri);
         self.semtok_prev.remove(&uri);
         self.diag_prev.remove(&uri);
         // The graph would now read this file from disk instead of the buffer.
         self.store.invalidate_call_graph();
-        self.client.publish_diagnostics(uri, vec![], None).await;
+        let project_path = self.store.with_project(|p| {
+            p.filter(|lp| Url::from_file_path(&lp.m1prj_path).ok().as_ref() == Some(&uri))
+                .map(|lp| lp.m1prj_path.clone())
+        });
+        let reload = project_path.map(|path| self.store.load_from(&path));
+        if reload.is_some() {
+            state.environment += 1;
+        }
+        // Queue the clear before a reopen can commit through the same gate.
+        if !self
+            .client_pull_diagnostics
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.client.publish_diagnostics(uri, vec![], None).await;
+        }
+        drop(state);
+        crate::concurrency::state_committed();
+        if let Some(result) = reload {
+            if let Err(error) = result {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("m1-lsp: closed project reload failed: {error}"),
+                    )
+                    .await;
+            }
+            self.publish_all().await;
+        }
     }
 
     pub(super) async fn did_change_watched_files_impl(&self, params: DidChangeWatchedFilesParams) {
+        let mut state = self.state.lock().await;
         let touches_project = params.changes.iter().any(|c| {
             c.uri
                 .to_file_path()
@@ -298,7 +380,7 @@ impl Backend {
                     self.store.is_watched(&p)
                         || matches!(
                             p.extension().and_then(|x| x.to_str()),
-                            Some("m1prj") | Some("m1cfg")
+                            Some("m1prj") | Some("m1cfg") | Some("m1dbc")
                         )
                 })
                 .unwrap_or(false)
@@ -348,7 +430,12 @@ impl Backend {
                 .store
                 .with_project(|p| p.map(|lp| lp.m1prj_path.clone()));
             match reloaded {
-                Some(path) => self.store.load_from(&path),
+                Some(path) => {
+                    let open = Url::from_file_path(&path)
+                        .ok()
+                        .and_then(|uri| self.reload_open_project(&uri));
+                    open.unwrap_or_else(|| self.store.load_from(&path))
+                }
                 None => {
                     // A new project appeared; rediscover from the first changed file's directory.
                     let dir = params
@@ -365,6 +452,9 @@ impl Backend {
         } else {
             Ok(false)
         };
+        state.environment += 1;
+        drop(state);
+        crate::concurrency::state_committed();
         if let Err(e) = result {
             self.client
                 .log_message(MessageType::WARNING, format!("m1-lsp: reload failed: {e}"))
@@ -380,6 +470,7 @@ impl Backend {
     }
 
     pub(super) async fn did_change_configuration_impl(&self, params: DidChangeConfigurationParams) {
+        let mut state = self.state.lock().await;
         // New editor settings (the middle config layer). Re-resolve against the
         // current workspace root and re-publish so the change takes effect live.
         *self.editor_settings.write().unwrap() = Some(editor_settings(params.settings));
@@ -391,6 +482,9 @@ impl Backend {
         // changes; this also covers the same-value-different-file-content case.
         // The next hover/inlay request rebuilds against the new config.
         self.store.invalidate_call_graph();
+        state.environment += 1;
+        drop(state);
+        crate::concurrency::state_committed();
         let uris: Vec<Url> = self.docs.iter().map(|e| e.key().clone()).collect();
         for uri in uris {
             self.publish(uri).await;
@@ -403,45 +497,42 @@ impl Backend {
         self.publish_project_diagnostics().await;
     }
 
+    /// Apply actual project-buffer contents, including edits accepted by the client.
+    fn reload_open_project(&self, uri: &Url) -> Option<std::result::Result<bool, String>> {
+        let active = self
+            .store
+            .with_project(|p| p.and_then(|lp| Url::from_file_path(&lp.m1prj_path).ok()));
+        if active.as_ref() != Some(uri) {
+            return None;
+        }
+        let text = self.docs.get(uri)?.text.clone();
+        Some(self.store.reload_from_m1prj_text(&text))
+    }
+
     /// Fallback project discovery (#73). `initialize` loads the project from the
     /// client's `rootUri`/workspace folder, but some clients (or certain
     /// single-file open flows) never send one, leaving the store empty — so
     /// hover/definition/rename silently degrade. When a `.m1scr` is opened and no
     /// project is loaded yet, walk up from that file to find `Project.m1prj` and
     /// load it. A no-op once a project is loaded, and harmless when none exists.
-    pub(super) async fn ensure_project_loaded(&self, uri: &Url) {
+    fn ensure_project_loaded(&self, uri: &Url) -> Option<(MessageType, String)> {
         if self.store.project_loaded() {
-            return;
+            return None;
         }
-        let Some(dir) = uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        else {
-            return;
-        };
+        let dir = uri.to_file_path().ok()?.parent()?.to_path_buf();
         match self.store.discover_and_load(&dir) {
             Ok(true) => {
-                self.client
-                    .log_message(
-                        MessageType::INFO,
-                        "m1-lsp: project loaded (didOpen fallback)",
-                    )
-                    .await;
-                // Resolve the unified config now that we have a workspace root.
                 self.apply_config(&dir);
-                // Surface the project-scope audit for the just-loaded project (#139).
-                self.publish_project_diagnostics().await;
+                Some((
+                    MessageType::INFO,
+                    "m1-lsp: project loaded (didOpen fallback)".into(),
+                ))
             }
-            Ok(false) => { /* no project found from this file; stay project-less */ }
-            Err(e) => {
-                self.client
-                    .log_message(
-                        MessageType::WARNING,
-                        format!("m1-lsp: project load failed (didOpen fallback): {e}"),
-                    )
-                    .await;
-            }
+            Ok(false) => None,
+            Err(e) => Some((
+                MessageType::WARNING,
+                format!("m1-lsp: project load failed (didOpen fallback): {e}"),
+            )),
         }
     }
 }

@@ -395,7 +395,7 @@ fn prepare_offers_leaf_for_project_symbol_rejects_group() {
     let li = LineIndex::new(src);
     let enc = PositionEncoding::Utf16;
     store.with_project(|p| {
-        let project = p.map(|lp| &lp.project);
+        let project = p.map(|lp| lp.project.as_ref());
         // On the leaf -> Some range; on the group segment -> None.
         let on_leaf = prepare(
             cst.root(),
@@ -1065,7 +1065,7 @@ fn prepare_offers_group_segment() {
     let li = LineIndex::new(src);
     let enc = PositionEncoding::Utf16;
     store.with_project(|p| {
-        let project = p.map(|lp| &lp.project);
+        let project = p.map(|lp| lp.project.as_ref());
         // Cursor on `Engine` (the group segment) → offered.
         let on_group = prepare(
             cst.root(),
@@ -1125,7 +1125,7 @@ fn prepare_m1prj_offers_leaf_rejects_compound() {
     let (tmp, store) = setup();
     let _ = tmp;
     store.with_project(|p| {
-        let project = p.map(|lp| &lp.project);
+        let project = p.map(|lp| lp.project.as_ref());
         // On the leaf parameter declaration -> a range.
         let leaf = PRJ.find("Root.Engine.Threshold").unwrap() + 5;
         assert!(
@@ -1315,4 +1315,62 @@ fn file_move_keeping_the_basename_is_a_no_op() {
         })
         .expect("no error");
     assert!(r.is_none(), "basename unchanged -> mapping intact");
+}
+
+#[test]
+fn local_rename_rejects_keywords_and_collisions_at_both_entry_points() {
+    let src = "local apple = 1;\nlocal banana = 2;\napple = banana;\n";
+    let cst = m1_core::parse(src);
+    let li = LineIndex::new(src);
+    let byte = src.find("apple").unwrap();
+    for name in ["if", "local", "true", "Bad and Name", "banana"] {
+        assert!(
+            execute(
+                cst.root(),
+                byte,
+                name,
+                url(),
+                &li,
+                PositionEncoding::Utf16,
+                None,
+                None,
+                &|_| None
+            )
+            .is_err(),
+            "{name}"
+        );
+        assert!(
+            local_rename_edits(cst.root(), byte, name, &li, PositionEncoding::Utf16).is_none(),
+            "{name}"
+        );
+    }
+    for name in ["apple", "Brake Force"] {
+        assert!(
+            local_rename_edits(cst.root(), byte, name, &li, PositionEncoding::Utf16).is_some(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn local_rename_does_not_capture_an_existing_nonlocal_reference() {
+    let src = "local apple = 1;\nresult = banana + apple;\n";
+    let cst = m1_core::parse(src);
+    let li = LineIndex::new(src);
+    let byte = src.find("apple").unwrap();
+    assert!(local_rename_edits(cst.root(), byte, "banana", &li, PositionEncoding::Utf16).is_none());
+    assert!(
+        execute(
+            cst.root(),
+            byte,
+            "banana",
+            url(),
+            &li,
+            PositionEncoding::Utf16,
+            None,
+            None,
+            &|_| None
+        )
+        .is_err()
+    );
 }

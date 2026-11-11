@@ -47,7 +47,9 @@ pub fn local_rename_edits(
     enc: PositionEncoding,
 ) -> Option<Vec<TextEdit>> {
     let ident = local_ident_at(root, byte)?;
-    if !is_valid_identifier(new_name) {
+    if !is_valid_identifier(new_name)
+        || (ident.text() != new_name && root.descendants().any(|n| is_local_ref(n, new_name)))
+    {
         return None;
     }
     let mut out = Vec::new();

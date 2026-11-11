@@ -99,7 +99,7 @@ impl Backend {
             signature_help::signature_help(
                 cst.root(),
                 byte,
-                p.map(|lp| &lp.project),
+                p.map(|lp| lp.project.as_ref()),
                 doc.file_name.as_deref(),
             )
         }))
@@ -117,7 +117,7 @@ impl Backend {
         // The `.m1prj` is XML, not a script: offer rename on a component's Name.
         if is_m1prj(&uri) {
             return Ok(self.store.with_project(|p| {
-                rename::prepare_m1prj(&doc.text, byte, doc.enc, p.map(|lp| &lp.project))
+                rename::prepare_m1prj(&doc.text, byte, doc.enc, p.map(|lp| lp.project.as_ref()))
             }));
         }
         let cst = doc.parse();
@@ -127,7 +127,7 @@ impl Backend {
                 byte,
                 &doc.line_index,
                 doc.enc,
-                p.map(|lp| &lp.project),
+                p.map(|lp| lp.project.as_ref()),
                 doc.file_name.as_deref(),
             )
         }))
@@ -237,9 +237,8 @@ impl Backend {
         // silently do nothing); a successful edit may span several files.
         match result {
             Ok(edit) => {
-                // Refresh the project model from the edit so the renamed symbol is
-                // live immediately, without waiting for a client file-watch event.
-                self.refresh_after_rename(&edit).await;
+                // The client may decline this edit. Model changes follow its
+                // document notifications, never the proposed WorkspaceEdit.
                 // Tag multi-file / file-renaming edits with a confirmation
                 // annotation so capable clients can preview them (#151).
                 let supported = self
@@ -251,53 +250,6 @@ impl Backend {
             }
             Err(e) => Err(Error::invalid_params(e)),
         }
-    }
-
-    /// Refresh the in-memory project model after a rename that rewrote
-    /// `Project.m1prj`. The client applies the workspace edit to a buffer it may
-    /// never save (and never tells us via file-watching), so the cached symbol
-    /// table would otherwise keep the old name — making the just-renamed symbol
-    /// read as undefined until the server restarts. We derive the post-rename
-    /// `.m1prj` text from the edit we just computed, reload from it, and
-    /// re-publish so diagnostics reflect the new name immediately.
-    async fn refresh_after_rename(&self, edit: &WorkspaceEdit) {
-        let Some(prj_path) = self
-            .store
-            .with_project(|p| p.map(|lp| lp.m1prj_path.clone()))
-        else {
-            return;
-        };
-        let Ok(prj_uri) = Url::from_file_path(&prj_path) else {
-            return;
-        };
-        let orig = self
-            .docs
-            .get(&prj_uri)
-            .map(|d| d.text.clone())
-            .or_else(|| crate::disk_read::read_disk(&prj_path));
-        let Some(orig) = orig else {
-            return;
-        };
-        let Some(new_text) = rename::apply_workspace_edit_to(edit, &prj_uri, &orig, self.enc())
-        else {
-            // The rename didn't touch the project file (e.g. a local-only rename).
-            return;
-        };
-        if let Err(e) = self.store.reload_from_m1prj_text(&new_text) {
-            self.client
-                .log_message(
-                    MessageType::WARNING,
-                    format!("m1-lsp: post-rename project refresh failed: {e}"),
-                )
-                .await;
-            return;
-        }
-        let uris: Vec<Url> = self.docs.iter().map(|e| e.key().clone()).collect();
-        for uri in uris {
-            self.publish(uri).await;
-        }
-        // The rename may have changed which parameters are covered / names valid.
-        self.publish_project_diagnostics().await;
     }
 
     pub(super) async fn code_action_impl(
@@ -333,7 +285,7 @@ impl Backend {
                 enc,
                 &uri,
                 &params.context.diagnostics,
-                p.map(|lp| &lp.project),
+                p.map(|lp| lp.project.as_ref()),
             )
         });
         // Whole-file "fix all auto-fixable lint issues" via the shared m1-lint
@@ -368,6 +320,24 @@ impl Backend {
         }
         if let Some(edits) = fmt_sel_edits {
             actions.push(code_action::format_action("Format Selection", &uri, edits));
+        }
+        if let Some(only) = params.context.only {
+            actions.retain(|action| {
+                let CodeActionOrCommand::CodeAction(action) = action else {
+                    return false;
+                };
+                action.kind.as_ref().is_some_and(|kind| {
+                    only.iter().any(|requested| {
+                        let requested = requested.as_str();
+                        requested.is_empty()
+                            || kind.as_str() == requested
+                            || kind
+                                .as_str()
+                                .strip_prefix(requested)
+                                .is_some_and(|suffix| suffix.starts_with('.'))
+                    })
+                })
+            });
         }
         Ok((!actions.is_empty()).then_some(actions))
     }
@@ -455,5 +425,54 @@ mod code_action_format_tests {
             "\"Format Document\" must appear in code actions when the doc is open and \
              the formatter produces a change; got: {actions:?}"
         );
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn requested_action_kinds_filter_by_hierarchy() {
+        let (service, _socket) = LspService::new(|client| {
+            Backend::with_backends(
+                client,
+                Box::new(NoLint),
+                Box::new(NoTypes),
+                Box::new(AlwaysAddsNewline),
+                Arc::new(ProjectStore::new()),
+            )
+        });
+        let backend = service.inner();
+        let uri = Url::parse("file:///action-kinds.m1scr").unwrap();
+        backend.docs.insert(
+            uri.clone(),
+            crate::document::Document::new("local apple = 1;\nresult = apple;\n".into(), 1),
+        );
+        for (only, titles) in [
+            (vec![CodeActionKind::REFACTOR], vec!["Inline local"]),
+            (vec![CodeActionKind::REFACTOR_INLINE], vec!["Inline local"]),
+            (vec![CodeActionKind::SOURCE], vec!["Format Document"]),
+            (vec![CodeActionKind::QUICKFIX], vec![]),
+            (vec![], vec![]),
+        ] {
+            let actions = backend
+                .code_action(CodeActionParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                    range: Range::new(Position::new(0, 7), Position::new(0, 7)),
+                    context: CodeActionContext {
+                        diagnostics: vec![],
+                        only: Some(only),
+                        trigger_kind: None,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                })
+                .await
+                .unwrap()
+                .unwrap_or_default();
+            let actual: Vec<_> = actions
+                .iter()
+                .map(|a| match a {
+                    CodeActionOrCommand::CodeAction(action) => action.title.as_str(),
+                    CodeActionOrCommand::Command(command) => command.title.as_str(),
+                })
+                .collect();
+            assert_eq!(actual, titles);
+        }
     }
 }
