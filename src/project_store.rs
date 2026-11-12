@@ -986,10 +986,9 @@ mod tests {
     }
 
     #[test]
-    fn calibrated_tag_and_usage_audits_are_default_on() {
-        // Project audits run by default: calibrated T092 accepts ordinary
-        // untagged channels but still flags untagged project tables, while
-        // T093 flags a channel no script assigns.
+    fn native_tag_and_usage_audits_are_default_on() {
+        // Native Build parity: T092 flags missing Type tags on ordinary
+        // channels and project tables. T093 flags an unassigned channel.
         // Only T089 (rate inversion, which M1 Build does not emit) stays gated
         // on the `rate_inversion` flag.
         let tmp = tempfile::tempdir().unwrap();
@@ -1011,9 +1010,15 @@ mod tests {
         let diags = store.project_diagnostics();
         assert_eq!(
             count(&diags, m1_typecheck::diagnostics::TypeCode::T092),
-            1,
-            "default-on calibrated T092 flags only the untagged table; got {diags:?}"
+            2,
+            "default-on T092 flags both untagged objects; got {diags:?}"
         );
+        for subject in ["Root.A.Chan", "Root.A.Map"] {
+            assert!(diags.iter().any(|d| {
+                d.code == m1_typecheck::diagnostics::TypeCode::T092
+                    && d.subject.as_deref() == Some(subject)
+            }));
+        }
         assert_eq!(
             count(&diags, m1_typecheck::diagnostics::TypeCode::T093),
             1,
