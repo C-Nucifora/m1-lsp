@@ -154,6 +154,14 @@ fn is_write(n: Node) -> bool {
     crate::features::locate::is_write_of(top, top.parent())
 }
 
+fn is_declaration(n: Node) -> bool {
+    n.parent().is_some_and(|p| {
+        p.kind() == Kind::LocalDeclaration
+            && p.child_by_field(m1_core::Field::Name)
+                .is_some_and(|name| name.byte_range() == n.byte_range())
+    })
+}
+
 /// Every top-level dotted-path occurrence in `root`, as `(path, byte_range,
 /// is_write)`. A "write" is an assignment target or a `local` declaration name;
 /// everything else is a read. Skips type-annotation names. Powers the
@@ -176,6 +184,18 @@ pub fn references(
     li: &LineIndex,
     enc: PositionEncoding,
 ) -> Option<Vec<Location>> {
+    references_with_declarations(root, byte, uri, li, enc, true)
+}
+
+/// Reference search honoring the client's declaration preference.
+pub fn references_with_declarations(
+    root: Node,
+    byte: usize,
+    uri: Url,
+    li: &LineIndex,
+    enc: PositionEncoding,
+    include_declaration: bool,
+) -> Option<Vec<Location>> {
     let nodes = occurrences(root, byte);
     if nodes.is_empty() {
         return None;
@@ -183,6 +203,7 @@ pub fn references(
     Some(
         nodes
             .into_iter()
+            .filter(|n| include_declaration || !is_declaration(*n))
             .map(|n| Location {
                 uri: uri.clone(),
                 range: range(&n.byte_range(), li, enc),
@@ -218,11 +239,13 @@ fn path_text_locations(
     li: &LineIndex,
     enc: PositionEncoding,
     writes_only: bool,
+    include_declaration: bool,
 ) -> Vec<Location> {
     let mut nodes = Vec::new();
     collect_path_matches(root, path, &mut nodes);
     nodes
         .into_iter()
+        .filter(|n| include_declaration || !is_declaration(*n))
         .filter(|n| !writes_only || is_write(*n))
         .map(|n| Location {
             uri: uri.clone(),
@@ -248,6 +271,7 @@ fn path_text_locations(
 #[allow(clippy::too_many_arguments)]
 fn project_canonical_refs(
     writes_only: bool,
+    include_declaration: bool,
     project: &Project,
     script_files: &[std::path::PathBuf],
     cursor_uri: &Url,
@@ -265,6 +289,7 @@ fn project_canonical_refs(
             collect_local_idents(cursor_cst.root(), &name, &mut nodes);
             let locs: Vec<Location> = nodes
                 .into_iter()
+                .filter(|n| include_declaration || !is_declaration(*n))
                 .filter(|n| !writes_only || is_write(*n))
                 .map(|n| Location {
                     uri: cursor_uri.clone(),
@@ -308,6 +333,7 @@ fn project_canonical_refs(
                         &li,
                         enc,
                         writes_only,
+                        include_declaration,
                     )),
                 }
             }
@@ -325,8 +351,33 @@ pub fn project_references(
     enc: PositionEncoding,
     open_text: &dyn Fn(&Url) -> Option<String>,
 ) -> Option<Vec<Location>> {
+    project_references_with_declarations(
+        project,
+        script_files,
+        cursor_uri,
+        cursor_text,
+        byte,
+        enc,
+        open_text,
+        true,
+    )
+}
+
+/// Project-wide reference search honoring the client's declaration preference.
+#[allow(clippy::too_many_arguments)]
+pub fn project_references_with_declarations(
+    project: &Project,
+    script_files: &[std::path::PathBuf],
+    cursor_uri: &Url,
+    cursor_text: &str,
+    byte: usize,
+    enc: PositionEncoding,
+    open_text: &dyn Fn(&Url) -> Option<String>,
+    include_declaration: bool,
+) -> Option<Vec<Location>> {
     project_canonical_refs(
         false,
+        include_declaration,
         project,
         script_files,
         cursor_uri,
@@ -353,6 +404,7 @@ pub fn project_implementations(
     open_text: &dyn Fn(&Url) -> Option<String>,
 ) -> Option<Vec<Location>> {
     project_canonical_refs(
+        true,
         true,
         project,
         script_files,

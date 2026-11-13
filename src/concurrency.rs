@@ -27,6 +27,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use tokio::sync::watch;
 use tower_lsp::jsonrpc::{Request, Response};
 use tower_service::Service;
 
@@ -38,19 +39,50 @@ use tower_service::Service;
 /// give the window real headroom.
 pub const CONCURRENCY_LEVEL: usize = 16;
 
-/// Runs each handler future as its own tokio task (see the module docs).
+/// Runs handlers independently while reserving mutation order at admission.
 pub struct SpawnHandlers<S> {
     inner: S,
-    document_sync: tokio::sync::watch::Receiver<bool>,
+    tail: watch::Receiver<bool>,
+}
+
+struct Admission {
+    predecessor: Option<watch::Receiver<bool>>,
+    completion: Option<watch::Sender<bool>>,
+}
+
+tokio::task_local! {
+    static ADMISSION: Admission;
+}
+
+async fn wait(mut predecessor: watch::Receiver<bool>) {
+    while !*predecessor.borrow_and_update() {
+        predecessor
+            .changed()
+            .await
+            .expect("state mutation ended before committing");
+    }
+}
+
+/// Called inside Backend's request future, so tower-lsp can cancel the wait.
+pub(crate) async fn wait_for_prior() {
+    if let Ok(Some(prior)) = ADMISSION.try_with(|a| a.predecessor.clone()) {
+        wait(prior).await;
+    }
+}
+
+/// Release the next mutation before diagnostics and client round trips.
+pub(crate) fn state_committed() {
+    let _ = ADMISSION.try_with(|a| {
+        if let Some(done) = &a.completion {
+            done.send_replace(true);
+        }
+    });
 }
 
 impl<S> SpawnHandlers<S> {
     pub fn new(inner: S) -> Self {
-        let (_, document_sync) = tokio::sync::watch::channel(true);
-        Self {
-            inner,
-            document_sync,
-        }
+        let (_, tail) = watch::channel(true);
+        Self { inner, tail }
     }
 }
 
@@ -69,40 +101,201 @@ where
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
-        let mut previous = self.document_sync.clone();
-        let completed = if matches!(
+        let prior = self.tail.clone();
+        let mutation = matches!(
             req.method(),
             "textDocument/didOpen"
                 | "textDocument/didChange"
-                | "textDocument/didClose"
                 | "textDocument/didSave"
-                | "workspace/didChangeConfiguration"
+                | "textDocument/didClose"
                 | "workspace/didChangeWatchedFiles"
-        ) {
-            let (completed, pending) = tokio::sync::watch::channel(false);
-            self.document_sync = pending;
-            Some(completed)
-        } else {
-            None
-        };
+                | "workspace/didChangeConfiguration"
+        );
+        let completion = mutation.then(|| {
+            let (done, tail) = watch::channel(false);
+            self.tail = tail;
+            done
+        });
+        // Preserve tower-lsp's synchronous admission and cancellation registration.
         let fut = self.inner.call(req);
-        // A panic inside a handler re-panics here, matching the pre-wrapper
-        // behaviour (an unwinding handler took down the serve loop).
-        Box::pin(async move {
-            tokio::spawn(async move {
-                // Assign barriers in call order, before tasks can be scheduled
-                // out of order and apply incremental edits to the wrong text.
-                if !*previous.borrow() {
-                    let _ = previous.changed().await;
-                }
-                let result = fut.await;
-                if let Some(completed) = completed {
-                    let _ = completed.send(true);
-                }
+        if let Some(done) = completion {
+            // Admitted notifications must commit even if their outer future is dropped.
+            // Invalid params and other rejected notifications still release their link
+            // after the predecessor, without requiring a Backend callback.
+            let task = tokio::spawn(async move {
+                wait(prior).await;
+                let result = ADMISSION
+                    .scope(
+                        Admission {
+                            predecessor: None,
+                            completion: Some(done.clone()),
+                        },
+                        fut,
+                    )
+                    .await;
+                done.send_replace(true);
                 result
+            });
+            Box::pin(async move { task.await.expect("state mutation task panicked") })
+        } else {
+            Box::pin(async move {
+                tokio::spawn(ADMISSION.scope(
+                    Admission {
+                        predecessor: Some(prior),
+                        completion: None,
+                    },
+                    fut,
+                ))
+                .await
+                .expect("request handler task panicked")
             })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    struct HeldService {
+        mutation: watch::Receiver<bool>,
+        effects: watch::Receiver<bool>,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+    impl Service<Request> for HeldService {
+        type Response = Option<Response>;
+        type Error = std::convert::Infallible;
+        type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: Request) -> Self::Future {
+            let name = req.method().to_owned();
+            let mutation = self.mutation.clone();
+            let effects = self.effects.clone();
+            let log = self.log.clone();
+            Box::pin(async move {
+                if name == "textDocument/didOpen" {
+                    wait(mutation).await;
+                    log.lock().unwrap().push("open".into());
+                    state_committed();
+                    wait(effects).await;
+                } else if name == "textDocument/didChange" {
+                    // Simulate tower rejecting parameters without entering Backend.
+                } else if name == "textDocument/didSave" {
+                    log.lock().unwrap().push("save".into());
+                    state_committed();
+                } else {
+                    wait_for_prior().await;
+                    log.lock().unwrap().push("request".into());
+                }
+                Ok(None)
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropped_notifications_and_rejected_params_preserve_the_chain() {
+        let (release, mutation) = watch::channel(false);
+        let (finish, effects) = watch::channel(false);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut service = SpawnHandlers::new(HeldService {
+            mutation,
+            effects,
+            log: log.clone(),
+        });
+        for method in [
+            "textDocument/didOpen",
+            "textDocument/didChange",
+            "textDocument/didSave",
+        ] {
+            drop(service.call(Request::build(method).finish()));
+        }
+        let mut request =
+            tokio::spawn(service.call(Request::build("textDocument/hover").id(1).finish()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut request)
+                .await
+                .is_err()
+        );
+        assert!(log.lock().unwrap().is_empty());
+        release.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(2), request)
             .await
-            .expect("request handler task panicked")
-        })
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(*log.lock().unwrap(), ["open", "save", "request"]);
+        // didOpen's effects are still blocked; they did not hold the next mutation.
+        finish.send_replace(true);
+    }
+
+    struct HeldBackend {
+        release: Arc<tokio::sync::Notify>,
+    }
+    #[tower_lsp::async_trait]
+    impl tower_lsp::LanguageServer for HeldBackend {
+        async fn initialize(
+            &self,
+            _: tower_lsp::lsp_types::InitializeParams,
+        ) -> tower_lsp::jsonrpc::Result<tower_lsp::lsp_types::InitializeResult> {
+            Ok(tower_lsp::lsp_types::InitializeResult::default())
+        }
+        async fn shutdown(&self) -> tower_lsp::jsonrpc::Result<()> {
+            Ok(())
+        }
+        async fn did_open(&self, _: tower_lsp::lsp_types::DidOpenTextDocumentParams) {
+            self.release.notified().await;
+            state_committed();
+        }
+        async fn hover(
+            &self,
+            _: tower_lsp::lsp_types::HoverParams,
+        ) -> tower_lsp::jsonrpc::Result<Option<tower_lsp::lsp_types::Hover>> {
+            wait_for_prior().await;
+            Ok(None)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn request_waiting_for_a_mutation_remains_cancellable() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (inner, _socket) = tower_lsp::LspService::new(|_| HeldBackend {
+            release: release.clone(),
+        });
+        let mut service = SpawnHandlers::new(inner);
+        service
+            .call(
+                Request::build("initialize")
+                    .id(1)
+                    .params(json!({"capabilities":{}}))
+                    .finish(),
+            )
+            .await
+            .unwrap();
+        drop(service.call(Request::build("textDocument/didOpen").params(json!({"textDocument":{"uri":"file:///held.m1scr","languageId":"m1","version":1,"text":""}})).finish()));
+        let request = tokio::spawn(service.call(Request::build("textDocument/hover").id(2).params(json!({"textDocument":{"uri":"file:///held.m1scr"},"position":{"line":0,"character":0}})).finish()));
+        service
+            .call(
+                Request::build("$/cancelRequest")
+                    .params(json!({"id":2}))
+                    .finish(),
+            )
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), request)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(response).unwrap()["error"]["code"],
+            -32800
+        );
+        release.notify_one();
     }
 }

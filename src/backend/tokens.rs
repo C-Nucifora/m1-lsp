@@ -12,19 +12,28 @@ impl Backend {
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
+        let state = self.state.lock().await;
+        let environment = state.environment;
         let Some(doc) = self.doc_context(&params.text_document.uri) else {
             return Ok(None);
         };
+        drop(state);
         let cst = doc.parse();
         let tokens = self.store.with_project(|p| {
             semantic_tokens::semantic_tokens(
                 cst.root(),
-                p.map(|lp| &lp.project),
+                p.map(|lp| lp.project.as_ref()),
                 doc.file_name.as_deref(),
                 &doc.line_index,
                 doc.enc,
             )
         });
+        let state = self.state.lock().await;
+        if state.environment != environment
+            || self.docs.get(&params.text_document.uri).map(|d| d.revision) != Some(doc.revision)
+        {
+            return Err(tower_lsp::jsonrpc::Error::content_modified());
+        }
         let id = self.next_semtok_id();
         self.semtok_prev.insert(
             params.text_document.uri.clone(),
@@ -41,19 +50,28 @@ impl Backend {
         params: SemanticTokensDeltaParams,
     ) -> Result<Option<SemanticTokensFullDeltaResult>> {
         let uri = params.text_document.uri;
+        let state = self.state.lock().await;
+        let environment = state.environment;
         let Some(doc) = self.doc_context(&uri) else {
             return Ok(None);
         };
+        drop(state);
         let cst = doc.parse();
         let tokens = self.store.with_project(|p| {
             semantic_tokens::semantic_tokens(
                 cst.root(),
-                p.map(|lp| &lp.project),
+                p.map(|lp| lp.project.as_ref()),
                 doc.file_name.as_deref(),
                 &doc.line_index,
                 doc.enc,
             )
         });
+        let state = self.state.lock().await;
+        if state.environment != environment
+            || self.docs.get(&uri).map(|d| d.revision) != Some(doc.revision)
+        {
+            return Err(tower_lsp::jsonrpc::Error::content_modified());
+        }
         let id = self.next_semtok_id();
         let prev = self
             .semtok_prev
@@ -79,14 +97,17 @@ impl Backend {
         &self,
         params: SemanticTokensRangeParams,
     ) -> Result<Option<SemanticTokensRangeResult>> {
+        let state = self.state.lock().await;
+        let environment = state.environment;
         let Some(doc) = self.doc_context(&params.text_document.uri) else {
             return Ok(None);
         };
+        drop(state);
         let cst = doc.parse();
         let tokens = self.store.with_project(|p| {
             semantic_tokens::semantic_tokens_range(
                 cst.root(),
-                p.map(|lp| &lp.project),
+                p.map(|lp| lp.project.as_ref()),
                 doc.file_name.as_deref(),
                 &doc.line_index,
                 doc.enc,
@@ -94,6 +115,12 @@ impl Backend {
                 params.range.end.line,
             )
         });
+        let state = self.state.lock().await;
+        if state.environment != environment
+            || self.docs.get(&params.text_document.uri).map(|d| d.revision) != Some(doc.revision)
+        {
+            return Err(tower_lsp::jsonrpc::Error::content_modified());
+        }
         Ok(Some(SemanticTokensRangeResult::Tokens(SemanticTokens {
             result_id: None,
             data: tokens,

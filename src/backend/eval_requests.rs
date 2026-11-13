@@ -29,7 +29,7 @@ impl Backend {
                 hover::hover(
                     cst.root(),
                     byte,
-                    p.map(|lp| &lp.project),
+                    p.map(|lp| lp.project.as_ref()),
                     doc.file_name.as_deref(),
                     &doc.line_index,
                     doc.enc,
@@ -112,7 +112,7 @@ impl Backend {
                     params.range,
                     &doc.line_index,
                     doc.enc,
-                    p.map(|lp| &lp.project),
+                    p.map(|lp| lp.project.as_ref()),
                     doc.file_name.as_deref(),
                 )
             });

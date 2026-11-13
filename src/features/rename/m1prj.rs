@@ -110,6 +110,10 @@ pub fn execute_m1prj(
     loaded: &LoadedProject,
     open_text: &dyn Fn(&Url) -> Option<String>,
 ) -> Result<WorkspaceEdit, String> {
+    super::helpers::check_project_scope(loaded, &prj_uri)?;
+    if prj_uri.to_file_path().ok().as_ref() != Some(&loaded.m1prj_path) {
+        return Err("this is not the loaded project file".to_string());
+    }
     let project = &loaded.project;
     let (target_path, _) = name_attr_at(prj_text, byte)
         .ok_or_else(|| "place the cursor on a component Name in the project file".to_string())?;

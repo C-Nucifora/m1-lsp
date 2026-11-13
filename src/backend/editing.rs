@@ -99,7 +99,7 @@ impl Backend {
             signature_help::signature_help(
                 cst.root(),
                 byte,
-                p.map(|lp| &lp.project),
+                p.map(|lp| lp.project.as_ref()),
                 doc.file_name.as_deref(),
             )
         }))
@@ -117,7 +117,14 @@ impl Backend {
         // The `.m1prj` is XML, not a script: offer rename on a component's Name.
         if is_m1prj(&uri) {
             return Ok(self.store.with_project(|p| {
-                rename::prepare_m1prj(&doc.text, byte, doc.enc, p.map(|lp| &lp.project))
+                let project =
+                    p.filter(|lp| uri.to_file_path().ok().as_ref() == Some(&lp.m1prj_path));
+                rename::prepare_m1prj(
+                    &doc.text,
+                    byte,
+                    doc.enc,
+                    project.map(|lp| lp.project.as_ref()),
+                )
             }));
         }
         let cst = doc.parse();
@@ -127,7 +134,11 @@ impl Backend {
                 byte,
                 &doc.line_index,
                 doc.enc,
-                p.map(|lp| &lp.project),
+                p.filter(|lp| {
+                    uri.to_file_path()
+                        .is_ok_and(|path| crate::project_store::belongs_to_project(&lp.root, &path))
+                })
+                .map(|lp| lp.project.as_ref()),
                 doc.file_name.as_deref(),
             )
         }))
@@ -182,12 +193,21 @@ impl Backend {
     }
 
     pub(super) async fn rename_impl(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let state = self.state.lock().await;
+        let environment = state.environment;
+        let membership = state.membership;
+        let revisions: Vec<_> = self
+            .docs
+            .iter()
+            .map(|d| (d.key().clone(), d.revision))
+            .collect();
         let new_name = params.new_name;
         let tdp = params.text_document_position;
         let uri = tdp.text_document.uri;
         let Some(doc) = self.doc_context(&uri) else {
             return Ok(None);
         };
+        drop(state);
         let byte = doc.byte(tdp.position);
         let enc = doc.enc;
         // Open buffers win over on-disk copies so an in-flight edit is seen.
@@ -233,10 +253,22 @@ impl Backend {
             })
         };
         self.progress_end(progress).await;
+        let state = self.state.lock().await;
+        // Progress round trips and project reads can outlive any contributing buffer.
+        if state.environment != environment
+            || state.membership != membership
+            || revisions
+                .iter()
+                .any(|(uri, revision)| self.docs.get(uri).map(|d| d.revision) != Some(*revision))
+        {
+            return Err(Error::content_modified());
+        }
         // An Err is surfaced to the user (Ok(None) would make the client
         // silently do nothing); a successful edit may span several files.
         match result {
             Ok(edit) => {
+                // The client may decline this edit. Model changes follow its
+                // document notifications, never the proposed WorkspaceEdit.
                 // Tag multi-file / file-renaming edits with a confirmation
                 // annotation so capable clients can preview them (#151).
                 let supported = self
@@ -283,7 +315,7 @@ impl Backend {
                 enc,
                 &uri,
                 &params.context.diagnostics,
-                p.map(|lp| &lp.project),
+                p.map(|lp| lp.project.as_ref()),
             )
         });
         // Whole-file "fix all auto-fixable lint issues" via the shared m1-lint
@@ -318,6 +350,24 @@ impl Backend {
         }
         if let Some(edits) = fmt_sel_edits {
             actions.push(code_action::format_action("Format Selection", &uri, edits));
+        }
+        if let Some(only) = params.context.only {
+            actions.retain(|action| {
+                let CodeActionOrCommand::CodeAction(action) = action else {
+                    return false;
+                };
+                action.kind.as_ref().is_some_and(|kind| {
+                    only.iter().any(|requested| {
+                        let requested = requested.as_str();
+                        requested.is_empty()
+                            || kind.as_str() == requested
+                            || kind
+                                .as_str()
+                                .strip_prefix(requested)
+                                .is_some_and(|suffix| suffix.starts_with('.'))
+                    })
+                })
+            });
         }
         Ok((!actions.is_empty()).then_some(actions))
     }
@@ -405,5 +455,54 @@ mod code_action_format_tests {
             "\"Format Document\" must appear in code actions when the doc is open and \
              the formatter produces a change; got: {actions:?}"
         );
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn requested_action_kinds_filter_by_hierarchy() {
+        let (service, _socket) = LspService::new(|client| {
+            Backend::with_backends(
+                client,
+                Box::new(NoLint),
+                Box::new(NoTypes),
+                Box::new(AlwaysAddsNewline),
+                Arc::new(ProjectStore::new()),
+            )
+        });
+        let backend = service.inner();
+        let uri = Url::parse("file:///action-kinds.m1scr").unwrap();
+        backend.docs.insert(
+            uri.clone(),
+            crate::document::Document::new("local apple = 1;\nresult = apple;\n".into(), 1),
+        );
+        for (only, titles) in [
+            (vec![CodeActionKind::REFACTOR], vec!["Inline local"]),
+            (vec![CodeActionKind::REFACTOR_INLINE], vec!["Inline local"]),
+            (vec![CodeActionKind::SOURCE], vec!["Format Document"]),
+            (vec![CodeActionKind::QUICKFIX], vec![]),
+            (vec![], vec![]),
+        ] {
+            let actions = backend
+                .code_action(CodeActionParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                    range: Range::new(Position::new(0, 7), Position::new(0, 7)),
+                    context: CodeActionContext {
+                        diagnostics: vec![],
+                        only: Some(only),
+                        trigger_kind: None,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                })
+                .await
+                .unwrap()
+                .unwrap_or_default();
+            let actual: Vec<_> = actions
+                .iter()
+                .map(|a| match a {
+                    CodeActionOrCommand::CodeAction(action) => action.title.as_str(),
+                    CodeActionOrCommand::Command(command) => command.title.as_str(),
+                })
+                .collect();
+            assert_eq!(actual, titles);
+        }
     }
 }

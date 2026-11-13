@@ -257,7 +257,7 @@ impl Backend {
         let result = tokio::task::block_in_place(|| {
             self.store.with_project(|p| {
                 p.map(|lp| {
-                    references::project_references(
+                    references::project_references_with_declarations(
                         &lp.project,
                         &lp.script_files,
                         &uri,
@@ -265,6 +265,7 @@ impl Backend {
                         byte,
                         enc,
                         &open_text,
+                        params.context.include_declaration,
                     )
                 })
             })
@@ -274,12 +275,13 @@ impl Backend {
         }
         // Project-less mode: single-file references.
         let cst = doc.parse();
-        Ok(references::references(
+        Ok(references::references_with_declarations(
             cst.root(),
             byte,
             uri.clone(),
             &doc.line_index,
             enc,
+            params.context.include_declaration,
         ))
     }
 
@@ -296,7 +298,7 @@ impl Backend {
         // Project-aware so a channel spelled two ways in one file highlights as one (#143).
         Ok(self.store.with_project(|p| {
             references::document_highlights_scoped(
-                p.map(|lp| &lp.project),
+                p.map(|lp| lp.project.as_ref()),
                 doc.file_name.as_deref(),
                 cst.root(),
                 byte,
@@ -319,5 +321,62 @@ impl Backend {
             &doc.line_index,
             doc.enc,
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower_lsp::LspService;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn references_honor_declaration_flag_in_both_project_modes() {
+        for project_mode in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (service, _socket) = LspService::new(Backend::new);
+            let backend = service.inner();
+            if project_mode {
+                std::fs::write(tmp.path().join("Project.m1prj"),
+                    r#"<Project><Component Classname="BuiltIn.GroupCompound" Name="Root"/></Project>"#).unwrap();
+                backend.store.discover_and_load(tmp.path()).unwrap();
+            }
+            let uri = Url::from_file_path(tmp.path().join("Test.m1scr")).unwrap();
+            // The initializer also reads count; only the declaration NAME is excluded.
+            let source = "local count = count;\ncount = count + 1;\n";
+            backend.docs.insert(
+                uri.clone(),
+                crate::document::Document::new(source.into(), 1),
+            );
+            for include_declaration in [false, true] {
+                let locations = backend
+                    .references_impl(ReferenceParams {
+                        text_document_position: TextDocumentPositionParams {
+                            text_document: TextDocumentIdentifier { uri: uri.clone() },
+                            position: Position::new(1, 0),
+                        },
+                        context: ReferenceContext {
+                            include_declaration,
+                        },
+                        work_done_progress_params: Default::default(),
+                        partial_result_params: Default::default(),
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let starts: Vec<_> = locations.iter().map(|l| l.range.start).collect();
+                let mut expected = vec![
+                    Position::new(0, 14),
+                    Position::new(1, 0),
+                    Position::new(1, 8),
+                ];
+                if include_declaration {
+                    expected.insert(0, Position::new(0, 6));
+                }
+                assert_eq!(
+                    starts, expected,
+                    "project={project_mode}, declaration={include_declaration}"
+                );
+            }
+        }
     }
 }

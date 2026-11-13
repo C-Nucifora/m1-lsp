@@ -11,7 +11,14 @@ use crate::line_index::{LineIndex, PositionEncoding};
 use std::sync::Arc;
 use tower_lsp::lsp_types::Range;
 
+static NEXT_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_revision() -> u64 {
+    NEXT_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct Document {
+    pub(crate) revision: u64,
     pub text: String,
     pub line_index: LineIndex,
     pub version: i32,
@@ -23,6 +30,7 @@ impl Document {
         let line_index = LineIndex::new(&text);
         let cst = Arc::new(m1_core::parse(&text));
         Self {
+            revision: next_revision(),
             text,
             line_index,
             version,
@@ -30,10 +38,16 @@ impl Document {
         }
     }
 
+    pub(crate) fn set_version(&mut self, version: i32) {
+        self.version = version;
+        self.revision = next_revision();
+    }
+
     /// Apply one `TextDocumentContentChangeEvent` worth of change. A ranged
     /// change splices the text and reparses incrementally; `range: None` is
     /// the full-replacement fallback (also what pre-incremental clients send).
     pub fn apply_change(&mut self, range: Option<Range>, new_text: &str, enc: PositionEncoding) {
+        self.revision = next_revision();
         let Some(range) = range else {
             self.text = new_text.to_string();
             self.line_index = LineIndex::new(&self.text);

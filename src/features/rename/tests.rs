@@ -149,6 +149,141 @@ fn changes_for(we: &WorkspaceEdit, ends_with: &str) -> Vec<TextEdit> {
 }
 
 #[test]
+fn rename_does_not_edit_a_nested_project() {
+    let (tmp, store) = setup();
+    let nested = tmp.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    std::fs::write(nested.join("Project.m1prj"), PRJ).unwrap();
+    let text = "local value = Engine.Threshold;\n";
+    let own = tmp.path().join("Engine.Update.m1scr");
+    std::fs::write(&own, text).unwrap();
+    std::fs::write(nested.join("Engine.Update.m1scr"), text).unwrap();
+    store.discover_and_load(tmp.path()).unwrap();
+    let uri = Url::from_file_path(&own).unwrap();
+    let cst = m1_core::parse(text);
+    let edit = store
+        .with_project(|project| {
+            execute(
+                cst.root(),
+                text.find("Threshold").unwrap(),
+                "Trip Point",
+                uri.clone(),
+                &LineIndex::new(text),
+                PositionEncoding::Utf16,
+                project,
+                Some("Engine.Update.m1scr"),
+                &|_| None,
+            )
+        })
+        .unwrap();
+    let changes = edit.changes.unwrap();
+    assert!(changes.contains_key(&uri));
+    assert_eq!(
+        changes.len(),
+        2,
+        "only the parent script and project declaration"
+    );
+    assert!(
+        changes
+            .keys()
+            .all(|uri| !uri.to_file_path().unwrap().starts_with(&nested))
+    );
+}
+
+#[test]
+fn rename_refuses_a_different_project_but_preserves_local_rename() {
+    let (tmp, store) = setup();
+    let nested = tmp.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    std::fs::write(nested.join("Project.m1prj"), PRJ).unwrap();
+    let text = "local value = Engine.Threshold;\n";
+    let uri = Url::from_file_path(nested.join("Engine.Update.m1scr")).unwrap();
+    let cst = m1_core::parse(text);
+    store.with_project(|loaded| {
+        let rename_at = |needle| {
+            execute(
+                cst.root(),
+                text.find(needle).unwrap(),
+                "Changed",
+                uri.clone(),
+                &LineIndex::new(text),
+                PositionEncoding::Utf16,
+                loaded,
+                Some("Engine.Update.m1scr"),
+                &|u| (u == &uri).then(|| text.to_string()),
+            )
+        };
+        assert!(
+            rename_at("Threshold").is_err(),
+            "nested symbol must not edit parent"
+        );
+        let local = rename_at("value").unwrap();
+        let changes = local.changes.unwrap();
+        assert_eq!(changes.len(), 1);
+        assert!(changes.contains_key(&uri));
+        let project_uri = Url::from_file_path(nested.join("Project.m1prj")).unwrap();
+        assert!(
+            execute_m1prj(
+                PRJ,
+                PRJ.find("Root.Engine.Threshold").unwrap() + 14,
+                "Changed",
+                project_uri,
+                PositionEncoding::Utf16,
+                loaded.unwrap(),
+                &|_| None,
+            )
+            .is_err(),
+            "nested XML must not rewrite parent scripts"
+        );
+    });
+}
+
+#[test]
+fn file_rename_ignores_a_different_project() {
+    let (tmp, store) = setup();
+    let nested = tmp.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    std::fs::write(nested.join("Project.m1prj"), PRJ).unwrap();
+    let result = file_rename_result(&store, &nested, "Engine.Update.m1scr", "Motor.Update.m1scr");
+    assert!(
+        matches!(result, Ok(None)),
+        "unowned file rename: {result:?}"
+    );
+}
+
+#[test]
+fn rename_refuses_stale_project_membership() {
+    let (tmp, store) = setup();
+    let nested = tmp.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let text = "local value = Engine.Threshold;\n";
+    let own = tmp.path().join("Engine.Update.m1scr");
+    std::fs::write(&own, text).unwrap();
+    std::fs::write(nested.join("Other.Update.m1scr"), text).unwrap();
+    store.discover_and_load(tmp.path()).unwrap();
+    // The marker appears before the filesystem notification reaches the server.
+    std::fs::write(nested.join("Project.m1prj"), PRJ).unwrap();
+    let cst = m1_core::parse(text);
+    store.with_project(|loaded| {
+        assert!(
+            execute(
+                cst.root(),
+                text.find("Threshold").unwrap(),
+                "Changed",
+                Url::from_file_path(&own).unwrap(),
+                &LineIndex::new(text),
+                PositionEncoding::Utf16,
+                loaded,
+                Some("Engine.Update.m1scr"),
+                &|_| None,
+            )
+            .is_err(),
+            "stale membership must not produce a partial rename"
+        );
+    });
+}
+
+#[test]
 fn renames_project_leaf_across_scripts_and_m1prj() {
     let (tmp, store) = setup();
     // Owner Root.Engine.Update -> group Root.Engine (derived from filename).
@@ -324,7 +459,6 @@ fn rename_from_reference_also_rewrites_definition_and_m1prj() {
 #[test]
 fn refuses_compound_with_children() {
     let (tmp, store) = setup();
-    let _ = &tmp;
     // `Root.Engine.Speed` is a channel that has a `.Value` child -> a rename
     // would have to cascade, so it is refused.
     let src = "Engine.Speed = 1.0;\n";
@@ -337,7 +471,7 @@ fn refuses_compound_with_children() {
             cst.root(),
             byte,
             "Motor",
-            url(),
+            Url::from_file_path(tmp.path().join("Engine.Update.m1scr")).unwrap(),
             &li,
             PositionEncoding::Utf16,
             p,
@@ -375,7 +509,7 @@ fn refuses_name_collision() {
             cst.root(),
             byte,
             "Limit",
-            url(),
+            Url::from_file_path(tmp.path().join("Engine.Update.m1scr")).unwrap(),
             &li,
             PositionEncoding::Utf16,
             p,
@@ -395,7 +529,7 @@ fn prepare_offers_leaf_for_project_symbol_rejects_group() {
     let li = LineIndex::new(src);
     let enc = PositionEncoding::Utf16;
     store.with_project(|p| {
-        let project = p.map(|lp| &lp.project);
+        let project = p.map(|lp| lp.project.as_ref());
         // On the leaf -> Some range; on the group segment -> None.
         let on_leaf = prepare(
             cst.root(),
@@ -1065,7 +1199,7 @@ fn prepare_offers_group_segment() {
     let li = LineIndex::new(src);
     let enc = PositionEncoding::Utf16;
     store.with_project(|p| {
-        let project = p.map(|lp| &lp.project);
+        let project = p.map(|lp| lp.project.as_ref());
         // Cursor on `Engine` (the group segment) → offered.
         let on_group = prepare(
             cst.root(),
@@ -1125,7 +1259,7 @@ fn prepare_m1prj_offers_leaf_rejects_compound() {
     let (tmp, store) = setup();
     let _ = tmp;
     store.with_project(|p| {
-        let project = p.map(|lp| &lp.project);
+        let project = p.map(|lp| lp.project.as_ref());
         // On the leaf parameter declaration -> a range.
         let leaf = PRJ.find("Root.Engine.Threshold").unwrap() + 5;
         assert!(
@@ -1296,6 +1430,77 @@ fn file_rename_of_an_unrelated_file_is_a_no_op() {
 }
 
 #[test]
+fn file_moves_across_project_boundaries_do_not_rewrite_mappings() {
+    let (tmp, store) = setup();
+    let sibling = tempfile::tempdir().unwrap();
+    std::fs::write(sibling.path().join("Project.m1prj"), PRJ).unwrap();
+    let nested = tmp.path().join("nested");
+    let ordinary = tmp.path().join("ordinary");
+    std::fs::create_dir(&nested).unwrap();
+    std::fs::create_dir(&ordinary).unwrap();
+    std::fs::write(nested.join("Project.m1prj"), PRJ).unwrap();
+    let explicit = PRJ.replace(
+        "Name=\"Root.Engine.Update\"/>",
+        "Name=\"Root.Engine.Update\" Filename=\"Custom.m1scr\"/>",
+    );
+    for (xml, old, renamed) in [
+        (PRJ, "Engine.Update.m1scr", "Motor.Update.m1scr"),
+        (explicit.as_str(), "Custom.m1scr", "Other.m1scr"),
+    ] {
+        std::fs::write(tmp.path().join("Project.m1prj"), xml).unwrap();
+        std::fs::write(tmp.path().join(old), "local value = 1;\n").unwrap();
+        store.discover_and_load(tmp.path()).unwrap();
+        for destination in [&nested, &sibling.path().to_path_buf()] {
+            for name in [old, renamed] {
+                let result = file_rename_result(
+                    &store,
+                    tmp.path(),
+                    old,
+                    destination.join(name).to_str().unwrap(),
+                );
+                assert!(
+                    result.is_err(),
+                    "cross-project move must warn without an edit: {result:?}"
+                );
+                assert!(result.unwrap_err().contains("another project"));
+            }
+        }
+        assert!(
+            file_rename_result(
+                &store,
+                tmp.path(),
+                old,
+                ordinary.join(old).to_str().unwrap(),
+            )
+            .unwrap()
+            .is_none(),
+            "same-project move preserves basename mapping"
+        );
+        assert!(
+            file_rename_result(
+                &store,
+                tmp.path(),
+                old,
+                ordinary.join(renamed).to_str().unwrap(),
+            )
+            .unwrap()
+            .is_some(),
+            "same-project rename still updates mapping"
+        );
+    }
+    assert!(
+        file_rename_result(
+            &store,
+            tmp.path(),
+            "Unrelated.m1scr",
+            nested.join("Other.m1scr").to_str().unwrap(),
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[test]
 fn file_move_keeping_the_basename_is_a_no_op() {
     let (tmp, store) = setup();
     std::fs::write(tmp.path().join("Engine.Update.m1scr"), "local a = 1;\n").unwrap();
@@ -1315,4 +1520,62 @@ fn file_move_keeping_the_basename_is_a_no_op() {
         })
         .expect("no error");
     assert!(r.is_none(), "basename unchanged -> mapping intact");
+}
+
+#[test]
+fn local_rename_rejects_keywords_and_collisions_at_both_entry_points() {
+    let src = "local apple = 1;\nlocal banana = 2;\napple = banana;\n";
+    let cst = m1_core::parse(src);
+    let li = LineIndex::new(src);
+    let byte = src.find("apple").unwrap();
+    for name in ["if", "local", "true", "Bad and Name", "banana"] {
+        assert!(
+            execute(
+                cst.root(),
+                byte,
+                name,
+                url(),
+                &li,
+                PositionEncoding::Utf16,
+                None,
+                None,
+                &|_| None
+            )
+            .is_err(),
+            "{name}"
+        );
+        assert!(
+            local_rename_edits(cst.root(), byte, name, &li, PositionEncoding::Utf16).is_none(),
+            "{name}"
+        );
+    }
+    for name in ["apple", "Brake Force"] {
+        assert!(
+            local_rename_edits(cst.root(), byte, name, &li, PositionEncoding::Utf16).is_some(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn local_rename_does_not_capture_an_existing_nonlocal_reference() {
+    let src = "local apple = 1;\nresult = banana + apple;\n";
+    let cst = m1_core::parse(src);
+    let li = LineIndex::new(src);
+    let byte = src.find("apple").unwrap();
+    assert!(local_rename_edits(cst.root(), byte, "banana", &li, PositionEncoding::Utf16).is_none());
+    assert!(
+        execute(
+            cst.root(),
+            byte,
+            "banana",
+            url(),
+            &li,
+            PositionEncoding::Utf16,
+            None,
+            None,
+            &|_| None
+        )
+        .is_err()
+    );
 }

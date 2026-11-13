@@ -5,7 +5,7 @@
 use crate::convert::range;
 use crate::features::locate::{build_scope, path_at_byte};
 use crate::line_index::{LineIndex, PositionEncoding};
-use crate::project_store::{LoadedProject, contained_join};
+use crate::project_store::LoadedProject;
 use m1_core::Kind;
 use m1_typecheck::resolve::{Resolution, resolve};
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
@@ -28,19 +28,7 @@ pub fn goto(
         // table. Jump to its `<Type>` / `<Enum>` line (#142).
         return goto_enum(root, byte, loaded);
     };
-    let (target, line) = match &sym.filename {
-        // Script/DBC-backed: open the body file at its start. The Filename comes
-        // from the (untrusted) .m1prj, so reject any value that escapes the
-        // project root rather than open an out-of-tree file (#134).
-        Some(f) => (contained_join(&loaded.root, f)?, 0),
-        // Project object: jump to its declaration line in the .m1prj (#31).
-        None => (loaded.m1prj_path.clone(), sym.def_line?),
-    };
-    let uri = Url::from_file_path(&target).ok()?;
-    Some(Location {
-        uri,
-        range: Range::new(Position::new(line, 0), Position::new(line, 0)),
-    })
+    loaded.symbol_location(sym)
 }
 
 /// textDocument/typeDefinition: from an enum-typed channel/parameter, jump to the
@@ -182,7 +170,7 @@ pub fn goto_local(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_store::ProjectStore;
+    use crate::project_store::{ProjectStore, contained_join};
     use std::io::Write;
 
     const M1PRJ: &str = r#"<?xml version="1.0"?>
@@ -415,6 +403,88 @@ mod tests {
                 goto(cst.root(), 0, p.unwrap(), Some("Caller.m1scr")).is_none(),
                 "an absolute .m1prj Filename must not produce a goto Location"
             );
+        });
+    }
+    #[test]
+    fn definition_locations_find_conventional_scripts() {
+        for (class, relative) in [
+            ("FuncUser", "Demo.Do Thing.m1scr"),
+            ("FuncUser", "Scripts/Demo.Do Thing.m1scr"),
+            ("MethodUser", "Scripts/nested/Demo.Do Thing.m1scr"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let prj = tmp.path().join("Project.m1prj");
+            std::fs::write(
+                &prj,
+                format!(
+                    r#"<Project>
+<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.GroupCompound" Name="Root.Demo"/>
+<Component Classname="BuiltIn.{class}" Name="Root.Demo.Do Thing"/>
+</Project>"#
+                ),
+            )
+            .unwrap();
+            let script = tmp.path().join(relative);
+            std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+            std::fs::write(&script, "local value = 1;\n").unwrap();
+            let store = ProjectStore::new();
+            store.discover_and_load(tmp.path()).unwrap();
+            store.with_project(|p| {
+                let lp = p.unwrap();
+                let sym = lp.project.symbols().get("Root.Demo.Do Thing").unwrap();
+                let shared = lp.symbol_location(sym).unwrap();
+                assert_eq!(shared.uri.to_file_path().unwrap(), script);
+                assert_eq!(shared.range.start, Position::new(0, 0));
+                let cst = m1_core::parse("Demo.Do Thing();\n");
+                assert_eq!(goto(cst.root(), 0, lp, Some("Caller.m1scr")), Some(shared));
+            });
+        }
+    }
+
+    #[test]
+    fn missing_conventional_script_keeps_xml_definition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        std::fs::write(&prj, M1PRJ.replace(" Filename=\"Do Thing.m1scr\"", "")).unwrap();
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+        store.with_project(|p| {
+            let lp = p.unwrap();
+            let sym = lp.project.symbols().get("Root.Do Thing").unwrap();
+            let loc = lp.symbol_location(sym).unwrap();
+            assert_eq!(loc.uri.to_file_path().unwrap(), prj);
+            assert_eq!(loc.range.start.line, 3);
+        });
+    }
+    #[test]
+    fn definition_locations_do_not_guess_ambiguous_files_or_channel_scripts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prj = tmp.path().join("Project.m1prj");
+        std::fs::write(
+            &prj,
+            r#"<Project>
+<Component Classname="BuiltIn.GroupCompound" Name="Root"/>
+<Component Classname="BuiltIn.FuncUser" Name="Root.Run"/>
+<Component Classname="BuiltIn.Channel" Name="Root.Speed"><Props Type="f32"/></Component>
+</Project>"#,
+        )
+        .unwrap();
+        for name in ["Run.m1scr", "nested/Run.m1scr", "Speed.m1scr"] {
+            let path = tmp.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "local x = 1;\n").unwrap();
+        }
+        let store = ProjectStore::new();
+        store.discover_and_load(tmp.path()).unwrap();
+        store.with_project(|p| {
+            let lp = p.unwrap();
+            for (name, line) in [("Root.Run", 2), ("Root.Speed", 3)] {
+                let sym = lp.project.symbols().get(name).unwrap();
+                let loc = lp.symbol_location(sym).unwrap();
+                assert_eq!(loc.uri.to_file_path().unwrap(), prj);
+                assert_eq!(loc.range.start.line, line);
+            }
         });
     }
 }

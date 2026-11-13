@@ -15,6 +15,8 @@ use crate::line_index::PositionEncoding;
 /// cursor-position handler repeated. The CST is parsed by the caller via
 /// [`DocContext::parse`] — a `Node` borrows the tree, which must outlive the borrow.
 pub(super) struct DocContext {
+    pub(super) revision: u64,
+    pub(super) version: i32,
     /// The document text, shared with `line_index` (a pointer clone of the
     /// same buffer, #344) — previously a second full `String` copy per request.
     pub(super) text: std::sync::Arc<str>,
@@ -57,6 +59,8 @@ impl Backend {
     pub(super) fn doc_context(&self, uri: &Url) -> Option<DocContext> {
         let doc = self.docs.get(uri)?;
         Some(DocContext {
+            revision: doc.revision,
+            version: doc.version,
             // The index was built from exactly this document's text, so share
             // its buffer instead of copying the `String` again (#344).
             text: doc.line_index.shared_text(),

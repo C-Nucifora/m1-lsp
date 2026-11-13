@@ -35,7 +35,7 @@ fn hover_shows_channel_kind() {
         let h = hover::hover(
             cst.root(),
             0,
-            p.map(|lp| &lp.project),
+            p.map(|lp| lp.project.as_ref()),
             Some("X.m1scr"),
             &li,
             PositionEncoding::Utf16,
