@@ -304,9 +304,20 @@ mod tests {
     /// the resulting [`LoadedProject`] — the same path the backend uses, so the
     /// engine sees exactly the `m1prj`/`m1cfg` the store discovered.
     fn with_mini<R>(f: impl FnOnce(&LoadedProject) -> R) -> R {
+        // Each case owns its scenario files. Sharing the source fixture lets
+        // one case remove a scenario while another engine enumerates it.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("Scripts")).unwrap();
+        for relative in [
+            "Project.m1prj",
+            "parameters.m1cfg",
+            "Scripts/Demo.Update.m1scr",
+        ] {
+            std::fs::copy(mini_dir().join(relative), tmp.path().join(relative)).unwrap();
+        }
         let store = ProjectStore::new();
         assert!(
-            store.discover_and_load(&mini_dir()).unwrap(),
+            store.discover_and_load(tmp.path()).unwrap(),
             "mini fixture must load"
         );
         store.with_project(|p| f(p.expect("mini project loaded")))
@@ -404,8 +415,6 @@ mod tests {
                 out.provenance
             );
             assert!(out.trace.channels.contains_key("Root.Demo.Output"));
-            // Tidy up the fixture dir we wrote into.
-            let _ = std::fs::remove_file(lp.root.join("idle.toml"));
         });
     }
 

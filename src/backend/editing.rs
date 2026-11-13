@@ -1,6 +1,6 @@
 //! Mutating / assist handlers: document + range + on-type formatting, completion
 //! (list + resolve), signature help, the rename family (prepare / rename /
-//! will-rename-files, with the post-rename project refresh), and code actions
+//! will-rename-files), and code actions
 //! (quick-fixes, fix-all, refactors, format actions).
 use tower_lsp::jsonrpc::{Error, Result};
 use tower_lsp::lsp_types::*;

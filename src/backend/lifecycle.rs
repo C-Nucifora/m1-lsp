@@ -532,14 +532,12 @@ impl Backend {
             return None;
         }
         let dir = uri.to_file_path().ok()?.parent()?.to_path_buf();
+        self.apply_config(&dir);
         match self.store.discover_and_load(&dir) {
-            Ok(true) => {
-                self.apply_config(&dir);
-                Some((
-                    MessageType::INFO,
-                    "m1-lsp: project loaded (didOpen fallback)".into(),
-                ))
-            }
+            Ok(true) => Some((
+                MessageType::INFO,
+                "m1-lsp: project loaded (didOpen fallback)".into(),
+            )),
             Ok(false) => None,
             Err(e) => Some((
                 MessageType::WARNING,

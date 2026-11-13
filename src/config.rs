@@ -200,6 +200,9 @@ fn apply_fmt_file(fc: m1_fmt::config::FileConfig, fmt: &mut FormatOptions) {
     if let Some(b) = fc.align_assignments {
         fmt.align_assignments = b;
     }
+    if let Some(b) = fc.align_conditions {
+        fmt.align_conditions = b;
+    }
     if let Some(b) = fc.reflow_comments {
         fmt.reflow_comments = b;
     }
@@ -296,6 +299,9 @@ fn apply(tc: M1ToolsConfig, cfg: &mut M1Config, issues: &mut Vec<String>) {
     if let Some(b) = tc.format.align_assignments {
         cfg.format.align_assignments = b;
     }
+    if let Some(b) = tc.format.align_conditions {
+        cfg.format.align_conditions = b;
+    }
     if let Some(b) = tc.format.reflow_comments {
         cfg.format.reflow_comments = b;
     }
@@ -388,6 +394,11 @@ pub fn scaffold() -> String {
         s,
         "align_assignments = {}  # align `=` of contiguous simple assignments (opt-in)",
         fmt.align_assignments
+    );
+    let _ = writeln!(
+        s,
+        "align_conditions = {}   # align wrapped condition operands (opt-in)",
+        fmt.align_conditions
     );
     let _ = writeln!(
         s,
@@ -571,6 +582,7 @@ mod tests {
         // #277: the full formatter-knob surface is documented too.
         assert!(toml.contains("continuation_indent"));
         assert!(toml.contains("align_assignments"));
+        assert!(toml.contains("align_conditions"));
         assert!(toml.contains("reflow_comments"));
         assert!(toml.contains("final_blank_line"));
     }
@@ -613,6 +625,37 @@ mod tests {
             cfg.format.line_width, 100,
             "unset tool-file keys fall through"
         );
+    }
+
+    #[test]
+    fn condition_alignment_layers_editor_workspace_and_tool_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("Scripts");
+        std::fs::create_dir(&nested).unwrap();
+        let editor = serde_json::json!({"format": {"align_conditions": true}});
+        let resolve = || M1Config::resolve_with_issues(Some(&editor), &nested);
+        let (cfg, issues) = resolve();
+        assert!(issues.is_empty(), "{issues:?}");
+        assert!(cfg.format.align_conditions);
+
+        std::fs::write(
+            tmp.path().join("m1-tools.toml"),
+            "[format]\nalign_conditions = false\nline_width = 90\n",
+        )
+        .unwrap();
+        let (cfg, issues) = resolve();
+        assert!(issues.is_empty(), "{issues:?}");
+        assert!(!cfg.format.align_conditions);
+
+        std::fs::write(tmp.path().join(".m1fmt.toml"), "align_conditions = true\n").unwrap();
+        let (cfg, issues) = resolve();
+        assert!(issues.is_empty(), "{issues:?}");
+        assert!(cfg.format.align_conditions);
+        assert_eq!(cfg.format.line_width, 90);
+
+        std::fs::write(tmp.path().join(".m1fmt.toml"), "align_conditions = false\n").unwrap();
+        assert!(!resolve().0.format.align_conditions);
+        assert!(!M1Config::default().format.align_conditions);
     }
 
     #[test]
