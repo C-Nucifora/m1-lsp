@@ -599,3 +599,44 @@ fn refreshes_resume_after_optional_request_saturation() {
         }
     }
 }
+
+#[test]
+fn rename_rejects_closed_or_reopened_source_while_progress_is_pending() {
+    for reopen in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let uri = tower_lsp::lsp_types::Url::from_file_path(tmp.path().join("Test.m1scr")).unwrap();
+        let mut client = Client::new(
+            json!({"window":{"workDoneProgress":true},"textDocument":{"diagnostic":{}}}),
+        );
+        client.open(uri.as_str(), "local old = 1;\nold = 2;\n");
+        client.request(
+            "textDocument/documentSymbol",
+            json!({"textDocument":{"uri":uri}}),
+        );
+        let id = 900;
+        client.send(json!({"jsonrpc":"2.0","id":id,"method":"textDocument/rename","params":{"textDocument":{"uri":uri},"position":{"line":0,"character":7},"newName":"changed"}}));
+        let progress = loop {
+            let msg = client.output.recv_timeout(Duration::from_secs(5)).unwrap();
+            if msg["method"] == "window/workDoneProgress/create" {
+                break msg;
+            }
+        };
+        client.notify("textDocument/didClose", json!({"textDocument":{"uri":uri}}));
+        if reopen {
+            client.open(uri.as_str(), "local fresh = 3;\n");
+        }
+        // Query completion proves close and reopen committed before releasing rename.
+        client.request(
+            "textDocument/documentSymbol",
+            json!({"textDocument":{"uri":uri}}),
+        );
+        client.send(json!({"jsonrpc":"2.0","id":progress["id"],"result":null}));
+        loop {
+            let msg = client.output.recv_timeout(Duration::from_secs(5)).unwrap();
+            if msg["id"] == id {
+                assert_eq!(msg["error"]["code"], -32801, "{msg}");
+                break;
+            }
+        }
+    }
+}

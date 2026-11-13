@@ -193,12 +193,21 @@ impl Backend {
     }
 
     pub(super) async fn rename_impl(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let state = self.state.lock().await;
+        let environment = state.environment;
+        let membership = state.membership;
+        let revisions: Vec<_> = self
+            .docs
+            .iter()
+            .map(|d| (d.key().clone(), d.revision))
+            .collect();
         let new_name = params.new_name;
         let tdp = params.text_document_position;
         let uri = tdp.text_document.uri;
         let Some(doc) = self.doc_context(&uri) else {
             return Ok(None);
         };
+        drop(state);
         let byte = doc.byte(tdp.position);
         let enc = doc.enc;
         // Open buffers win over on-disk copies so an in-flight edit is seen.
@@ -244,6 +253,16 @@ impl Backend {
             })
         };
         self.progress_end(progress).await;
+        let state = self.state.lock().await;
+        // Progress round trips and project reads can outlive any contributing buffer.
+        if state.environment != environment
+            || state.membership != membership
+            || revisions
+                .iter()
+                .any(|(uri, revision)| self.docs.get(uri).map(|d| d.revision) != Some(*revision))
+        {
+            return Err(Error::content_modified());
+        }
         // An Err is surfaced to the user (Ok(None) would make the client
         // silently do nothing); a successful edit may span several files.
         match result {
